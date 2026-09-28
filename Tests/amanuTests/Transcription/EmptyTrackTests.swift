@@ -52,6 +52,39 @@ struct EmptyTrackTests {
         #expect(PostProcessor.readTranscript(dir)?.segments.map(\.speaker) == ["them"])
     }
 
+    /// The microphone can fall back to raw capture and leave no mic.caf at
+    /// all. The per-track path threw for it, so a local engine counted the
+    /// session three times, retired it, and never transcribed the far end.
+    @Test("A track that is not on disk is a silent side, not a failure")
+    func missingTrackIsSilent() async throws {
+        let recordings = try TestRecordings()
+        defer { recordings.remove() }
+        let dir = try recordings.session("2026-09-28-a")
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("mic.caf"))
+        let engine = Self.strictLocalEngine()
+
+        try await TranscriptionCoordinator(engine: engine, onStop: { nil }).transcribeNow(dir)
+
+        #expect(PostProcessor.readTranscript(dir)?.segments.map(\.speaker) == ["them"])
+        #expect(engine.counts.heard.map(\.lastPathComponent) == ["system.caf"])
+        #expect(SessionState.value(dir, SessionState.Key.transcriptionAttempts) == nil)
+    }
+
+    @Test("With every track gone there is no recording, and that is still an error")
+    func everyTrackMissingIsAnError() async throws {
+        let recordings = try TestRecordings()
+        defer { recordings.remove() }
+        let dir = try recordings.session("2026-09-28-a")
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("mic.caf"))
+        try Self.emptyTrack(dir.appendingPathComponent("system.caf"))
+        let engine = Self.strictLocalEngine()
+
+        await #expect(throws: CocoaError.self) {
+            try await TranscriptionCoordinator(engine: engine, onStop: { nil }).transcribeNow(dir)
+        }
+        #expect(engine.counts.heard.isEmpty)
+    }
+
     @Test("Unreadable audio is permanent in every local engine")
     func unreadableIsPermanentEverywhere() {
         let url = URL(fileURLWithPath: "/tmp/broken.caf")

@@ -97,9 +97,36 @@ struct TranscriptionInputs {
     /// One pass per track, speaker taken from the track itself.
     func perTrack() async throws -> [Transcript.Segment] {
         let dir = audio
+        // A track of its own that is not on disk at all is a silent side as
+        // much as an empty one is: the microphone can fall back to raw
+        // capture and leave no mic.caf behind, and the mixer and the
+        // archiver already read a missing track as silence. Only when no
+        // side has any audio is the recording itself gone. A channel of a
+        // shared archive is different: the archive missing is the whole
+        // recording missing, and says so below.
+        let missing = meta.tracks.filter {
+            $0.channel == nil
+                && !FileManager.default.fileExists(atPath: dir.appendingPathComponent($0.file).path)
+        }
+        let heard = meta.tracks.contains { track in
+            let url = dir.appendingPathComponent(track.file)
+            return FileManager.default.fileExists(atPath: url.path)
+                && (track.channel != nil || !Self.holdsNoAudio(url))
+        }
+        if let gone = missing.first, !heard {
+            throw CocoaError(.fileReadNoSuchFile, userInfo: [
+                NSFilePathErrorKey: dir.appendingPathComponent(gone.file).path,
+            ])
+        }
+
         var merged: [Transcript.Segment] = []
         for track in meta.tracks {
             let storedAudio = dir.appendingPathComponent(track.file)
+            if track.channel == nil, missing.contains(where: { $0.file == track.file }) {
+                log("\(track.file) is not in the folder — \(track.speaker) is silent in this "
+                    + "recording")
+                continue
+            }
             guard FileManager.default.fileExists(atPath: storedAudio.path) else {
                 throw CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: storedAudio.path])
             }
