@@ -171,15 +171,9 @@ enum PostProcessor {
     @discardableResult
     static func sweep(root: URL) async -> Int {
         guard Config.unreadableReason == nil else { return 0 }
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: nil
-        ) else { return 0 }
 
         var finished = 0
-        for dir in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-            guard FileManager.default.fileExists(
-                atPath: dir.appendingPathComponent("meta.json").path
-            ) else { continue }
+        for dir in SessionInventory.sessionFolders(in: root) {
             let work = await finish(dir)
             if !work.isEmpty { finished += 1 }
             StopHook.fireIfOwed(dir)

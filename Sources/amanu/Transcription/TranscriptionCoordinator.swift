@@ -125,20 +125,14 @@ actor TranscriptionCoordinator {
     /// queueing so the answer can be checked without a coordinator running a
     /// drain over real audio.
     static func pendingSessions(in root: URL) -> [URL] {
-        // Hidden folders are never sessions. The importer stages a file in
-        // `.import-<uuid>` and writes its meta.json there before moving the
-        // folder into place, so without this a half-finished import could be
-        // transcribed from its staging directory, and then again once it had
-        // arrived.
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
-        ) else { return [] }
-
+        // Through the one list of sessions, which leaves out the importer's
+        // hidden staging folders: without that a half-finished import could
+        // be transcribed from its staging directory, and then again once it
+        // had arrived.
         let fm = FileManager.default
-        return entries
+        return SessionInventory.sessionFolders(in: root)
             .filter {
-                fm.fileExists(atPath: $0.appendingPathComponent("meta.json").path)
-                    && !fm.fileExists(atPath: $0.appendingPathComponent("transcript.json").path)
+                !fm.fileExists(atPath: $0.appendingPathComponent("transcript.json").path)
                     && !TranscriptionFailurePolicy.hasGivenUp(on: $0)
                     // A session another process is already transcribing is not
                     // pending, it is in progress somewhere else. Queueing it
@@ -147,7 +141,6 @@ actor TranscriptionCoordinator {
                     // its own backlog.
                     && !SessionClaim.isHeld($0)
             }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
     // MARK: -

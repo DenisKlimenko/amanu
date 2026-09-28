@@ -53,6 +53,39 @@ struct SessionInventoryTests {
         return dir
     }
 
+    /// The importer stages in a hidden folder with a meta.json already in
+    /// it. The queue left those alone; the list and the sweep did not, so a
+    /// half-finished import was listed and could be summarized from its
+    /// staging directory.
+    @Test("Hidden folders are not sessions to the list, the queue or the sweep")
+    func hiddenFoldersAreNotSessions() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-root-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for name in ["2026-09-28 10-00", ".import-1234"] {
+            let made = try Self.session()
+            try FileManager.default.moveItem(at: made, to: root.appendingPathComponent(name))
+        }
+
+        #expect(SessionInventory.scan(root: root).map(\.name) == ["2026-09-28 10-00"])
+        #expect(SessionInventory.sessionFolders(in: root).map(\.lastPathComponent)
+            == ["2026-09-28 10-00"])
+
+        let model = FakeModel.working("claude-cli")
+        let home = Home.withModels([model])
+        defer { try? FileManager.default.removeItem(at: home.url) }
+        try home.writeConfig(["user_name": "Самат"])
+        await Home.$scoped.withValue(home) { await PostProcessor.sweep(root: root) }
+
+        let staged = root.appendingPathComponent(".import-1234")
+        #expect(!FileManager.default.fileExists(
+            atPath: staged.appendingPathComponent("summary.md").path),
+            "the sweep summarized a staging folder")
+        #expect(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("2026-09-28 10-00/summary.md").path))
+    }
+
     @Test("A session with everything done has nothing outstanding")
     func finishedSessionIsQuiet() throws {
         let dir = try Self.session(speakers: true, summary: true)

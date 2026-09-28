@@ -104,17 +104,30 @@ enum SessionInventory {
     /// Every session under `root`, newest first — which is the order a person
     /// looking for "the meeting I just had" wants.
     static func scan(root: URL) -> [Item] {
+        sessionFolders(in: root).reversed().compactMap(item(for:))
+    }
+
+    /// The folders under `root` that are sessions, oldest first — folder
+    /// names sort chronologically.
+    ///
+    /// The one answer to that question for every reader of the folder: the
+    /// list, the transcription queue and the sweep. Hidden folders are never
+    /// sessions. The importer stages a file in `.import-<uuid>` and writes
+    /// its meta.json there before moving the folder into place, and the
+    /// queue skipped those while the list and the sweep did not — so a
+    /// half-finished import was shown, and could be named and summarized
+    /// from its staging directory.
+    static func sessionFolders(in root: URL) -> [URL] {
         guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: nil
+            at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
         ) else { return [] }
         return entries
             .filter {
-                FileManager.default.fileExists(
-                    atPath: $0.appendingPathComponent("meta.json").path
-                )
+                !$0.lastPathComponent.hasPrefix(".")
+                    && FileManager.default.fileExists(
+                        atPath: $0.appendingPathComponent("meta.json").path)
             }
-            .sorted { $0.lastPathComponent > $1.lastPathComponent }
-            .compactMap(item(for:))
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
     static func item(for dir: URL) -> Item? {
