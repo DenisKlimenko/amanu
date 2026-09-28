@@ -228,6 +228,22 @@ struct CloudHTTPTests {
         #expect(fixture.jobFiles.count == 1)
     }
 
+    /// A file AVFoundation could not open used to be taken for mono: the
+    /// upload went ahead without `multichannel`, and the labels that came
+    /// back were bare letters with no side in them.
+    @Test("Audio that cannot be opened is refused before anything is uploaded")
+    func unreadableAudioIsNotGuessedMono() async throws {
+        let fixture = try Fixture()
+        let notAudio = fixture.dir.appendingPathComponent("multichannel.m4a")
+        try Data("not audio at all".utf8).write(to: notAudio)
+        let stub = StubHTTP { request, _ in Fixture.happyPath(request) }
+
+        await #expect(throws: (any Error).self) {
+            try await fixture.engine(stub).transcribe(notAudio)
+        }
+        #expect(stub.requests.isEmpty)
+    }
+
     @Test("A completed response is reused without a single request")
     func cacheIsReused() async throws {
         let fixture = try Fixture()

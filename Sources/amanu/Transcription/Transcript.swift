@@ -71,7 +71,7 @@ struct Transcript: Codable {
             lines.append("speakers: " + named.joined(separator: ", "))
         }
         lines.append("")
-        if engine == "assemblyai" {
+        if Self.formatsTurns(engine) {
             for paragraph in paragraphs(names: names) {
                 lines.append("**[\(Self.clock(paragraph.start_ms))] \(paragraph.speaker):** \(paragraph.text)")
                 lines.append("")
@@ -84,6 +84,13 @@ struct Transcript: Codable {
             }
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// The engines whose diarized output is shaped into turns for reading:
+    /// both can return a short utterance for every few words, and both keep
+    /// those timestamps in transcript.json untouched.
+    static func formatsTurns(_ engine: String) -> Bool {
+        engine == "assemblyai" || engine == "elevenlabs"
     }
 
     /// AssemblyAI can return one diarized utterance per word. Keep those

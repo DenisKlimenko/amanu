@@ -133,8 +133,22 @@ actor ElevenLabsEngine: TranscriptionEngine {
         let words: [Word]
     }
 
-    /// Assemble word timestamps into short turns. Prefix speaker labels from
-    /// stereo tracks with their one-based channel number for the coordinator.
+    /// Assemble word timestamps into turns — runs of one speaker's words
+    /// with no one else's in between — and label them the way the other
+    /// diarizing engines do.
+    ///
+    /// A turn ends where another voice begins, as AssemblyAI's utterances do.
+    /// This used to carry each speaker's turn across the other voices for up
+    /// to a second and a half, so the canonical transcript said one person
+    /// spoke straight through an interjection that happened in the middle of
+    /// their sentence. Merging a brief interruption away is a question of
+    /// presentation, and it is answered where AssemblyAI's is: in
+    /// transcript.md, from the timestamps kept here.
+    ///
+    /// Labels are letters, `A` for `speaker_0`, prefixed with the one-based
+    /// channel for stereo input, so the coordinator reads `1A` as `me A`
+    /// exactly as it does for AssemblyAI. A mono import used to keep
+    /// ElevenLabs' own `speaker_0`, where every other engine says `A`.
     static func segments(
         from response: Response, duration: TimeInterval, channel: Int?
     ) -> [TranscriptSegment] {
@@ -146,19 +160,15 @@ actor ElevenLabsEngine: TranscriptionEngine {
         }
 
         guard duration.isFinite, duration > 0 else { return [] }
-        var active: [String: Turn] = [:]
-        var completed: [Turn] = []
+        var turns: [Turn] = []
         var lastSpeaker: String?
         for word in response.words {
             guard word.start.isFinite, word.end.isFinite else { continue }
             let rawSpeaker = word.speaker_id ?? lastSpeaker ?? "speaker"
-            let speaker = channel.map {
-                String($0 + 1) + speakerSuffix(rawSpeaker)
-            } ?? rawSpeaker
+            let speaker = (channel.map { String($0 + 1) } ?? "") + label(rawSpeaker)
             if word.type == "spacing" {
-                if var turn = active[speaker] {
-                    turn.text += word.text
-                    active[speaker] = turn
+                if let last = turns.indices.last, turns[last].speaker == speaker {
+                    turns[last].text += word.text
                 }
                 continue
             }
@@ -167,37 +177,38 @@ actor ElevenLabsEngine: TranscriptionEngine {
             let end = min(duration, word.end)
             guard start < duration, end > start else { continue }
             lastSpeaker = rawSpeaker
-            if var turn = active[speaker], start - turn.end <= 1.5 {
-                turn.text += word.text
-                turn.end = max(turn.end, end)
-                active[speaker] = turn
+            if let last = turns.indices.last, turns[last].speaker == speaker,
+               start - turns[last].end <= 1.5 {
+                turns[last].text += word.text
+                turns[last].end = max(turns[last].end, end)
             } else {
-                if let previous = active.removeValue(forKey: speaker) {
-                    completed.append(previous)
-                }
-                active[speaker] = Turn(start: start, end: end, text: word.text, speaker: speaker)
+                turns.append(Turn(start: start, end: end, text: word.text, speaker: speaker))
             }
         }
-        completed += active.values
-        let segments: [TranscriptSegment] = completed.sorted { $0.start < $1.start }.compactMap { turn in
+        let segments: [TranscriptSegment] = turns.compactMap { turn in
             let text = turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return nil }
             return TranscriptSegment(
-                start: turn.start, end: turn.end, text: text, speaker: turn.speaker)
+                start: turn.start, end: turn.end, text: text,
+                speaker: turn.speaker.isEmpty ? nil : turn.speaker)
         }
         if !segments.isEmpty { return segments }
         let text = (response.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return [] }
         return [TranscriptSegment(
             start: 0, end: duration, text: text,
-            speaker: channel.map { String($0 + 1) } ?? "speaker")]
+            speaker: channel.map { String($0 + 1) })]
     }
 
-    private static func speakerSuffix(_ speaker: String) -> String {
+    /// `speaker_0` as `A`, `speaker_27` as `AB`; nothing at all for a word
+    /// the service gave no speaker; any other id as it came, with no space
+    /// in front of it — `MultichannelSpeakerLabels` puts the one space
+    /// between side and voice, and a second made `me  guest`.
+    private static func label(_ speaker: String) -> String {
         guard speaker.hasPrefix("speaker_"),
               let index = Int(speaker.dropFirst("speaker_".count)),
-              (0..<32).contains(index)
-        else { return speaker == "speaker" ? "" : " \(speaker)" }
+              (0..<52).contains(index)
+        else { return speaker == "speaker" ? "" : speaker }
         let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
         return index < 26 ? String(letters[index]) : "A\(letters[index - 26])"
     }

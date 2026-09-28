@@ -36,11 +36,11 @@ struct Sessions: ParsableCommand {
     }
 }
 
-/// Rebuild AssemblyAI Markdown from the canonical JSON without transcribing again.
+/// Rebuild diarized Markdown from the canonical JSON without transcribing again.
 struct FormatTranscripts: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "format-transcripts",
-        abstract: "Rebuild AssemblyAI transcript.md in existing recording folders."
+        abstract: "Rebuild AssemblyAI and ElevenLabs transcript.md in existing recording folders."
     )
 
     @Option(name: .long, help: "Recordings root directory (overrides the config file).")
@@ -69,7 +69,7 @@ struct FormatTranscripts: ParsableCommand {
             guard fileManager.fileExists(atPath: jsonURL.path) else { continue }
             let transcript = try JSONDecoder().decode(
                 Transcript.self, from: Data(contentsOf: jsonURL))
-            guard transcript.engine == "assemblyai" else { continue }
+            guard Transcript.formatsTurns(transcript.engine) else { continue }
             let markdownURL = dir.appendingPathComponent("transcript.md")
             let rendered = Data(transcript.rendered(
                 title: dir.lastPathComponent, names: SpeakerNames.read(from: dir)).utf8)
