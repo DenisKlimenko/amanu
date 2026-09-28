@@ -42,10 +42,29 @@ enum InterfaceLanguage: String, CaseIterable, Sendable {
     /// any Mac, in any country, because nothing in a test process ever sets
     /// this — the language of a window is a property of the program's start,
     /// not of the machine the suite happens to run on.
+    ///
+    /// A test that wants a window in Russian says so with `scoped`, never by
+    /// setting this. The setting is one value for the whole process, and the
+    /// suite runs in parallel: a window suite that switched it to Russian for
+    /// a moment used to be able to hand a Russian sentence to a test on
+    /// another thread that was checking for an English one. So in a test
+    /// process setting it is a programming error, and stops the run where it
+    /// happens rather than somewhere else, later, as a flake.
     static var current: InterfaceLanguage {
-        get { store.value }
-        set { store.value = newValue }
+        get { scoped ?? store.value }
+        set {
+            precondition(
+                !Home.runsInsideTests,
+                "a test changes the interface language with InterfaceLanguage.$scoped")
+            store.value = newValue
+        }
     }
+
+    /// The language for one task and everything it starts, over whatever the
+    /// process has settled on. Like any task-local it does not reach
+    /// `Task.detached` or a dispatch queue — which is fine for the suite that
+    /// uses it, because building a window is synchronous.
+    @TaskLocal static var scoped: InterfaceLanguage?
 
     /// Read the config and the Mac, and settle it. Called once, at startup.
     static func adoptFromSystem() {

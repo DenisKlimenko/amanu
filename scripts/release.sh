@@ -83,7 +83,8 @@ step "1/8  tests"
 python3 -m unittest discover -s Tests/scripts -p 'test_*.py'
 python3 landing/tests/check.py
 make verify-localvqe
-swift test --no-parallel 2>&1 | tail -3
+# Built just above, so the tests that use it must run rather than skip.
+AMANU_REQUIRE_LOCALVQE=1 swift test --no-parallel 2>&1 | tail -3
 
 step "2/8  building and signing $VERSION (build $BUILD)"
 make app

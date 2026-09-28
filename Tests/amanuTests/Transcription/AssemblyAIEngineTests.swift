@@ -65,10 +65,15 @@ struct AssemblyAIEngineTests {
 
     @Test("Multichannel responses never reuse a cache made from a mono mix")
     func multichannelCacheHasItsOwnName() {
-        let audio = URL(fileURLWithPath: "/tmp/meeting/multichannel.m4a")
-        let cache = AssemblyAIEngine.cacheURL(for: audio)
-        #expect(cache.lastPathComponent == "transcript.assemblyai.multichannel.json")
-        #expect(cache.lastPathComponent != "transcript.assemblyai.json")
+        let folder = URL(fileURLWithPath: "/tmp/meeting")
+        let cache = AssemblyAIEngine.cacheURL(
+            for: folder.appendingPathComponent("multichannel.m4a"))
+        // What a session transcribed from a mono mix, before multichannel,
+        // left behind — and what must never be read back as this one's answer.
+        let legacy = folder.appendingPathComponent("transcript.assemblyai.json")
+        #expect(cache.path != legacy.path)
+        // Beside the audio it was made from, so it goes wherever the session goes.
+        #expect(cache.deletingLastPathComponent().path == folder.path)
     }
 
     /// The server's verdict on a silent recording, verbatim from the call that

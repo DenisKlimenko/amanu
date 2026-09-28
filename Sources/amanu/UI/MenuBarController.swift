@@ -26,6 +26,9 @@ final class MenuBarController {
     private var elapsed: String?
     private let stateLabel: NSMenuItem
     private let transcriptionLabel: NSMenuItem
+    /// Says the config file cannot be used, and opens the settings window —
+    /// the one surface that names the file and offers to reveal it.
+    private let configProblemItem: NSMenuItem
     private let toggleItem: NSMenuItem
     private let pauseItem: NSMenuItem
     private let autoRecordItem: NSMenuItem
@@ -65,6 +68,11 @@ final class MenuBarController {
         transcriptionLabel.isEnabled = false
         transcriptionLabel.isHidden = true
         menu.addItem(transcriptionLabel)
+
+        configProblemItem = NSMenuItem(
+            title: "", action: #selector(showSettingsClicked), keyEquivalent: "")
+        configProblemItem.isHidden = true
+        menu.addItem(configProblemItem)
 
         menu.addItem(.separator())
 
@@ -183,6 +191,7 @@ final class MenuBarController {
         for item in [
             toggleItem, pauseItem, autoRecordItem, showWindow, openFolder,
             recordings, importItem, settings, setupItem, updatesItem, about, quit,
+            configProblemItem,
         ] {
             item.target = self
         }
@@ -317,6 +326,12 @@ final class MenuBarController {
 
     /// Reflect the auto-record switch and the reason behind its current
     /// decision.
+    /// The config file's problem in one line, or nil when it has none.
+    func updateConfigProblem(_ headline: String?) {
+        configProblemItem.title = headline.map { "⚠︎ " + $0 } ?? ""
+        configProblemItem.isHidden = headline == nil
+    }
+
     func updateAutoRecord(enabled: Bool, decision: String?) {
         autoRecordItem.state = enabled ? .on : .off
         autoRecordStatus.title = decision.map { "   \($0)" } ?? ""

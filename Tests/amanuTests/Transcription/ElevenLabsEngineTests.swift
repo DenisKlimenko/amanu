@@ -73,12 +73,13 @@ struct ElevenLabsEngineTests {
 
     @Test("Each channel has a separate response cache")
     func channelCachesAreDistinct() {
-        #expect(ElevenLabsEngine.cacheName(audio: "multichannel", channel: 0)
-            == "transcript.elevenlabs.multichannel.channel1.json")
-        #expect(ElevenLabsEngine.cacheName(audio: "multichannel", channel: 1)
-            == "transcript.elevenlabs.multichannel.channel2.json")
-        #expect(ElevenLabsEngine.cacheName(audio: "multichannel", channel: nil)
-            == "transcript.elevenlabs.multichannel.json")
+        let names = [
+            ElevenLabsEngine.cacheName(audio: "multichannel", channel: 0),
+            ElevenLabsEngine.cacheName(audio: "multichannel", channel: 1),
+            ElevenLabsEngine.cacheName(audio: "multichannel", channel: nil),
+            ElevenLabsEngine.cacheName(audio: "mixed", channel: nil),
+        ]
+        #expect(Set(names).count == names.count, "two requests would share a cache: \(names)")
     }
 
     @Test("The upload is multipart audio with Scribe's fields")

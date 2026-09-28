@@ -28,6 +28,7 @@ enum DoctorReport {
             // should do next: everything else describes how the next meeting
             // will go, this one says a meeting is being recorded now.
             checkLiveRecording(recordingsRoot),
+            checkConfig(),
             checkMicrophone(),
             checkSystemAudio(),
             checkRecordingsRoot(recordingsRoot),
@@ -93,6 +94,29 @@ enum DoctorReport {
         }
 
         return Check(name: "recording", status: .ok, remediation: nil)
+    }
+
+    /// The config file, when amanu is not doing what it says.
+    ///
+    /// A warning and not a failure even when the file cannot be read at all:
+    /// a failure stops startup, and recording is the one thing a broken config
+    /// must not be allowed to stop.
+    static func checkConfig() -> Check {
+        let problems = Config.problems()
+        guard !problems.isEmpty else { return Check(name: "config", status: .ok, remediation: nil) }
+        let path = Config.path.path
+        let unreadable = problems.contains {
+            if case .unreadable = $0 { return true }
+            return false
+        }
+        return Check(
+            name: "config",
+            status: .warn(problems.map(\.explanation).joined(separator: " ")),
+            remediation: unreadable
+                ? "fix \(path) by hand, or move it aside to start again from the defaults: "
+                    + "mv \(path) \(path).broken"
+                : "correct the values in \(path), or clear them in Settings"
+        )
     }
 
     /// Says out loud what amanu will do on its own, because the surprising

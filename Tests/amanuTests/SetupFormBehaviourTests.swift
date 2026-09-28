@@ -37,7 +37,7 @@ struct SetupFormBehaviourTests {
         form.parakeetIsHere = { false }
         form.fetchParakeet = {
             fetches += 1
-            await gate.wait()
+            await gate.pass()
         }
         form.refresh()
 
@@ -116,23 +116,5 @@ extension SetupFormBehaviourTests {
             pending.append(contentsOf: view.subviews)
         }
         return found
-    }
-}
-
-/// Something a test can hold a fake download on until it lets go.
-@MainActor
-final class Gate {
-    private var waiting: [CheckedContinuation<Void, Never>] = []
-    private var isOpen = false
-
-    func wait() async {
-        guard !isOpen else { return }
-        await withCheckedContinuation { waiting.append($0) }
-    }
-
-    func open() {
-        isOpen = true
-        waiting.forEach { $0.resume() }
-        waiting = []
     }
 }
