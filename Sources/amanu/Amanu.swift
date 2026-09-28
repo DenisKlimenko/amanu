@@ -500,6 +500,7 @@ final class AppController {
     private var configWatch: ConfigWatch.Token?
     private var recordRequestObserver: NSObjectProtocol?
     private var activateObserver: NSObjectProtocol?
+    private var sleepObserver: NSObjectProtocol?
     /// App Nap throttles timers, network and IPC for an app nobody is looking
     /// at — which is amanu's normal condition and exactly when it must not be
     /// slow. A recorder that answers a request three seconds late has already
@@ -598,6 +599,22 @@ final class AppController {
         }
         setupRequestObserver = SetupRequest.observe { [weak self] in self?.showSetup() }
         activateObserver = SingleInstance.observe { [weak self] in self?.showWindow() }
+        // A recording does not go on across a sleep. The Mac only sleeps
+        // mid-recording when somebody shuts the lid or chooses Sleep — idle
+        // sleep is held off while recording — and for this Mac that is the
+        // end of the meeting. Carrying on meant a track that paused for the
+        // length of the sleep beside one that did not, a mic restart asked
+        // to pad hours of silence, and a duration ceiling reached the moment
+        // the lid opened. Stopping here keeps what was recorded exactly as it
+        // was; a call still going on after wake is a new recording.
+        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.autoRecord.noteSystemSleep()
+                self?.stopSession(reason: "system-sleep")
+            }
+        }
         recordRequestObserver = RecordRequest.observe { [weak self] action in
             self?.perform(action)
         }

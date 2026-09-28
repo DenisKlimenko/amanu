@@ -239,6 +239,15 @@ final class AutoRecordController {
         }
     }
 
+    /// The Mac is going to sleep. Whatever held the microphone before it has
+    /// to hold it again, for the whole start delay, after it: the clock kept
+    /// from before would otherwise read the sleep as the mic being held, and
+    /// start a recording on the first tick after wake.
+    func noteSystemSleep() {
+        micActiveSince = nil
+        micIdleSince = nil
+    }
+
     // MARK: -
 
     func tick() {

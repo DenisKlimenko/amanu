@@ -98,7 +98,7 @@ struct AutoRecordTests {
     /// started while amanu was being reinstalled.
     @Test("A recording we ended ourselves is never discarded")
     func reasonsWeChoseAreKept() {
-        for reason in ["app-quit", "max-duration", "manual"] {
+        for reason in ["app-quit", "max-duration", "manual", "system-sleep"] {
             #expect(!AutoRecordController.shouldDiscard(
                 trigger: .micActivity, reason: reason, duration: 5, settings: settings))
         }
@@ -492,6 +492,21 @@ struct AutoRecordLoopTests {
         h.controller.setEnabled(true)
         #expect(h.saved == [false, true])
         h.run(for: 20)
+        #expect(h.starts == [.micActivity])
+    }
+
+    /// The timer does not tick while the Mac sleeps, so a mic clock kept from
+    /// before the sleep reads the whole sleep as the mic being held.
+    @Test("After sleep the mic has to be held for the full start delay again")
+    func sleepResetsTheMicClock() {
+        let h = AutoRecordHarness()
+        h.micActive = true
+        h.run(for: 5)
+        h.controller.noteSystemSleep()
+        h.now.addTimeInterval(8 * 60 * 60)
+        h.run(for: 5)
+        #expect(h.starts.isEmpty)
+        h.run(for: 15)
         #expect(h.starts == [.micActivity])
     }
 }
