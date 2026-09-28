@@ -40,8 +40,7 @@ final class AnalyticsSink: @unchecked Sendable {
 
     /// Beside the identifier, so that forgetting everything amanu knows about
     /// this machine stays one `rm ~/.config/amanu/analytics*.json`.
-    static let defaultStore = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".config/amanu/analytics-pending.json")
+    static var defaultStore: URL { Home.current.analyticsPendingFile }
 
     /// Past this the backlog is somebody who has been offline for a month,
     /// and the oldest of it has stopped being worth the disk.

@@ -417,10 +417,7 @@ final class SettingsWindow: NSObject, NSTextFieldDelegate {
     /// A path as a person would write it, which is also how the setup form
     /// shows the recordings folder.
     private func friendlyPath(_ url: URL) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return url.path.hasPrefix(home)
-            ? "~" + url.path.dropFirst(home.count)
-            : url.path
+        Home.current.abbreviating(url.path)
     }
 
     /// Ask, then delete, then bring down the switch that wanted it.

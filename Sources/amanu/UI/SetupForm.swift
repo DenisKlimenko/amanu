@@ -550,11 +550,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
 
         // Store it the way a person would write it: a path under the home
         // directory stays readable, and stays right if the account is renamed.
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let path = chosen.path.hasPrefix(home)
-            ? "~" + chosen.path.dropFirst(home.count)
-            : chosen.path
-        Config.update(path: ["recordings_dir"], value: String(path))
+        Config.update(path: ["recordings_dir"], value: Home.current.abbreviating(chosen.path))
         refresh()
     }
 
@@ -1670,11 +1666,8 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
             liveStatus.stringValue = localised("optional", "по желанию")
         }
 
-        let root = Config.resolveRoot(cliOverride: nil).path
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        recordingsPath.stringValue = root.hasPrefix(home)
-            ? "~" + root.dropFirst(home.count)
-            : root
+        recordingsPath.stringValue = Home.current.abbreviating(
+            Config.resolveRoot(cliOverride: nil).path)
 
         let summary = Config.summary()
         summariesOn.state = summary.enabled ? .on : .off

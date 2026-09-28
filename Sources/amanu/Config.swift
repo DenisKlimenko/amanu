@@ -25,16 +25,16 @@ import Foundation
 /// summary are written, or right after recording when transcription is
 /// disabled.
 enum Config {
-    static let path = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".config/amanu/config.json")
+    /// Where the file is. Asked of `Home` every time rather than fixed at
+    /// startup, so that a test runs against a file of its own — see `Home`.
+    static var path: URL { Home.current.configFile }
 
-    static let defaultRoot = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Recordings", isDirectory: true)
+    static var defaultRoot: URL { Home.current.defaultRecordings }
 
     /// The configured recordings root, or nil if no config file / no key.
     static func recordingsDir() -> URL? {
         guard let dir = load()?["recordings_dir"] as? String, !dir.isEmpty else { return nil }
-        return URL(fileURLWithPath: (dir as NSString).expandingTildeInPath, isDirectory: true)
+        return Home.current.expanding(dir, isDirectory: true)
     }
 
     /// Shell command to spawn once a session is finished — transcript, names
@@ -154,13 +154,12 @@ enum Config {
     /// one evening and every meeting after it failed with HTTP 401. What amanu
     /// writes now belongs to amanu; what other tools keep is still *read*, so
     /// nobody has to paste a key twice.
-    static let keysDir = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".config/amanu/keys", isDirectory: true)
+    static var keysDir: URL { Home.current.keysDirectory }
 
-    static let assemblyAIKeyPath = keysDir.appendingPathComponent("assemblyai")
-    static let openAIKeyPath = keysDir.appendingPathComponent("openai")
-    static let elevenLabsKeyPath = keysDir.appendingPathComponent("elevenlabs")
-    static let anthropicKeyPath = keysDir.appendingPathComponent("anthropic")
+    static var assemblyAIKeyPath: URL { keysDir.appendingPathComponent("assemblyai") }
+    static var openAIKeyPath: URL { keysDir.appendingPathComponent("openai") }
+    static var elevenLabsKeyPath: URL { keysDir.appendingPathComponent("elevenlabs") }
+    static var anthropicKeyPath: URL { keysDir.appendingPathComponent("anthropic") }
 
     /// Where the rest of a machine's toolchain tends to keep the same secret.
     /// Read-only as far as amanu is concerned.
@@ -169,16 +168,13 @@ enum Config {
     /// CLIs write, `api_key` is what people write by hand — and a key sitting
     /// in the second one while the window says "no key yet" is a person being
     /// asked to paste something they already have.
-    static let assemblyAISharedKeyPaths = sharedKeyPaths("assemblyai")
-    static let openAISharedKeyPaths = sharedKeyPaths("openai")
-    static let elevenLabsSharedKeyPaths = sharedKeyPaths("elevenlabs")
-    static let anthropicSharedKeyPaths = sharedKeyPaths("anthropic")
+    static var assemblyAISharedKeyPaths: [URL] { sharedKeyPaths("assemblyai") }
+    static var openAISharedKeyPaths: [URL] { sharedKeyPaths("openai") }
+    static var elevenLabsSharedKeyPaths: [URL] { sharedKeyPaths("elevenlabs") }
+    static var anthropicSharedKeyPaths: [URL] { sharedKeyPaths("anthropic") }
 
     private static func sharedKeyPaths(_ service: String) -> [URL] {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return ["token", "api_key"].map {
-            home.appendingPathComponent(".config/\(service)/\($0)")
-        }
+        Home.current.sharedKeyFiles(for: service)
     }
 
     /// The first of `paths` that holds something.
@@ -200,7 +196,7 @@ enum Config {
     /// config, a token file named by `api_key_path`, amanu's own key file, and
     /// finally the shared one this machine may already have.
     static func assemblyAIKey() -> String? {
-        if let env = ProcessInfo.processInfo.environment["ASSEMBLYAI_API_KEY"],
+        if let env = Home.current.variable("ASSEMBLYAI_API_KEY"),
            !env.trimmed.isEmpty {
             return env.trimmed
         }
@@ -208,7 +204,7 @@ enum Config {
             return inline.trimmed
         }
         if let configured = (assemblyAI()?["api_key_path"] as? String)
-            .map({ URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }) {
+            .map({ Home.current.expanding($0) }) {
             return secret(at: configured)
         }
         return secret(at: assemblyAIKeyPath) ?? secret(atAnyOf: assemblyAISharedKeyPaths)
@@ -228,7 +224,7 @@ enum Config {
     }
 
     static func elevenLabsKey() -> String? {
-        if let env = ProcessInfo.processInfo.environment["ELEVENLABS_API_KEY"],
+        if let env = Home.current.variable("ELEVENLABS_API_KEY"),
            !env.trimmed.isEmpty {
             return env.trimmed
         }
@@ -237,7 +233,7 @@ enum Config {
             return inline.trimmed
         }
         if let configured = (settings?["api_key_path"] as? String)
-            .map({ URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }) {
+            .map({ Home.current.expanding($0) }) {
             return secret(at: configured)
         }
         return secret(at: elevenLabsKeyPath) ?? secret(atAnyOf: elevenLabsSharedKeyPaths)
@@ -512,7 +508,7 @@ enum Config {
         }
         if let v = json["template"] as? String, !v.trimmed.isEmpty { settings.template = v }
         if let v = json["api_key_path"] as? String, !v.isEmpty {
-            settings.apiKeyPath = URL(fileURLWithPath: (v as NSString).expandingTildeInPath)
+            settings.apiKeyPath = Home.current.expanding(v)
         }
         return settings
     }
@@ -520,12 +516,12 @@ enum Config {
     /// OpenAI key, in order: OPENAI_API_KEY, a token file named by
     /// `summary.openai_api_key_path`, amanu's own key file, then the shared one.
     static func openAIKey() -> String? {
-        if let env = ProcessInfo.processInfo.environment["OPENAI_API_KEY"],
+        if let env = Home.current.variable("OPENAI_API_KEY"),
            !env.trimmed.isEmpty {
             return env.trimmed
         }
         if let configured = (summaryJSON()?["openai_api_key_path"] as? String)
-            .map({ URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }) {
+            .map({ Home.current.expanding($0) }) {
             return secret(at: configured)
         }
         return secret(at: openAIKeyPath) ?? secret(atAnyOf: openAISharedKeyPaths)
@@ -538,7 +534,7 @@ enum Config {
     /// Anthropic key, in order: ANTHROPIC_API_KEY, a token file named by
     /// `summary.api_key_path`, amanu's own key file, then the shared one.
     static func anthropicKey() -> String? {
-        if let env = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"],
+        if let env = Home.current.variable("ANTHROPIC_API_KEY"),
            !env.trimmed.isEmpty {
             return env.trimmed
         }
@@ -668,10 +664,7 @@ enum Config {
     /// Resolve the recordings root from an optional CLI override.
     static func resolveRoot(cliOverride: String?) -> URL {
         if let cliOverride {
-            return URL(
-                fileURLWithPath: (cliOverride as NSString).expandingTildeInPath,
-                isDirectory: true
-            )
+            return Home.current.expanding(cliOverride, isDirectory: true)
         }
         return recordingsDir() ?? defaultRoot
     }

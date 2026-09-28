@@ -61,8 +61,13 @@ enum Tooling {
     // MARK: - looking
 
     /// The path to a tool, or nil. Cheap after the first call.
+    ///
+    /// Nil without looking in a home that may not discover tools, which is
+    /// every test: a login shell and a `--version` run of the developer's own
+    /// `claude` are not things a test should be able to cause.
     static func path(for name: String) -> String? {
-        cache.path(for: name)
+        guard Home.current.discoversTools else { return nil }
+        return cache.path(for: name)
     }
 
     /// The tool, run once to see whether it answers. Cheap after the first call.
@@ -78,7 +83,8 @@ enum Tooling {
     /// Whether configured Ollama is answering, and with which models.
     /// nil means nothing is listening: not an error, just the common case.
     static func ollamaModels() async -> [OllamaClient.Model]? {
-        try? await OllamaClient.listModels(baseURL: Config.summary().ollamaBaseURL)
+        guard Home.current.discoversTools else { return nil }
+        return try? await OllamaClient.listModels(baseURL: Config.summary().ollamaBaseURL)
     }
 
     // MARK: - the cache
