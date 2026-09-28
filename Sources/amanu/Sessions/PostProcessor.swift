@@ -269,6 +269,10 @@ enum PostProcessor {
     /// alert, and the two are a line apart so that a reason cannot be added
     /// to one surface alone.
     enum Refusal: Equatable, CustomStringConvertible {
+        /// The config file cannot be read, carrying the parser's reason. Every
+        /// plan waits on it: which engine, whether to summarize and where to,
+        /// and the hook are all answers in the file.
+        case configUnreadable(String)
         case transcriptionOff
         case cannotTranscribe(Obstacle)
         /// Retired without a transcript, carrying the reason it recorded —
@@ -278,6 +282,9 @@ enum PostProcessor {
 
         var description: String {
             switch self {
+            case .configUnreadable(let reason):
+                return "\(Config.Unreadable(reason: reason)). Nothing in this session has "
+                    + "been touched; fix the file and run this again."
             case .transcriptionOff:
                 return "Transcription is off in the config, so there is nothing to "
                     + "transcribe with — set transcription.enabled back to true."
@@ -294,6 +301,12 @@ enum PostProcessor {
         /// looking for the other one.
         var described: String {
             switch self {
+            case .configUnreadable(let reason):
+                return localised(
+                    "config.json can't be read (\(reason)), and until it can, transcription "
+                        + "and summaries wait. Nothing in this recording has been touched.",
+                    "config.json не читается (\(reason)), и пока это так, расшифровка и "
+                        + "саммари ждут. В этой записи ничего не тронуто.")
             case .transcriptionOff:
                 return localised(
                     "Transcription is off in the settings, so there is nothing to "
@@ -317,8 +330,14 @@ enum PostProcessor {
     static func plan(
         for item: SessionInventory.Item,
         again: Bool = false,
-        transcriptionEnabled: Bool = Config.transcriptionEnabled()
+        transcriptionEnabled: Bool = Config.transcriptionEnabled(),
+        configProblem: String? = Config.unreadableReason
     ) -> Plan {
+        // First, and before anything is cleared: `--again` used to delete the
+        // transcript, the names and the summary and only then be refused by
+        // the transcription it had cleared them for. A process started with
+        // the file broken has no settings of its own to fall back on either.
+        if let configProblem { return .refuse(.configUnreadable(configProblem)) }
         if item.transcript == .done, !again { return .finish }
 
         guard transcriptionEnabled else { return .refuse(.transcriptionOff) }

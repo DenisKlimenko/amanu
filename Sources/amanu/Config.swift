@@ -347,7 +347,11 @@ enum Config {
     static func autoRecord() -> AutoRecordSettings {
         let json = load()
         var settings = AutoRecordSettings()
-        settings.enabled = flag(.autoRecordEnabled, in: json)
+        // On by default, and a recording nobody asked for is the one wrong
+        // that cannot be taken back: while the file has never been readable,
+        // the switch is taken to be off. The backstops still apply to a
+        // recording started by hand.
+        settings.enabled = flag(.autoRecordEnabled, in: json) && !settingsUnknown
         settings.micActivity = flag(.autoRecordMicActivity, in: json)
         settings.calendar = flag(.autoRecordCalendar, in: json)
         settings.startDelay = number(.autoRecordStartDelay, in: json)
@@ -541,7 +545,10 @@ enum Config {
 
     static func file() -> File {
         let url = path
-        guard FileManager.default.fileExists(atPath: url.path) else { return .absent }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            remembered.keep(nil, for: url)
+            return .absent
+        }
         let data: Data
         do {
             data = try Data(contentsOf: url)
@@ -552,12 +559,14 @@ enum Config {
         // one would make `touch config.json` a trap.
         if String(decoding: data, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            remembered.keep([:], for: url)
             return .parsed([:])
         }
         do {
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 return .unreadable(reason: "it is not a JSON object")
             }
+            remembered.keep(json, for: url)
             return .parsed(json)
         } catch {
             let parser = (error as NSError).userInfo[NSDebugDescriptionErrorKey] as? String
@@ -596,6 +605,22 @@ enum Config {
     /// Parse the config file. A malformed config is reported on stderr rather
     /// than silently ignored — recordings landing in an unexpected place is
     /// worse than a warning.
+    ///
+    /// While the file cannot be read, every getter answers from the settings
+    /// this process last read from it. The defaults used to stand in instead,
+    /// and the file is read lazily, minutes into a job that had checked it
+    /// at the start: a stray comma saved during a transcription deleted the
+    /// audio of somebody who keeps it, sent the summary of somebody who
+    /// chose Ollama to the cloud, moved the recordings folder back to
+    /// ~/Recordings and switched auto-record on for somebody who had turned
+    /// it off. The last settings the file held are what the person actually
+    /// decided; the defaults are what they did not.
+    ///
+    /// The problem is still reported everywhere, writes are still refused,
+    /// and nothing that sends a meeting anywhere starts until the file reads
+    /// again. A process that has never read the file answers with the
+    /// defaults, and the few places where a default would do something
+    /// nobody asked for ask `settingsUnknown` first.
     private static func load() -> [String: Any]? {
         switch file() {
         case .absent:
@@ -603,6 +628,13 @@ enum Config {
         case .parsed(let json):
             return json
         case .unreadable(let reason):
+            if let last = remembered.last(for: path) {
+                FileHandle.standardError.write(Data(
+                    ("warning: \(path.path) is not valid JSON (\(reason)) — going on with the "
+                        + "settings last read from it\n").utf8
+                ))
+                return last.json
+            }
             FileHandle.standardError.write(Data(
                 "warning: \(path.path) is not valid JSON (\(reason)) — using defaults\n".utf8
             ))
@@ -610,12 +642,47 @@ enum Config {
         }
     }
 
+    /// Whether the settings are not known at all: the file cannot be read,
+    /// and this process never read it while it could be. Every getter is
+    /// answering with a default, which for most settings is harmless and for
+    /// a few — whether to record on its own, where recordings go — is a
+    /// decision the person may well have made the other way.
+    static var settingsUnknown: Bool {
+        guard case .unreadable = file() else { return false }
+        return remembered.last(for: path) == nil
+    }
+
+    /// The settings last read from each config file, by path — by path
+    /// because a test process has a file per test.
+    private static let remembered = Remembered()
+
+    private final class Remembered: @unchecked Sendable {
+        /// One reading: the object in the file, or nil for no file at all,
+        /// which is a perfectly good config too.
+        struct Reading {
+            let json: [String: Any]?
+        }
+
+        private let lock = NSLock()
+        private var readings: [String: Reading] = [:]
+
+        func keep(_ json: [String: Any]?, for url: URL) {
+            lock.withLock { readings[url.standardizedFileURL.path] = Reading(json: json) }
+        }
+
+        func last(for url: URL) -> Reading? {
+            lock.withLock { readings[url.standardizedFileURL.path] }
+        }
+    }
+
     // MARK: - writing
 
     /// The config file as it is on disk, or an empty object when there isn't
-    /// one yet — or when it cannot be read, which `file()` tells apart. The
-    /// settings window reads this to show what has been set, as distinct from
-    /// what merely defaults.
+    /// one yet. While it cannot be read — which `file()` tells apart — it is
+    /// the settings last read from it, the same ones every getter answers
+    /// with, or an empty object when there were none. The settings window
+    /// reads this to show what has been set, as distinct from what merely
+    /// defaults.
     static func raw() -> [String: Any] { load() ?? [:] }
 
     /// Set (or, with a nil value, clear) one setting, addressed by its path

@@ -41,9 +41,20 @@ enum StopHook {
 
     /// Fire the hook if this session owes it and nobody is working on the
     /// session. Returns whether it fired.
+    ///
+    /// Nothing is fired or marked while the config file cannot be read. The
+    /// command is one of its answers, and `fired` is final: a debt settled
+    /// with the default — no command at all — was a hook that never ran for
+    /// that session, however soon the file was fixed. The debt stays in
+    /// meta.json, and the sweep that follows the fix pays it.
     @discardableResult
-    static func fireIfOwed(_ dir: URL, command: String? = Config.onStop()) -> Bool {
+    static func fireIfOwed(_ dir: URL, command: @autoclosure () -> String? = Config.onStop()) -> Bool {
         guard SessionState.value(dir, key) as? String == owed else { return false }
+        if let reason = Config.unreadableReason {
+            appendSessionLog(
+                "on_stop hook waits — config.json can't be read (\(reason))", to: dir)
+            return false
+        }
         // Taken, not just looked at: two processes finishing the same folder
         // at the same moment must not both decide the hook is theirs. A
         // session somebody else holds is theirs to fire when they let go.
@@ -55,7 +66,7 @@ enum StopHook {
         defer { SessionClaim.release(dir) }
         guard SessionState.value(dir, key) as? String == owed else { return false }
         SessionState.update(dir, with: [key: fired])
-        guard let command else { return false }
+        guard let command = command() else { return false }
         run(command, in: dir)
         return true
     }

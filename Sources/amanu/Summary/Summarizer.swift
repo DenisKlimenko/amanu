@@ -25,6 +25,14 @@ enum Summarizer {
     ) async -> String? {
         func log(_ message: String) { appendSessionLog(message, to: dir) }
 
+        // Checked here and not only where the job began: naming can take
+        // minutes, and the route below is read from the file as it is now.
+        // Nothing is recorded, so the summary is still owed once the file
+        // reads again.
+        if let reason = Config.unreadableReason {
+            log("summary waits — config.json can't be read (\(reason))")
+            return nil
+        }
         let settings = Config.summary()
         guard MeetingEgress.route(for: .summary) != nil else { return nil }
 

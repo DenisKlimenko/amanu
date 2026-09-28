@@ -73,7 +73,18 @@ final class SettingsApplier {
 
     /// Read the file again and take up whatever moved. Public for the one
     /// caller that knows the file changed without a write announcing it.
+    ///
+    /// While the file cannot be read the getters answer with the settings
+    /// last read from it, so a broken save changes nothing here. A process
+    /// that has never read it has only defaults to go on, and those are not
+    /// a change anybody made: the folder recordings are going into, the
+    /// icons and the live transcript stay as they are until the file says
+    /// otherwise.
     func configChanged() {
+        guard !Config.settingsUnknown else {
+            always()
+            return
+        }
         let now = Snapshot.read()
         let found = Self.changes(from: applied, to: now)
         applied = now

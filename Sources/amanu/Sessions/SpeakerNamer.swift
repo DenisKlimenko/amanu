@@ -43,6 +43,13 @@ enum SpeakerNamer {
     ) async -> SpeakerNames? {
         func log(_ message: String) { appendSessionLog(message, to: dir) }
 
+        // Where the transcript may go is an answer in the config file, and a
+        // file broken since the job began is not one. Nothing is recorded,
+        // so naming is still owed once the file reads again.
+        if let reason = Config.unreadableReason {
+            log("naming waits — config.json can't be read (\(reason))")
+            return nil
+        }
         let settings = Config.speakerNames()
         guard settings.enabled else { return nil }
 

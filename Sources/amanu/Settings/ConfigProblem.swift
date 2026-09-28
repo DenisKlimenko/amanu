@@ -39,13 +39,15 @@ extension Config {
             switch self {
             case .unreadable(let reason):
                 return localised(
-                    "config.json can't be read (\(reason)). Until it is fixed, amanu uses its "
-                        + "defaults and keeps recording, but holds transcription and summaries, "
-                        + "sends no usage statistics, and saves no changed settings.",
-                    "config.json не читается (\(reason)). Пока файл не исправлен, amanu работает "
-                        + "с настройками по умолчанию и продолжает записывать, но расшифровка и "
-                        + "саммари ждут, статистика не отправляется, а изменённые настройки "
-                        + "не сохраняются.")
+                    "config.json can't be read (\(reason)). Until it is fixed, amanu keeps to "
+                        + "the settings it last read from it — its defaults, with auto-record "
+                        + "off, if it never could — and keeps recording, but holds transcription "
+                        + "and summaries, sends no usage statistics, and saves no changed settings.",
+                    "config.json не читается (\(reason)). Пока файл не исправлен, amanu держится "
+                        + "настроек, прочитанных из него в последний раз (а если не смогла "
+                        + "прочитать ни разу — настроек по умолчанию с выключенной автозаписью), "
+                        + "и продолжает записывать, но расшифровка и саммари ждут, статистика не "
+                        + "отправляется, а изменённые настройки не сохраняются.")
             case .unusable(let key, let found, let expected):
                 return localised(
                     "\(key) in config.json is \(found), which amanu can't use: it expects "
