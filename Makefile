@@ -50,10 +50,16 @@ DMG        = $(DIST)/amanu-v$(VERSION)-macos-universal.dmg
 # fine here and only fail to launch on the Macs this build exists for.
 SPARKLE_FW = $(shell find .build/artifacts/sparkle -type d -name Sparkle.framework \
 	-path '*macos-arm64_x86_64*' 2>/dev/null | head -1)
-WHISPER_FW = $(shell find .build/artifacts/amanu/WhisperFramework -type d \
-	-name whisper.framework -path '*macos-arm64_x86_64*' 2>/dev/null | head -1)
-TRANSCRIBE_FW = $(shell find .build/artifacts/amanu/TranscribeCppFramework -type d \
-	-name CTranscribe.framework -path '*macos-arm64_x86_64*' 2>/dev/null | head -1)
+#
+# The package's own binary targets sit under a directory SwiftPM names after
+# the checkout's folder, not after the package: `amanu` in the main checkout,
+# something else in a worktree. Hence the wildcard, and `extract` left out.
+WHISPER_FW = $(shell find .build/artifacts/*/WhisperFramework -type d \
+	-name whisper.framework -path '*macos-arm64_x86_64*' \
+	-not -path '.build/artifacts/extract/*' 2>/dev/null | head -1)
+TRANSCRIBE_FW = $(shell find .build/artifacts/*/TranscribeCppFramework -type d \
+	-name CTranscribe.framework -path '*macos-arm64_x86_64*' \
+	-not -path '.build/artifacts/extract/*' 2>/dev/null | head -1)
 LOCALVQE_ROOT = .build/localvqe
 LOCALVQE_LIB = $(LOCALVQE_ROOT)/lib/liblocalvqe.dylib
 LOCALVQE_MODEL = $(LOCALVQE_ROOT)/model/localvqe-v1.4-aec-200K-f32.gguf
