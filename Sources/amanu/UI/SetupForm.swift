@@ -1795,150 +1795,59 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         for row in rows { row.setAttention(row === pending) }
     }
 
-    /// What the setup window's primary button will do, or nil when there is
-    /// nothing left to offer. The order is the order things must happen in:
-    /// the agent first, because a grant given to the wrong process is worse
-    /// than none.
-    var nextAction: (() -> Void)? {
-        if SetupPermissions.needsStartAtLogin {
-            return { [weak self] in self?.startAtLogin() }
-        }
-        if SetupPermissions.microphone() == .notAsked {
-            return { [weak self] in Task { await self?.askMicrophone() } }
-        }
-        if SetupPermissions.needsSystemAudioTest(systemAudio) {
-            return { [weak self] in Task { await self?.testSystemAudio() } }
-        }
-        if localModelIsWantedAndMissing,
-           parakeetProgress == nil,
-           whisperDownloadTask == nil,
-           gigaAMDownloadTask == nil {
-            return { [weak self] in self?.downloadLocalIfNeeded() }
-        }
-        if Config.liveTranscriptionEnabled() {
-            let prompt = LiveTranscriptionLanguage.prompt(for: Config.transcriptionLanguage())
-            if !liveModelStore.isReady(language: prompt), !liveDownloading {
-                return { [weak self] in self?.downloadLiveModel() }
-            }
-        }
-        return nil
+    /// The machine as it stands, for the three answers the wizard around the
+    /// form needs — see `SetupProgress`. Read on every ask: the permission
+    /// reads cost a round trip each, and `ThisTurn` is what keeps a redraw
+    /// from paying for them more than once.
+    var progress: SetupProgress {
+        let prompt = LiveTranscriptionLanguage.prompt(for: Config.transcriptionLanguage())
+        let live = Config.liveTranscriptionEnabled()
+        return SetupProgress(SetupProgress.Machine(
+            loginItem: LoginItem.status(),
+            microphone: SetupPermissions.microphone(),
+            systemAudio: systemAudio,
+            missingLocalModel: localModelIsWantedAndMissing
+                ? transcriptionChoice.localEngine : nil,
+            localModelDownloading: parakeetProgress != nil || whisperDownloadTask != nil
+                || gigaAMDownloadTask != nil,
+            liveModelWanted: live,
+            liveModelReady: live && liveModelStore.isReady(language: prompt),
+            liveModelDownloading: liveDownloading,
+            summaryToolMissing: chosenSummaryIsMissing))
     }
 
+    /// What the setup window's primary button will do, or nil when there is
+    /// nothing left to offer.
+    var nextAction: (() -> Void)? {
+        switch progress.next {
+        case .startAtLogin: return { [weak self] in self?.startAtLogin() }
+        case .askMicrophone: return { [weak self] in Task { await self?.askMicrophone() } }
+        case .testSystemAudio: return { [weak self] in Task { await self?.testSystemAudio() } }
+        case .downloadLocalModel: return { [weak self] in self?.downloadLocalIfNeeded() }
+        case .downloadLiveModel: return { [weak self] in self?.downloadLiveModel() }
+        case nil: return nil
+        }
+    }
+
+    typealias Missing = SetupProgress.Missing
 
     /// What the machine still owes, in the order it has to be dealt with.
-    /// The setup window's footer is this list in a sentence and its button is
-    /// `nextAction`; all three are here so they cannot disagree.
-    var outstanding: [Missing] {
-        var left: [Missing] = []
-        if SetupPermissions.needsStartAtLogin { left.append(.startAtLogin) }
-        if SetupPermissions.microphone() != .granted { left.append(.microphone) }
-        if systemAudio != .heard { left.append(.systemAudio) }
-        if localModelIsWantedAndMissing { left.append(.parakeet) }
-        if Config.liveTranscriptionEnabled() {
-            let prompt = LiveTranscriptionLanguage.prompt(for: Config.transcriptionLanguage())
-            if !liveModelStore.isReady(language: prompt) { left.append(.liveModel) }
-        }
-        // The window used to say everything was granted while the card it had
-        // chosen to write the summaries said "not here" three inches above.
-        if chosenSummaryIsMissing { left.append(.summaryTool) }
-        return left
-    }
+    var outstanding: [Missing] { progress.outstanding }
 
-    /// One thing the machine still owes.
-    ///
-    /// A case rather than the words for it, because the words are read by a
-    /// person and the case is read by the program: the footer button asks
-    /// whether parakeet is on this list, and it asked by comparing against the
-    /// string the window was showing. That worked while there was one language
-    /// to show it in.
-    enum Missing: Sendable, Equatable {
-        case startAtLogin
-        case microphone
-        case systemAudio
-        case parakeet
-        case liveModel
-        /// Summaries are on, and whatever was chosen to write them isn't here.
-        case summaryTool
+    /// The same list in a sentence, for the footer of either window.
+    var outstandingSentence: String { progress.sentence }
 
-        var described: String {
-            switch self {
-            case .startAtLogin: return localised("start at login", "запуск при входе")
-            case .microphone: return localised("microphone", "микрофон")
-            case .systemAudio: return localised("system audio", "звук системы")
-            // A name, and names are not translated.
-            case .parakeet: return "parakeet"
-            case .liveModel:
-                return localised("live model", "модель для расшифровки на ходу")
-            case .summaryTool:
-                return localised("something to summarise with", "чем писать саммари")
-            }
-        }
-    }
-
-    /// The same list in a sentence, for whatever is showing it.
-    ///
-    /// Both windows say this, so both say it the same way: the setup window
-    /// in its footer, the settings window under the Setup tab. It says the
-    /// good news as well as the bad, because most of the time somebody opens
-    /// that tab to be reassured rather than to repair anything, and a line
-    /// that only ever appears when something is wrong leaves them counting
-    /// green ticks to find out whether it is.
-    var outstandingSentence: String { Self.sentence(for: outstanding) }
-
-    /// Separate from the machine, and `nonisolated` to say so: it reads no
-    /// permission and no file, which is what lets the three shapes of it be
-    /// tested without granting or revoking anything.
     nonisolated static func sentence(for outstanding: [Missing]) -> String {
-        let named = outstanding.map(\.described)
-        switch named.count {
-        case 0:
-            return localised(
-                "Everything amanu needs is granted.", "Всё, что нужно amanu, разрешено.")
-        case 1:
-            return localised("One thing left: ", "Осталось одно: ") + named[0]
-        default:
-            return localised("Left: ", "Осталось: ") + named.joined(separator: ", ")
-        }
+        SetupProgress.sentence(for: outstanding)
     }
 
     /// Whether a model is coming down right now — the work a host must not
     /// offer to start a second time.
-    var isDownloading: Bool {
-        liveDownloading || parakeetProgress != nil || whisperDownloadTask != nil
-            || gigaAMDownloadTask != nil
-    }
+    var isDownloading: Bool { progress.isDownloading }
 
     /// What the setup window's primary button says, given where things stand.
-    var nextActionTitle: String {
-        if SetupPermissions.needsStartAtLogin {
-            return LoginItem.status() == .needsApproval
-                ? localised("Open Login Items", "Открыть объекты входа")
-                : localised("Start at login", "Запускать при входе")
-        }
-        if SetupPermissions.microphone() == .notAsked {
-            return localised("Allow microphone", "Разрешить микрофон")
-        }
-        if SetupPermissions.needsSystemAudioTest(systemAudio) {
-            return localised("Allow and test", "Разрешить и проверить")
-        }
-        // Named separately from the live model because the two downloads
-        // can be outstanding at once, and a button that says "Download
-        // parakeet" while parakeet is downloading has nothing left to do
-        // but close the window under the person reading it.
-        if parakeetProgress != nil || whisperDownloadTask != nil || gigaAMDownloadTask != nil {
-            return localised("Downloading local model…", "Скачивается локальная модель…")
-        }
-        if outstanding.contains(.parakeet) {
-            return localised("Download local model", "Скачать локальную модель")
-        }
-        if liveDownloading {
-            return localised("Downloading live model…", "Скачивается модель…")
-        }
-        if outstanding.contains(.liveModel) {
-            return localised("Download live model", "Скачать модель")
-        }
-        return localised("Done", "Готово")
-    }
+    var nextActionTitle: String { progress.nextTitle }
+
     private func report(_ row: AccessRow, _ message: String) {
         row.update(.denied, detail: message)
     }
