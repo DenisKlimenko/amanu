@@ -403,6 +403,7 @@ actor TranscriptionCoordinator {
         // the gigabyte wait for a model it isn't going to be shown to would be
         // paying twice for nothing.
         TrackCompressor.settle(sessionDir: dir)
+        TranscriptionScratch.remove(in: dir)
         return engine
     }
 

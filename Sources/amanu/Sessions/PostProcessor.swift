@@ -321,10 +321,14 @@ enum PostProcessor {
 
     /// Offer a session to the transcription queue again.
     ///
-    /// Clears the marks that retired it and removes the derived files, so the
-    /// queue treats it as untranscribed at the next scan. The AssemblyAI
-    /// response cache is deliberately kept: re-rendering from it is free,
-    /// while re-uploading is neither free nor fast.
+    /// Clears the marks that retired it and removes everything made from the
+    /// old transcript — the transcript itself, the names, the summary — so the
+    /// queue treats it as untranscribed at the next scan and nothing of the
+    /// old answer survives next to the new one. The services' cached
+    /// responses go too: they used to be kept on purpose, to make a second
+    /// run free, which made it a second rendering of the first answer rather
+    /// than a second transcription — whatever had changed since, the engine's
+    /// model, the expected languages, the audio.
     ///
     /// A session somebody else is working on is left exactly as it is: deleting
     /// the transcript out from under a run in flight is how a summarizer ends
@@ -338,9 +342,10 @@ enum PostProcessor {
         }
 
         let fm = FileManager.default
-        for file in ["transcript.json", "transcript.md", SpeakerNames.file] {
+        for file in ["transcript.json", "transcript.md", SpeakerNames.file, "summary.md"] {
             try? fm.removeItem(at: dir.appendingPathComponent(file))
         }
+        TranscriptionScratch.remove(in: dir, includingDerivedAudio: true)
         SessionState.update(dir, with: [
             SessionState.Key.transcriptionFailed: nil,
             SessionState.Key.transcriptionAttempts: nil,

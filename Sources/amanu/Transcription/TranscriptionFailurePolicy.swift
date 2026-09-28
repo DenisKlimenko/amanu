@@ -137,6 +137,7 @@ enum TranscriptionFailurePolicy {
                 opening: dir
             )
             TrackCompressor.compress(sessionDir: dir)
+            TranscriptionScratch.remove(in: dir)
             return .retired
         } else {
             SessionState.update(dir, with: fields)
