@@ -22,14 +22,9 @@ import Foundation
 /// it comes from.
 enum SpeakerNamer {
     /// Room for the whole transcript in one call. Same size the summarizer
-    /// uses — comfortably inside every backend's context window.
-    private static let maxChars = 60_000
-    /// When the transcript doesn't fit, how much of the opening to keep. Names
-    /// cluster at the start, where people greet each other and introduce
-    /// themselves.
-    private static let openingChars = 24_000
-    /// And how much of the close, where they say goodbye by name.
-    private static let closingChars = 6_000
+    /// uses; a backend with less room says so in `promptLimit`, and the
+    /// transcript is trimmed to that instead.
+    static let maxChars = 60_000
     /// A quote shorter than this proves nothing — "да" appears everywhere.
     private static let minQuoteWords = 2
 
@@ -107,7 +102,8 @@ enum SpeakerNamer {
                         labels: asking,
                         title: title,
                         attendees: attendees,
-                        app: app
+                        app: app,
+                        limit: min(maxChars, backend.promptLimit ?? maxChars)
                     )
                 )
                 let proposals = try parse(answer)
@@ -395,7 +391,8 @@ enum SpeakerNamer {
         labels: [String],
         title: String?,
         attendees: [String],
-        app: String?
+        app: String?,
+        limit: Int = maxChars
     ) -> String {
         var header: [String] = []
         if let title { header.append("Meeting: \(title)") }
@@ -411,7 +408,7 @@ enum SpeakerNamer {
         \(instructions)
 
         ---
-        \(body(of: transcript, attendees: attendees))
+        \(body(of: transcript, attendees: attendees, limit: limit))
         """
     }
 
@@ -422,12 +419,22 @@ enum SpeakerNamer {
     /// and adds every line that mentions an invitee: those are where names are
     /// actually said. A middle hour of a design argument contains no evidence
     /// about who anyone is.
-    static func body(of transcript: Transcript, attendees: [String]) -> String {
+    ///
+    /// Two fifths of `limit` go to the opening, where names cluster because
+    /// people greet each other and introduce themselves, a tenth to the
+    /// close, where they say goodbye by name, and what is left to the
+    /// mentions — so the whole never exceeds `limit`, which a small local
+    /// model with a fixed context would otherwise have cut from the front.
+    static func body(
+        of transcript: Transcript, attendees: [String], limit: Int = maxChars
+    ) -> String {
         let lines = transcript.segments.map {
             "[\($0.start_ms)] \($0.speaker): \($0.text)"
         }
         let whole = lines.joined(separator: "\n")
-        guard whole.count > maxChars else { return whole }
+        guard whole.count > limit else { return whole }
+        let openingChars = limit * 2 / 5
+        let closingChars = limit / 10
 
         var opening: [String] = []
         var size = 0
@@ -454,9 +461,17 @@ enum SpeakerNamer {
         }
 
         var parts = [opening.joined(separator: "\n")]
-        if !mentions.isEmpty {
+        // What the opening and the close left, less room for the two markers.
+        var room = limit - openingChars - closingChars - 120
+        var kept: [String] = []
+        for line in mentions.prefix(200) {
+            if line.count + 1 > room { break }
+            kept.append(line)
+            room -= line.count + 1
+        }
+        if !kept.isEmpty {
             parts.append("[… middle of the meeting, lines mentioning invitees …]")
-            parts.append(mentions.prefix(200).joined(separator: "\n"))
+            parts.append(kept.joined(separator: "\n"))
         }
         parts.append("[… end of the meeting …]")
         parts.append(closing.joined(separator: "\n"))

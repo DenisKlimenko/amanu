@@ -151,12 +151,13 @@ enum Summarizer {
         backend: LLMBackend
     ) async throws -> String {
         let system = systemPrompt(language: settings.language)
-        if body.count <= maxCharsPerCall {
+        let limit = min(maxCharsPerCall, backend.promptLimit ?? maxCharsPerCall)
+        if body.count <= limit {
             return try await backend.call(system, singlePassPrompt(
                 body: body, header: header, template: settings.template))
         }
 
-        let chunks = split(body, limit: maxCharsPerCall)
+        let chunks = split(body, limit: limit)
         var notes: [String] = []
         for (index, chunk) in chunks.enumerated() {
             notes.append(try await backend.call(

@@ -16,6 +16,11 @@ struct LLMBackend: Sendable {
     /// Exact local/configured model used for the call. It stays local;
     /// analytics allow-lists it before sending anything.
     let model: String?
+    /// How many characters of prompt this backend can be trusted to read
+    /// whole, when that is fewer than the callers' own default. Callers cut
+    /// or split a transcript to fit rather than letting the backend drop the
+    /// part it has no room for.
+    var promptLimit: Int? = nil
     /// (system prompt, user prompt) → completion text.
     let call: @Sendable (String, String) async throws -> String
 
@@ -212,9 +217,7 @@ struct LLMBackend: Sendable {
 
     private static func openAI(key: String, model: String, baseURL: String) -> LLMBackend {
         LLMBackend(name: "openai-api", model: model) { system, prompt in
-            guard let url = OpenAICompatible.endpoint(
-                baseURL: baseURL, path: "chat/completions")
-            else { throw URLError(.badURL) }
+            let url = try OpenAICompatible.url(baseURL: baseURL, path: "chat/completions")
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.timeoutInterval = 600
@@ -248,7 +251,8 @@ struct LLMBackend: Sendable {
     // MARK: - local
 
     private static func ollama(model: String, baseURL: String) -> LLMBackend {
-        LLMBackend(name: "ollama", model: model) { system, prompt in
+        LLMBackend(name: "ollama", model: model, promptLimit: OllamaClient.promptLimit) {
+            system, prompt in
             try await OllamaClient.chat(
                 baseURL: baseURL, model: model, system: system, prompt: prompt)
         }
@@ -368,6 +372,9 @@ enum LLMError: Error, CustomStringConvertible {
     /// errors too, and the caller shouldn't have to know which is which.
     static func isTransient(_ error: Error) -> Bool {
         if let llm = error as? LLMError { return llm.isTransient }
+        // A Base URL that is refused is refused every time until somebody
+        // changes it; the fingerprint notices when they do.
+        if error is OpenAICompatible.EndpointError { return false }
         if let url = error as? URLError {
             return [
                 URLError.notConnectedToInternet, .networkConnectionLost, .timedOut,

@@ -13,16 +13,44 @@ enum OllamaClient {
         var isRemote: Bool { remoteModel != nil || remoteHost != nil }
     }
 
+    /// The largest context Amanu asks Ollama for. A context is memory: for
+    /// the 8B default, 32k tokens of it is several gigabytes on top of the
+    /// weights, which is what a laptop can spare while it records the next
+    /// meeting. Prompts that would need more are cut to fit by the caller —
+    /// see `promptLimit`.
+    static let maxContext = 32_768
+
+    /// The prompt, in characters, that `contextSize` keeps inside
+    /// `maxContext`. Meetings here are mostly Russian, which costs about a
+    /// token per two characters; English is cheaper, so this errs short.
+    static let promptLimit = 36_000
+
+    /// Room for the answer on top of the prompt.
+    private static let replyTokens = 4_096
+
+    /// The context to ask for, sized to what is being sent.
+    ///
+    /// Ollama does not refuse a prompt longer than `num_ctx`; it quietly drops
+    /// the front of it. The front is the system prompt and the instructions,
+    /// so a fixed 16k context against a 60k-character transcript produced an
+    /// answer to no question at all. The estimate is a third of the UTF-8
+    /// bytes — generous for English, about right for Cyrillic — plus room to
+    /// answer, rounded up to 4k and kept between 8k and `maxContext`.
+    static func contextSize(system: String, prompt: String) -> Int {
+        let estimate = (system.utf8.count + prompt.utf8.count) / 3 + replyTokens
+        let rounded = (estimate + 4_095) / 4_096 * 4_096
+        return min(maxContext, max(8_192, rounded))
+    }
+
     static func chatRequest(
         baseURL: String,
         model: String,
         system: String,
         prompt: String,
-        numContext: Int = 16_384
+        numContext: Int? = nil
     ) throws -> URLRequest {
-        guard let url = endpoint(baseURL: baseURL, path: "api/chat") else {
-            throw URLError(.badURL)
-        }
+        let url = try OpenAICompatible.url(baseURL: baseURL, path: "api/chat")
+        let numContext = numContext ?? contextSize(system: system, prompt: prompt)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 1_800
@@ -92,9 +120,7 @@ enum OllamaClient {
         timeout: TimeInterval = 2,
         session: URLSession = .shared
     ) async throws -> [Model] {
-        guard let url = endpoint(baseURL: baseURL, path: "api/tags") else {
-            throw URLError(.badURL)
-        }
+        let url = try OpenAICompatible.url(baseURL: baseURL, path: "api/tags")
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout
         let (data, response) = try await session.data(for: request)
@@ -107,10 +133,6 @@ enum OllamaClient {
 
     static func isLocal(baseURL: String) -> Bool {
         guard let host = URL(string: baseURL)?.host?.lowercased() else { return false }
-        return host == "localhost" || host == "127.0.0.1" || host == "::1"
-    }
-
-    private static func endpoint(baseURL: String, path: String) -> URL? {
-        OpenAICompatible.endpoint(baseURL: baseURL, path: path)
+        return OpenAICompatible.isLoopback(host)
     }
 }

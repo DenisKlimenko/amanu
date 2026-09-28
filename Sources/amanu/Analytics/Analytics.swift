@@ -121,6 +121,7 @@ enum Analytics {
             ].contains(url.code) { return .noNetwork }
             return .unknown
         }
+        if error is OpenAICompatible.EndpointError { return .refused }
         if let llm = error as? LLMError {
             switch llm {
             case .http(let code, _): return code >= 500 ? .httpError : .refused

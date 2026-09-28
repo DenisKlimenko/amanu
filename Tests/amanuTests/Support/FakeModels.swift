@@ -9,6 +9,9 @@ final class FakeModel: @unchecked Sendable {
     typealias Script = @Sendable (_ call: Int, _ system: String, _ prompt: String) throws -> String
 
     let name: String
+    /// What the backend says about how much prompt it can read whole, as
+    /// the real Ollama backend does.
+    var promptLimit: Int?
     private let script: Script
     private let lock = NSLock()
     private var asked: [String] = []
@@ -43,7 +46,8 @@ final class FakeModel: @unchecked Sendable {
     var callCount: Int { prompts.count }
 
     var backend: LLMBackend {
-        LLMBackend(name: name, model: "\(name)-model") { [self] system, prompt in
+        LLMBackend(name: name, model: "\(name)-model", promptLimit: promptLimit) {
+            [self] system, prompt in
             let call = lock.withLock { () -> Int in
                 asked.append(prompt)
                 return asked.count - 1
