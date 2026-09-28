@@ -1125,7 +1125,11 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         let label = NSTextField(labelWithString: title)
         label.font = SetupLayout.detailFont
         label.textColor = .secondaryLabelColor
-        label.widthAnchor.constraint(equalToConstant: 62).isActive = true
+        // Wide enough for "URL сервера": at 62 the Russian label was cut to
+        // "URL сервер" in the Ollama card, the width having been measured
+        // against "Base URL" alone.
+        label.widthAnchor.constraint(equalToConstant: 76).isActive = true
+        field.setAccessibilityLabel(title)
         let row = NSStackView(views: [label, field])
         row.orientation = .horizontal
         row.alignment = .firstBaseline
