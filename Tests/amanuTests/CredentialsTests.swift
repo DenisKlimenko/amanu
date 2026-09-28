@@ -115,6 +115,84 @@ struct CredentialsTests {
         }
     }
 
+    /// `summary.openai_api_key_path` named one file for both passes, and the
+    /// summary sent it to whatever its Base URL said: an OpenAI key went to
+    /// OpenRouter the moment the URL changed.
+    @Test("An OpenAI key named for the summary is not sent to a third-party Base URL")
+    func openAIKeyStaysWithOpenAI() throws {
+        let config: [String: Any] = [
+            "summary": [
+                "backend": "openai-api", "openai_base_url": "https://openrouter.ai/api/v1",
+                "openai_api_key_path": "~/secrets/openai",
+            ],
+        ]
+        try withFreshHome(config: config) { home in
+            let named = home.url.appendingPathComponent("secrets/openai")
+            try Credentials.writeSecret("openai-key", to: named)
+
+            #expect(Credentials.summaryOpenAIKey() == nil,
+                    "the OpenAI key was handed to openrouter.ai")
+            #expect(Credentials.summarySlot(for: "openai-api", in: config).path
+                == Credentials.openAICompatibleKeyPath)
+
+            var withRouterKey = config
+            var summary = config["summary"] as! [String: Any]
+            summary["openai_compatible_api_key_path"] = "~/secrets/router"
+            withRouterKey["summary"] = summary
+            try home.writeConfig(withRouterKey)
+            try Credentials.writeSecret(
+                "router-key", to: home.url.appendingPathComponent("secrets/router"))
+            #expect(Credentials.summaryOpenAIKey() == "router-key")
+            #expect(Credentials.summarySlot(for: "openai-api", in: withRouterKey).isNamedInConfig)
+        }
+    }
+
+    /// And the other way: an OpenRouter key named there was read by the
+    /// OpenAI transcription engine and sent to api.openai.com.
+    @Test("A compatible server's key is not sent to OpenAI by transcription")
+    func routerKeyStaysWithTheRouter() throws {
+        let config: [String: Any] = [
+            "summary": [
+                "backend": "openai-api", "openai_base_url": "https://openrouter.ai/api/v1",
+                "openai_api_key_path": "~/secrets/router",
+            ],
+        ]
+        try withFreshHome(config: config) { home in
+            try Credentials.writeSecret(
+                "router-key", to: home.url.appendingPathComponent("secrets/router"))
+            #expect(Config.openAIKey() == nil, "transcription read the OpenRouter key")
+            #expect(Credentials.transcriptionSlot(for: "openai", in: config).path
+                == Config.openAIKeyPath)
+
+            try Credentials.writeSecret("openai-key", to: Config.openAIKeyPath)
+            #expect(Config.openAIKey() == "openai-key")
+        }
+    }
+
+    @Test("Transcription's own key file is read, and an older config's summary setting still is for OpenAI")
+    func transcriptionKeyFile() throws {
+        try withFreshHome { home in
+            let legacy: [String: Any] = ["summary": ["openai_api_key_path": "~/secrets/openai"]]
+            try home.writeConfig(legacy)
+            try Credentials.writeSecret(
+                "legacy-key", to: home.url.appendingPathComponent("secrets/openai"))
+            #expect(Config.openAIKey() == "legacy-key",
+                    "a config written before the setting split lost its transcription key")
+            #expect(Credentials.summaryOpenAIKey() == "legacy-key")
+
+            let own: [String: Any] = [
+                "transcription": ["openai": ["api_key_path": "~/secrets/transcribe"]],
+                "summary": ["openai_base_url": "https://api.groq.com/openai/v1"],
+            ]
+            try home.writeConfig(own)
+            try Credentials.writeSecret(
+                "transcribe-key", to: home.url.appendingPathComponent("secrets/transcribe"))
+            #expect(Config.openAIKey() == "transcribe-key")
+            #expect(Credentials.transcriptionSlot(for: "openai", in: own).isNamedInConfig)
+            #expect(Credentials.summaryOpenAIKey() == nil)
+        }
+    }
+
     @Test("A server on this Mac may still be offered the OpenAI key when nothing else was pasted")
     func loopbackEndpointFallsBackToTheOpenAIKey() throws {
         let config: [String: Any] = [

@@ -328,6 +328,12 @@ enum SettingsSchema {
                       "По умолчанию стоит единственная модель OpenAI, которая возвращает и время, "
                           + "и говорящих."),
                   .text, default: "gpt-4o-transcribe-diarize"),
+            Entry(["transcription", "openai", "api_key_path"],
+                  localised("OpenAI key file", "Файл ключа OpenAI"),
+                  localised(
+                      "Where the OpenAI transcription key is read from. OPENAI_API_KEY wins over it.",
+                      "Откуда читается ключ OpenAI для расшифровки. OPENAI_API_KEY важнее."),
+                  .text, describedAs: "~/.config/amanu/keys/openai"),
             Entry(["transcription", "elevenlabs", "api_key_path"],
                   localised("ElevenLabs key file", "Файл ключа ElevenLabs"),
                   localised(
@@ -404,9 +410,19 @@ enum SettingsSchema {
             Entry(["summary", "openai_api_key_path"],
                   localised("OpenAI key file", "Файл ключа OpenAI"),
                   localised(
-                      "Where the OpenAI key is read from. OPENAI_API_KEY wins over it.",
-                      "Откуда читается ключ OpenAI. OPENAI_API_KEY важнее."),
+                      "Where the key for OpenAI's own API is read from. It is sent to "
+                          + "api.openai.com and nowhere else. OPENAI_API_KEY wins over it.",
+                      "Откуда читается ключ к API самой OpenAI. Он уходит только на "
+                          + "api.openai.com. OPENAI_API_KEY важнее."),
                   .text, describedAs: "~/.config/amanu/keys/openai"),
+            Entry(["summary", "openai_compatible_api_key_path"],
+                  localised("Compatible server key file", "Файл ключа совместимого сервера"),
+                  localised(
+                      "Where the key for the OpenAI Base URL is read from when it is not "
+                          + "OpenAI's own — OpenRouter, Groq, a server of your own.",
+                      "Откуда читается ключ к OpenAI Base URL, когда это не сама OpenAI, — "
+                          + "OpenRouter, Groq, свой сервер."),
+                  .text, describedAs: "~/.config/amanu/keys/openai-compatible"),
         ]),
 
         Section(title: localised("Calendar and naming", "Календарь и имена"), entries: [

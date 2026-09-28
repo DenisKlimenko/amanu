@@ -505,18 +505,39 @@ enum Config {
         return settings
     }
 
-    /// OpenAI key, in order: OPENAI_API_KEY, a token file named by
-    /// `summary.openai_api_key_path`, amanu's own key file, then the shared one.
+    /// The OpenAI key — for OpenAI's own API, which is where the
+    /// transcription engine sends it. In order: OPENAI_API_KEY, a token file
+    /// named by `transcription.openai.api_key_path` (or, in a config written
+    /// before that setting, `summary.openai_api_key_path` — see
+    /// `openAIKeyFile`), amanu's own key file, then the shared one.
     static func openAIKey() -> String? {
         if let env = Home.current.variable("OPENAI_API_KEY"),
            !env.trimmed.isEmpty {
             return env.trimmed
         }
-        if let configured = (value(.summaryOpenAIKeyPath, in: load()) as? String)
-            .map({ Home.current.expanding($0) }) {
-            return secret(at: configured)
-        }
+        if let configured = openAIKeyFile(in: load()) { return secret(at: configured) }
         return secret(at: openAIKeyPath) ?? secret(atAnyOf: openAISharedKeyPaths)
+    }
+
+    /// The file the config names for the OpenAI key, if it names one.
+    ///
+    /// `summary.openai_api_key_path` used to answer this for transcription
+    /// too, and the summary sent the same file's key to whatever server its
+    /// Base URL named — so an OpenAI key went to OpenRouter the moment the
+    /// URL changed, and an OpenRouter key named there went to OpenAI with
+    /// every transcription. Now transcription has a setting of its own, and
+    /// the summary's is borrowed only while the summary itself talks to
+    /// OpenAI, when the file it names is an OpenAI key by the summary's own
+    /// account. A compatible server's key is a third setting,
+    /// `summary.openai_compatible_api_key_path`.
+    static func openAIKeyFile(in json: [String: Any]?) -> URL? {
+        if let own = text(.transcriptionOpenAIKeyPath, in: json) {
+            return Home.current.expanding(own)
+        }
+        guard Credentials.isOpenAIItself(summary(in: json).openAIBaseURL),
+              let summarys = text(.summaryOpenAIKeyPath, in: json)
+        else { return nil }
+        return Home.current.expanding(summarys)
     }
 
     /// Anthropic key, in order: ANTHROPIC_API_KEY, a token file named by

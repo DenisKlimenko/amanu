@@ -24,6 +24,7 @@ extension Config {
         case transcriptionLocalEngine = "transcription.local_engine"
         case transcriptionCloud = "transcription.cloud"
         case transcriptionOpenAIModel = "transcription.openai.model"
+        case transcriptionOpenAIKeyPath = "transcription.openai.api_key_path"
         case transcriptionModel = "transcription.model"
         case transcriptionLanguage = "transcription.language"
         case assemblyAIKey = "transcription.assemblyai.api_key"
@@ -67,6 +68,7 @@ extension Config {
         case summaryTemplate = "summary.template"
         case summaryKeyPath = "summary.api_key_path"
         case summaryOpenAIKeyPath = "summary.openai_api_key_path"
+        case summaryOpenAICompatibleKeyPath = "summary.openai_compatible_api_key_path"
         case analytics
 
         /// The key as a path into the JSON: `["auto_record", "enabled"]`.

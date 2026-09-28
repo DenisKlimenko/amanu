@@ -264,6 +264,7 @@ only values that differ from the defaults. A compact example:
   Amanu splits long recordings into 20-second pieces to stay inside its trained
   utterance window.
   Provider overrides are `transcription.openai.model`,
+  `transcription.openai.api_key_path`,
   `transcription.assemblyai.api_key`,
   `transcription.assemblyai.api_key_path`, and
   `transcription.assemblyai.speech_model`, plus
@@ -282,13 +283,18 @@ only values that differ from the defaults. A compact example:
   summaries are off, unless `speaker_names.backend` names a backend of its own.
 - `summary.*` covers `enabled`, `backend`, `language`, `model`,
   `openai_model`, `openai_base_url`, `ollama_model`, `ollama_base_url`,
-  `template`, `api_key_path`, and `openai_api_key_path`. The two Base URLs
+  `template`, `api_key_path`, `openai_api_key_path`, and
+  `openai_compatible_api_key_path`. The two Base URLs
   allow OpenAI-compatible servers and a non-default Ollama host; only a
   loopback Ollama URL keeps the transcript on this Mac, and any other host
-  must be reached over https — plain http is refused off this Mac. A key
-  pasted in Setup for an OpenAI-compatible server is kept in
-  `~/.config/amanu/keys/openai-compatible`, apart from the OpenAI key that
-  transcription uses. `amanu doctor` walks the configured summary backend,
+  must be reached over https — plain http is refused off this Mac. The OpenAI
+  key is only ever sent to OpenAI: `summary.openai_api_key_path` names it for
+  summaries while `openai_base_url` is OpenAI's own, and
+  `transcription.openai.api_key_path` names it for transcription (an older
+  config's `summary.openai_api_key_path` still counts for transcription while
+  the summary talks to OpenAI). The key for any other server is
+  `summary.openai_compatible_api_key_path`, or one pasted in Setup, which is
+  kept in `~/.config/amanu/keys/openai-compatible`. `amanu doctor` walks the configured summary backend,
   including whether Ollama is answering and has the chosen model. `template` contains
   the complete summary instructions and starts with Amanu's built-in default.
 - `mic_voice_processing` enables Apple's capture-time voice processing;

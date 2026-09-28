@@ -60,9 +60,7 @@ enum Credentials {
     static func transcriptionSlot(for provider: String, in config: [String: Any]?) -> Slot {
         switch provider {
         case "openai":
-            // `Config.openAIKey` reads this summary setting for transcription
-            // too; the two share one OpenAI key.
-            if let named = pathSetting(.summaryOpenAIKeyPath, in: config) {
+            if let named = Config.openAIKeyFile(in: config) {
                 return Slot(path: named, isNamedInConfig: true)
             }
             return Slot(path: Config.openAIKeyPath, isNamedInConfig: false)
@@ -81,6 +79,12 @@ enum Credentials {
 
     /// The file the summary's own-key backend is read from: `anthropic-api`
     /// or `openai-api`.
+    ///
+    /// For `openai-api` the answer depends on where the Base URL points.
+    /// OpenAI's own API takes the OpenAI key, from `summary.openai_api_key_path`
+    /// or wherever transcription reads it. Any other server takes a key of
+    /// its own, from `summary.openai_compatible_api_key_path` or the file a
+    /// key pasted for it goes to — never a file that holds the OpenAI key.
     static func summarySlot(for backend: String, in config: [String: Any]?) -> Slot {
         if backend == "anthropic-api" {
             if let named = pathSetting(.summaryKeyPath, in: config) {
@@ -88,26 +92,45 @@ enum Credentials {
             }
             return Slot(path: Config.anthropicKeyPath, isNamedInConfig: false)
         }
+        let baseURL = Config.summary(in: config).openAIBaseURL
+        guard isOpenAIItself(baseURL) else {
+            if let named = pathSetting(.summaryOpenAICompatibleKeyPath, in: config) {
+                return Slot(path: named, isNamedInConfig: true)
+            }
+            return Slot(path: openAICompatibleKeyPath, isNamedInConfig: false)
+        }
         if let named = pathSetting(.summaryOpenAIKeyPath, in: config) {
             return Slot(path: named, isNamedInConfig: true)
         }
-        let baseURL = Config.summary(in: config).openAIBaseURL
-        return Slot(
-            path: isOpenAIItself(baseURL) ? Config.openAIKeyPath : openAICompatibleKeyPath,
-            isNamedInConfig: false)
+        return transcriptionSlot(for: "openai", in: config)
     }
 
     /// The key the summary's `openai-api` backend sends.
     ///
-    /// To OpenAI itself, the same key transcription uses. To any other
-    /// endpoint, a key named in the config for it, or else the one pasted
-    /// for it. The OpenAI key is offered as a last resort only to a server on
-    /// this Mac: handing it to OpenRouter or Groq would give a third party a
-    /// secret it has no use for, just because a base URL was changed.
+    /// To OpenAI itself, the OpenAI key: the file `summary.openai_api_key_path`
+    /// names, or else the one transcription uses. To any other endpoint, the
+    /// key `summary.openai_compatible_api_key_path` names, or else the one
+    /// pasted for it. The OpenAI key is offered as a last resort only to a
+    /// server on this Mac: handing it to OpenRouter or Groq would give a third
+    /// party a secret it has no use for, just because a base URL was changed.
+    /// `summary.openai_api_key_path` is never read for another server, since
+    /// it has always been the OpenAI key's setting and in a config written
+    /// before the Base URL changed it still names that key.
     static func summaryOpenAIKey(in config: [String: Any]? = Config.raw()) -> String? {
         let baseURL = Config.summary(in: config).openAIBaseURL
-        guard !isOpenAIItself(baseURL) else { return Config.openAIKey() }
-        if let named = pathSetting(.summaryOpenAIKeyPath, in: config) {
+        if isOpenAIItself(baseURL) {
+            // OPENAI_API_KEY wins over a named file, as it does for
+            // transcription.
+            if Home.current.variable("OPENAI_API_KEY")?
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                return Config.openAIKey()
+            }
+            if let named = pathSetting(.summaryOpenAIKeyPath, in: config) {
+                return Config.secret(at: named)
+            }
+            return Config.openAIKey()
+        }
+        if let named = pathSetting(.summaryOpenAICompatibleKeyPath, in: config) {
             return Config.secret(at: named)
         }
         if let pasted = Config.secret(at: openAICompatibleKeyPath) { return pasted }

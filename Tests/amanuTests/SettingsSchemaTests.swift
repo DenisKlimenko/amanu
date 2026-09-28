@@ -618,6 +618,8 @@ struct SettingsDocumentationTests {
             "transcription.assemblyai.api_key_path",
             "summary.api_key_path",
             "summary.openai_api_key_path",
+            "summary.openai_compatible_api_key_path",
+            "transcription.openai.api_key_path",
         ]
         for key in advertised {
             #expect(readme.contains(key.components(separatedBy: ".").last!))
