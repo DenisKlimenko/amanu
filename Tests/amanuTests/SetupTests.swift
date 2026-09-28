@@ -271,32 +271,27 @@ struct SetupTests {
     /// title is part of the checkbox. A switch with a dead label beside it
     /// would be a smaller target than the thing it replaced, so the label
     /// still has to work.
-    @Test("Keep Audio is a switch, and its label still toggles it")
+    @Test("Keep Audio is a switch, and its label still toggles it and writes")
     @MainActor
     func keepAudioLabelTogglesItsSwitch() throws {
-        let setup = SetupWindow()
-        defer { withExtendedLifetime(setup) {} }
-        let panel = try #require(NSApp.windows.last { $0.title == "amanu setup" })
-        let label = try #require(panel.contentView?.allDescendants
-            .compactMap { $0 as? NSTextField }
-            .first { $0.stringValue == "Keep the audio after transcribing" })
-        let words = try #require(label.superview as? NSStackView)
-        let row = try #require(words.superview as? NSStackView)
-        let toggle = try #require(row.arrangedSubviews.compactMap { $0 as? NSSwitch }.first)
-        let recognizer = try #require(words.gestureRecognizers.first)
+        try withFreshHome { home in
+            let form = SetupForm()
+            defer { form.stop() }
+            let toggle = try Self.control(NSSwitch.self, "files.keep-audio", in: form.view)
+            let label = try #require(form.view.allDescendants
+                .compactMap { $0 as? NSTextField }
+                .first { $0.stringValue == "Keep the audio after transcribing" })
+            let words = try #require(label.superview)
+            let recognizer = try #require(words.gestureRecognizers.first)
+            #expect(recognizer.target === toggle)
+            #expect(toggle.state == .off)
 
-        #expect(recognizer.target === toggle)
-        #expect(toggle.target != nil, "a switch nobody listens to writes nothing")
+            toggle.toggleFromItsLabel()
 
-        // Unhooked first: this test is about the label reaching the switch,
-        // and the action behind it writes to the config file of whoever is
-        // running the suite.
-        toggle.target = nil
-        toggle.action = nil
-        toggle.state = .off
-        toggle.toggleFromItsLabel()
-
-        #expect(toggle.state == .on)
+            #expect(toggle.state == .on)
+            #expect(Config.keepAudio(), "the label moved the switch and nothing was written")
+            #expect(home.configText?.contains("\"keep_audio\" : true") == true)
+        }
     }
 
     /// A row that still had a button came out taller than its neighbours, and
@@ -432,23 +427,30 @@ struct SetupTests {
     /// The transcription section is two switches, and a switch nobody wired
     /// is the defect this file exists because of — the Summaries one shipped
     /// that way and silently summarised meetings that had been switched off.
-    @Test("Both transcription switches are wired to something")
+    /// A target that is set is not evidence of anything being written, so
+    /// the switches are thrown and the writes read back.
+    @Test(
+        "Both transcription switches write what they say",
+        .enabled(if: Platform.supportsLocalModels))
     @MainActor
-    func transcriptionSwitchesAreWired() throws {
-        let setup = SetupWindow()
-        defer { withExtendedLifetime(setup) {} }
-        let panel = try #require(NSApp.windows.last { $0.title == "amanu setup" })
+    func transcriptionSwitchesWrite() throws {
+        let store = TranscriptionStore()
+        let form = SetupForm()
+        defer { form.stop() }
+        form.storedTranscription = { store.choice }
+        form.write = { store.write($0, $1) }
+        form.refresh()
 
-        for title in ["In the cloud", "On this Mac"] {
-            let label = try #require(panel.contentView?.allDescendants
-                .compactMap { $0 as? NSTextField }
-                .first { $0.stringValue == title })
-            // title → words stack → the row that carries the switch.
-            let row = try #require(label.superview?.superview as? NSStackView)
-            let toggle = try #require(row.arrangedSubviews.first as? NSSwitch)
-            #expect(toggle.target != nil, "\(title) has no target")
-            #expect(toggle.action != nil, "\(title) has no action")
-        }
+        let cloud = try Self.control(NSSwitch.self, "transcription.cloud", in: form.view)
+        let local = try Self.control(NSSwitch.self, "transcription.local", in: form.view)
+        #expect(cloud.state == .on && local.state == .on)
+
+        cloud.performClick(nil)
+        #expect(store.engine == "parakeet", "the cloud went off and \(store.engine ?? "nothing") was written")
+        #expect(store.enabled)
+
+        local.performClick(nil)
+        #expect(!store.enabled, "both off is record-only, and that was not written")
     }
 
     /// Cloud providers are on screen whether or not the cloud is switched on,
@@ -532,46 +534,56 @@ struct SetupTests {
         #expect(header.arrangedSubviews.first is NSSwitch)
     }
 
-    @Test("The Summaries switch is connected to something")
+    /// An NSSwitch slides under the finger whether or not anyone is
+    /// listening, so "it moved" is not evidence that it did anything, and
+    /// neither is a target. What it wrote is.
+    @Test("The Summaries switch writes summary.enabled, and every card goes with it")
     @MainActor
-    func summariesSwitchIsWired() throws {
-        let setup = SetupWindow()
-        defer { withExtendedLifetime(setup) {} }
-        let panel = try #require(NSApp.windows.last { $0.title == "amanu setup" })
-        let heading = try #require(panel.contentView?.allDescendants
-            .compactMap { $0 as? NSTextField }
-            .first { $0.stringValue == "Summaries" })
-        let header = try #require(heading.superview as? NSStackView)
-        let toggle = try #require(header.arrangedSubviews.first as? NSSwitch)
+    func summariesSwitchWrites() throws {
+        try withFreshHome { _ in
+            let form = SetupForm()
+            defer { form.stop() }
+            let toggle = try Self.control(NSSwitch.self, "summary.enabled", in: form.view)
+            let cards = form.view.allDescendants.compactMap { $0 as? ChoiceCard }
+                .filter { ["claude-cli", "codex-cli", "api-key", "ollama"].contains($0.id) }
+            #expect(toggle.state == .on)
 
-        // An NSSwitch slides under the finger whether or not anyone is
-        // listening, so "it moved" is not evidence that it did anything. This
-        // asks the only question that separates the two.
-        #expect(toggle.target != nil)
-        #expect(toggle.action != nil)
+            toggle.performClick(nil)
+            #expect(Config.summary().enabled == false)
+            #expect(cards.allSatisfy { !$0.isEnabled }, "a card stayed live under a switch that is off")
+
+            toggle.performClick(nil)
+            #expect(Config.summary().enabled)
+            #expect(Config.raw()["summary"] == nil, "switching back on left a key behind")
+        }
     }
 
     /// Both icons are in the form, and both are switches somebody listens to.
     /// The pair is worth checking together: each is only safe to offer
     /// because the other exists, and a form that grew one of them without the
     /// other would be a form that can strand a running recorder.
-    @Test("Setup offers the menu bar and the Dock as two switches")
+    @Test("Setup offers the menu bar and the Dock as two switches, and each writes its own")
     @MainActor
     func iconSwitchesAreOffered() throws {
-        let setup = SetupWindow()
-        defer { withExtendedLifetime(setup) {} }
-        let panel = try #require(NSApp.windows.last { $0.title == "amanu setup" })
+        try withFreshHome { _ in
+            let form = SetupForm()
+            defer { form.stop() }
+            let menuBar = try Self.control(NSSwitch.self, "icons.menu-bar", in: form.view)
+            let dock = try Self.control(NSSwitch.self, "icons.dock", in: form.view)
+            #expect(menuBar.accessibilityLabel() == "In the menu bar")
+            #expect(dock.accessibilityLabel() == "In the Dock")
 
-        for title in ["In the menu bar", "In the Dock"] {
-            let label = try #require(
-                panel.contentView?.allDescendants
-                    .compactMap { $0 as? NSTextField }
-                    .first { $0.stringValue == title },
-                "\(title) is not in the form")
-            let row = try #require(label.superview?.superview as? NSStackView)
-            let toggle = try #require(row.arrangedSubviews.compactMap { $0 as? NSSwitch }.first)
-            #expect(toggle.target != nil)
-            #expect(toggle.action != nil)
+            menuBar.performClick(nil)
+            #expect(!Config.menuBarIcon())
+            #expect(Config.dockIcon(), "the Dock went with the menu bar")
+
+            dock.performClick(nil)
+            #expect(!Config.dockIcon())
+
+            menuBar.performClick(nil)
+            dock.performClick(nil)
+            #expect(Config.menuBarIcon() && Config.dockIcon())
+            #expect(Config.raw()["menu_bar_icon"] == nil && Config.raw()["dock_icon"] == nil)
         }
     }
 
@@ -594,27 +606,33 @@ struct SetupTests {
     /// nobody could answer from the window and which accepted anything typed
     /// into it. What replaced it has to keep the code out of sight and the
     /// five spoken languages within reach.
+    /// The window used to ask for a two-letter code in a text field, which
+    /// nobody could answer from the window and which accepted anything typed
+    /// into it. What replaced it has to keep the code out of sight and the
+    /// five spoken languages within reach — and choosing from it has to write
+    /// the code, which a target alone does not prove.
     @Test("The meeting language is chosen from a menu of named languages")
     @MainActor
     func languageIsAMenuOfNames() throws {
-        let setup = SetupWindow()
-        defer { withExtendedLifetime(setup) {} }
-        let panel = try #require(NSApp.windows.last { $0.title == "amanu setup" })
-        let label = try #require(panel.contentView?.allDescendants
-            .compactMap { $0 as? NSTextField }
-            .first { $0.stringValue == "Meetings are mostly in" })
-        let row = try #require(label.superview as? NSStackView)
-        let popup = try #require(row.arrangedSubviews.compactMap { $0 as? NSPopUpButton }.first)
+        try withFreshHome { _ in
+            let form = SetupForm()
+            defer { form.stop() }
+            let popup = try Self.control(NSPopUpButton.self, "transcription.language", in: form.view)
 
-        #expect(popup.target != nil)
-        #expect(popup.action != nil)
-        #expect(popup.itemTitles.first == "Detect automatically")
+            #expect(popup.itemTitles.first == "Detect automatically")
+            let codes = popup.menu?.items.compactMap { $0.representedObject as? String } ?? []
+            #expect(Array(codes.prefix(5)) == MeetingLanguages.pinned)
+            #expect(codes.count == MeetingLanguages.menu.count)
 
-        let codes = popup.menu?.items.compactMap { $0.representedObject as? String } ?? []
-        #expect(Array(codes.prefix(5)) == MeetingLanguages.pinned)
-        #expect(codes.count == MeetingLanguages.menu.count)
-        #expect(popup.itemTitles.contains("Русский"))
-        #expect(!popup.itemTitles.contains("ru"))
+            let russian = try #require(popup.menu?.items.first { $0.representedObject as? String == "ru" })
+            popup.select(russian)
+            popup.sendAction(popup.action, to: popup.target)
+            #expect(Config.transcriptionLanguage() == "ru")
+
+            popup.selectItem(at: 0)
+            popup.sendAction(popup.action, to: popup.target)
+            #expect(Config.transcriptionLanguage() == nil, "Detect automatically wrote something")
+        }
     }
 
     @Test("Ollama is a full summary card with the official install link")
@@ -792,11 +810,7 @@ struct SetupTests {
         // One switch, in two windows: the settings copy is on its Setup tab,
         // which is the tab a person lands on.
         let switches = try panels.map { panel in
-            let label = try #require(panel.contentView?.allDescendants
-                .compactMap { $0 as? NSTextField }
-                .first { $0.stringValue == "Keep the audio after transcribing" })
-            let row = try #require(label.superview?.superview as? NSStackView)
-            return try #require(row.arrangedSubviews.compactMap { $0 as? NSSwitch }.first)
+            try Self.control(NSSwitch.self, "files.keep-audio", in: panel.contentView)
         }
 
         // Both are made to lie, by hand: setting the state fires no action,
@@ -827,11 +841,7 @@ struct SetupTests {
                 try #require(NSApp.windows.last { $0.title == "amanu settings" }),
             ]
             let switches = try panels.map { panel in
-                let label = try #require(panel.contentView?.allDescendants
-                    .compactMap { $0 as? NSTextField }
-                    .first { $0.stringValue == "Keep the audio after transcribing" })
-                let row = try #require(label.superview?.superview as? NSStackView)
-                return try #require(row.arrangedSubviews.compactMap { $0 as? NSSwitch }.first)
+                try Self.control(NSSwitch.self, "files.keep-audio", in: panel.contentView)
             }
             #expect(switches.allSatisfy { $0.state == .off })
 
@@ -909,7 +919,7 @@ struct SetupTests {
         form.fetchParakeet = {}
         form.refresh()
 
-        let local = try Self.toggle("On this Mac", in: form.view)
+        let local = try Self.control(NSSwitch.self, "transcription.local", in: form.view)
         #expect(local.state == .off, "the form did not start from the cloud-only config")
 
         local.performClick(nil)
@@ -938,7 +948,7 @@ struct SetupTests {
         form.fetchParakeet = {}
         form.refresh()
 
-        let local = try Self.toggle("On this Mac", in: form.view)
+        let local = try Self.control(NSSwitch.self, "transcription.local", in: form.view)
         local.performClick(nil)
         let first = store.log
         #expect(form.isDownloading)
@@ -973,7 +983,7 @@ struct SetupTests {
         form.fetchParakeet = {}
         form.refresh()
 
-        let local = try Self.toggle("On this Mac", in: form.view)
+        let local = try Self.control(NSSwitch.self, "transcription.local", in: form.view)
         #expect(local.state == .off)
 
         local.performClick(nil)
@@ -983,16 +993,15 @@ struct SetupTests {
         #expect(store.engine == "parakeet")
     }
 
-    /// A switch in a row built by `SetupLayout.row`: the title label's
-    /// grandparent is the row, and the switch is the first thing in it.
+    /// A control by the name the form gives it, rather than by walking up
+    /// from its label through however many stacks the layout has today.
     @MainActor
-    private static func toggle(_ title: String, in view: NSView) throws -> NSSwitch {
-        let label = try #require(
-            view.allDescendants.compactMap { $0 as? NSTextField }
-                .first { $0.stringValue == title },
-            "no row titled \(title)")
-        let row = try #require(label.superview?.superview as? NSStackView)
-        return try #require(row.arrangedSubviews.compactMap { $0 as? NSSwitch }.first)
+    private static func control<Control: NSView>(
+        _ type: Control.Type, _ id: String, in view: NSView?
+    ) throws -> Control {
+        try #require(
+            view?.allDescendants.first { $0.identifier?.rawValue == id } as? Control,
+            "no \(type) named \(id)")
     }
 
     /// The bug itself, in the shape it actually happened in.
