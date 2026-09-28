@@ -112,11 +112,8 @@ struct Run: ParsableCommand {
             // so a denied grant can never make the repair UI unreachable.
             if startupAction == .refuse {
                 let alert = NSAlert()
-                alert.messageText = localised("Amanu could not start", "Amanu не удалось запуститься")
-                alert.informativeText = checks.compactMap { check in
-                    guard case .fail(let why) = check.status else { return nil }
-                    return "\(check.name): \(why)" + (check.remediation.map { "\n" + $0 } ?? "")
-                }.joined(separator: "\n\n")
+                alert.messageText = StartupAlert.title
+                alert.informativeText = StartupAlert.body(for: checks)
                 alert.runModal()
                 throw ExitCode(1)
             }

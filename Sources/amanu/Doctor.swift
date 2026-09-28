@@ -12,6 +12,11 @@ struct Check {
     let name: String
     let status: CheckStatus
     let remediation: String?
+    /// The failure said to a person, in the language of amanu's windows, for
+    /// the alert that stops the app starting. `amanu doctor` stays English,
+    /// like every command's output; this is only for the checks that can
+    /// refuse a start, which is where somebody meets them in a window.
+    var explained: String? = nil
 }
 
 enum DoctorReport {
@@ -203,10 +208,19 @@ enum DoctorReport {
             return Check(
                 name: "microphone",
                 status: .fail("denied"),
-                remediation: "System Settings → Privacy & Security → Microphone → enable for amanu (or your terminal)"
+                remediation: "System Settings → Privacy & Security → Microphone → enable for amanu (or your terminal)",
+                explained: localised(
+                    "Microphone access is denied. Allow amanu in System Settings → Privacy & "
+                        + "Security → Microphone.",
+                    "Доступ к микрофону запрещён. Разрешите его amanu в Системных настройках → "
+                        + "Конфиденциальность и безопасность → Микрофон.")
             )
         @unknown default:
-            return Check(name: "microphone", status: .fail("unknown state"), remediation: nil)
+            return Check(
+                name: "microphone", status: .fail("unknown state"), remediation: nil,
+                explained: localised(
+                    "macOS gave an answer amanu does not know about microphone access.",
+                    "macOS ответила про доступ к микрофону то, чего amanu не знает."))
         }
     }
 
@@ -256,14 +270,24 @@ enum DoctorReport {
             return Check(
                 name: "recordings folder",
                 status: .fail("can't create \(root.path)"),
-                remediation: "check permissions on the parent directory"
+                remediation: "check permissions on the parent directory",
+                explained: localised(
+                    "The recordings folder \(root.path) can't be created. Check the permissions "
+                        + "on the folder it is in, or choose another in the config file.",
+                    "Не удаётся создать папку записей \(root.path). Проверьте права на папку, "
+                        + "в которой она лежит, или укажите другую в файле настроек.")
             )
         }
         guard FileManager.default.isWritableFile(atPath: root.path) else {
             return Check(
                 name: "recordings folder",
                 status: .fail("\(root.path) is not writable"),
-                remediation: "check permissions on the directory"
+                remediation: "check permissions on the directory",
+                explained: localised(
+                    "amanu can't write into the recordings folder \(root.path). Check its "
+                        + "permissions, or choose another in the config file.",
+                    "amanu не может писать в папку записей \(root.path). Проверьте права на неё "
+                        + "или укажите другую в файле настроек.")
             )
         }
         return Check(name: "recordings folder", status: .ok, remediation: nil)
