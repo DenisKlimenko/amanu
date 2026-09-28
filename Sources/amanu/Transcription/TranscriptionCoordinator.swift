@@ -41,20 +41,27 @@ actor TranscriptionCoordinator {
     /// it throws: nil until one was prepared.
     private var current: TranscriptionEngine?
     private let onStop: @Sendable () -> String?
+    private let echoCanceller: EchoCancellerFactory
+
+    typealias EchoCancellerFactory = @Sendable () throws -> EchoCanceller
 
     /// `engine` is one settled on in advance rather than chosen for the
     /// machine at the moment there is work. Only tests pass one: everything
     /// real wants the configured answer, and wants it decided late.
     init(engine: TranscriptionEngine? = nil,
-         onStop: @escaping @Sendable () -> String? = { Config.onStop() }) {
+         onStop: @escaping @Sendable () -> String? = { Config.onStop() },
+         echoCanceller: @escaping EchoCancellerFactory = { try EchoCanceller() }) {
         engines = EngineResolver(fixed: engine)
         self.onStop = onStop
+        self.echoCanceller = echoCanceller
     }
 
     init(engines: EngineResolver,
-         onStop: @escaping @Sendable () -> String? = { Config.onStop() }) {
+         onStop: @escaping @Sendable () -> String? = { Config.onStop() },
+         echoCanceller: @escaping EchoCancellerFactory = { try EchoCanceller() }) {
         self.engines = engines
         self.onStop = onStop
+        self.echoCanceller = echoCanceller
     }
 
     func setStatusHandler(_ handler: @escaping @Sendable (Status) -> Void) {
@@ -310,32 +317,14 @@ actor TranscriptionCoordinator {
         defer { cleaned?.removeAudio() }
         if Config.offlineEchoCancellation(),
            let mic = meta.track(for: "me"), let system = meta.track(for: "them") {
-            let microphone = OfflineEchoAudio.Source(
-                url: dir.appendingPathComponent(mic.file), channel: mic.channel ?? 0, offsetMs: mic.offsetMs)
-            let reference = OfflineEchoAudio.Source(
-                url: dir.appendingPathComponent(system.file), channel: system.channel ?? 0, offsetMs: system.offsetMs)
-            log(dir, "removing acoustic echo from a microphone copy before transcription")
-            let worker = Task.detached(priority: .utility) {
-                try OfflineEchoAudio.prepare(microphone: microphone, system: reference, in: dir)
+            if let prepared = try await cancelEcho(in: dir, mic: mic, system: system) {
+                cleaned = prepared
+                audioDirectory = prepared.directory
+                meta = SessionMeta(tracks: [
+                    .init(file: "mic.caf", speaker: "me", offsetMs: 0, channel: nil),
+                    .init(file: "system.caf", speaker: "them", offsetMs: 0, channel: nil),
+                ], title: meta.title, attendees: meta.attendees, app: meta.app)
             }
-            let prepared = try await withTaskCancellationHandler {
-                try await worker.value
-            } onCancel: { worker.cancel() }
-            cleaned = prepared
-            try Task.checkCancellation()
-            audioDirectory = prepared.directory
-            meta = SessionMeta(tracks: [
-                .init(file: "mic.caf", speaker: "me", offsetMs: 0, channel: nil),
-                .init(file: "system.caf", speaker: "them", offsetMs: 0, channel: nil),
-            ], title: meta.title, attendees: meta.attendees, app: meta.app)
-            SessionState.update(dir, with: ["audio_echo_cancellation": [
-                "processor": LocalVQEAssets.processorVersion,
-                "model_sha256": LocalVQEAssets.modelSHA256,
-                "sample_rate": EchoCanceller.sampleRate,
-                "frames": prepared.frames,
-                "cache_directory": prepared.directory.lastPathComponent,
-            ]])
-            log(dir, "audio echo cancellation complete; original tracks kept")
         } else {
             SessionState.update(dir, with: ["audio_echo_cancellation": nil])
         }
@@ -415,6 +404,57 @@ actor TranscriptionCoordinator {
         // paying twice for nothing.
         TrackCompressor.settle(sessionDir: dir)
         return engine
+    }
+
+    /// Clean acoustic echo out of a copy of the microphone track, or nil when
+    /// that could not be done.
+    ///
+    /// Echo cancellation improves a transcript; it is not what makes one. It
+    /// is on by default, and a failure anywhere in it — a LocalVQE library
+    /// missing from the bundle or refusing to load, a model that fails its
+    /// checksum, a hop of non-finite audio, a copy that came out short — used
+    /// to fail the whole transcription, be retried three times and retire a
+    /// recording whose tracks were perfectly good. Now the tracks are
+    /// transcribed as recorded, the text-level echo filter does what it did
+    /// before offline cancellation existed, and meta.json and the log say
+    /// what was skipped and why.
+    private func cancelEcho(
+        in dir: URL, mic: SessionMeta.Track, system: SessionMeta.Track
+    ) async throws -> OfflineEchoAudio.Result? {
+        let microphone = OfflineEchoAudio.Source(
+            url: dir.appendingPathComponent(mic.file), channel: mic.channel ?? 0, offsetMs: mic.offsetMs)
+        let reference = OfflineEchoAudio.Source(
+            url: dir.appendingPathComponent(system.file), channel: system.channel ?? 0, offsetMs: system.offsetMs)
+        let factory = echoCanceller
+        log(dir, "removing acoustic echo from a microphone copy before transcription")
+        let worker = Task.detached(priority: .utility) {
+            try OfflineEchoAudio.prepare(
+                microphone: microphone, system: reference, in: dir, cancellerFactory: factory)
+        }
+        let prepared: OfflineEchoAudio.Result
+        do {
+            prepared = try await withTaskCancellationHandler {
+                try await worker.value
+            } onCancel: { worker.cancel() }
+            try Task.checkCancellation()
+        } catch {
+            if error is CancellationError || Task.isCancelled { throw CancellationError() }
+            log(dir, "echo cancellation skipped — \(error); transcribing the tracks as recorded")
+            SessionState.update(dir, with: ["audio_echo_cancellation": [
+                "processor": LocalVQEAssets.processorVersion,
+                "skipped": "\(error)",
+            ]])
+            return nil
+        }
+        SessionState.update(dir, with: ["audio_echo_cancellation": [
+            "processor": LocalVQEAssets.processorVersion,
+            "model_sha256": LocalVQEAssets.modelSHA256,
+            "sample_rate": EchoCanceller.sampleRate,
+            "frames": prepared.frames,
+            "cache_directory": prepared.directory.lastPathComponent,
+        ]])
+        log(dir, "audio echo cancellation complete; original tracks kept")
+        return prepared
     }
 
     /// Fires the configured on_stop shell command with the session directory
