@@ -56,8 +56,14 @@ final class RecordingSession {
 
     var title: String? { context.title }
 
-    private let mic = MicRecorder()
-    private let system = SystemAudioRecorder()
+    private let mic: MicTrackRecorder
+    private let system: SystemTrackRecorder
+
+    /// How meta.json and the manifest reach the disk. A parameter so a test
+    /// can make one of them fail — disk full is the case that matters, and it
+    /// cannot be produced on demand any other way.
+    typealias FileWriter = (Data, URL) throws -> Void
+    private let writeFile: FileWriter
 
     typealias LiveAudioSink = LiveAudioBufferRelay.Sink
 
@@ -83,6 +89,8 @@ final class RecordingSession {
     /// Tracks that stalled at any point, recorded in meta.json so a one-sided
     /// transcript can be explained afterwards rather than puzzled over.
     private var trackEverStalled: Set<String> = []
+    /// The tracks that have stalled at some point, for meta.json and tests.
+    var stalledTracks: Set<String> { trackEverStalled }
     private static let watchdogInterval: TimeInterval = 15
     private static let stallThreshold: TimeInterval = 45
 
@@ -111,11 +119,20 @@ final class RecordingSession {
     init(
         root: URL,
         context: MeetingContext = .empty,
-        trigger: Trigger = .manual
+        trigger: Trigger = .manual,
+        mic: MicTrackRecorder? = nil,
+        system: SystemTrackRecorder? = nil,
+        writeFile: @escaping FileWriter = RecordingSession.durableWrite
     ) throws {
         self.context = context
         self.trigger = trigger
         self.tapFamilies = context.appFamilies
+        // Built here rather than as default arguments: a default argument is
+        // evaluated in the caller's isolation, and these are only ever made
+        // for the session that owns them.
+        self.mic = mic ?? MicRecorder()
+        self.system = system ?? SystemAudioRecorder()
+        self.writeFile = writeFile
 
         var base = Self.folderFormat.string(from: startedAt)
         if let suffix = context.folderSuffix {
@@ -133,13 +150,19 @@ final class RecordingSession {
 
     /// Start both tracks. If the mic fails after the system tap started, the
     /// tap is torn down so we never run half a session silently.
-    func start() throws {
+    ///
+    /// A start that fails takes its folder with it. Nothing in it is worth
+    /// keeping — at most a few milliseconds of system audio — and a folder
+    /// with no meta.json is invisible to every list, so it would never be
+    /// transcribed or tidied; an auto-start retrying against a refusal used
+    /// to leave one behind per attempt.
+    func start(systemAudioScope: String = Config.systemAudioScope()) throws {
         // Point the tap at the call app when we know it. Everything else the
         // Mac plays — music, notifications, the video you open afterwards —
         // then stays out of both the transcript and the auto-record loop's
         // idea of whether the far end is still talking.
         let scope: SystemAudioRecorder.Scope =
-            (Config.systemAudioScope() == "app" && !tapFamilies.isEmpty)
+            (systemAudioScope == "app" && !tapFamilies.isEmpty)
                 ? .apps(tapFamilies)
                 : .everything
         // The marker must precede capture. A kill after either recorder starts
@@ -148,8 +171,7 @@ final class RecordingSession {
         do {
             try system.start(writingTo: dir.appendingPathComponent("system.caf"), scope: scope)
         } catch {
-            try? FileManager.default.removeItem(
-                at: dir.appendingPathComponent(Self.manifestFile))
+            abandonFolder()
             throw StartFailure.systemAudio(error)
         }
         do {
@@ -159,18 +181,34 @@ final class RecordingSession {
             try mic.start(writingTo: dir.appendingPathComponent("mic.caf"), callApps: tapFamilies)
         } catch {
             system.stop()
-            try? FileManager.default.removeItem(
-                at: dir.appendingPathComponent(Self.manifestFile))
+            abandonFolder()
             throw StartFailure.microphone(error)
         }
         Analytics.track(.recordingStarted, [.trigger: .text(trigger.rawValue)])
-        watchdog = Timer.scheduledTimer(
-            withTimeInterval: Self.watchdogInterval, repeats: true
-        ) { [weak self] _ in
+        let watchdog = Timer(timeInterval: Self.watchdogInterval, repeats: true) { [weak self] _ in
             // Same idiom as AppController's elapsed-time ticker: the timer
             // fires on the main run loop, so promote that to the type system
             // rather than capturing non-Sendable state across a boundary.
             MainActor.assumeIsolated { self?.checkTrackLiveness() }
+        }
+        // Common modes, like the auto-record timer: in the default mode alone
+        // an open menu or a window being dragged holds the tick back, and the
+        // tick is what follows the microphone and notices a stalled track.
+        RunLoop.main.add(watchdog, forMode: .common)
+        self.watchdog = watchdog
+    }
+
+    /// Remove the folder of a session that never started. Only ever called
+    /// before either track is running, so there is nothing in it that a
+    /// meeting depends on.
+    private func abandonFolder() {
+        do {
+            try FileManager.default.removeItem(at: dir)
+        } catch {
+            // Second best: at least do not leave a manifest claiming a
+            // recording, which crash recovery would then try to adopt.
+            try? FileManager.default.removeItem(
+                at: dir.appendingPathComponent(Self.manifestFile))
         }
     }
 
@@ -185,21 +223,13 @@ final class RecordingSession {
         let ended = Date()
         let iso = ISO8601DateFormatter()
 
-        // The tracks don't start on the same buffer; record how far each
-        // lags the earliest so transcript timestamps share one clock.
-        let micStart = mic.firstBufferAt ?? startedAt
-        let systemStart = system.firstBufferAt ?? startedAt
-        let earliest = min(micStart, systemStart)
-
         var meta: [String: Any] = [
             "started": iso.string(from: startedAt),
             "ended": iso.string(from: ended),
             "duration_seconds": Int(ended.timeIntervalSince(startedAt)),
             "files": ["mic": "mic.caf", "system": "system.caf"],
-            "start_offset_ms": [
-                "mic": Int(micStart.timeIntervalSince(earliest) * 1000),
-                "system": Int(systemStart.timeIntervalSince(earliest) * 1000),
-            ],
+            "start_offset_ms": Self.startOffsets(
+                mic: mic.firstBufferAt, system: system.firstBufferAt),
             "trigger": trigger.rawValue,
             "stop_reason": reason,
             "system_audio": {
@@ -223,8 +253,19 @@ final class RecordingSession {
             meta["mic_restarts"] = restarts.map { $0.meta(iso: iso) }
         }
 
-        Self.write(meta: meta, to: dir)
-        try? FileManager.default.removeItem(at: dir.appendingPathComponent(Self.manifestFile))
+        // meta.json and the manifest are the only two things that make this
+        // folder a session, so one of them has to be on disk at every moment.
+        // The manifest goes only once meta.json is known to be there; a disk
+        // that refuses meta.json keeps the manifest, rewritten without our
+        // pid so that the next recovery adopts it instead of taking it for a
+        // recording still in progress.
+        do {
+            try writeFile(Self.json(meta), dir.appendingPathComponent("meta.json"))
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(Self.manifestFile))
+        } catch {
+            Self.reportMetaFailure(error, in: dir)
+            writeManifest(stopped: meta)
+        }
 
         let length = ended.timeIntervalSince(startedAt)
         let systemHeardSomething = system.lastSoundAt != nil
@@ -353,7 +394,7 @@ final class RecordingSession {
                 dir: dir,
                 pid: pid,
                 started: (manifest["started"] as? String).flatMap { iso.date(from: $0) },
-                ownerIsAlive: kill(pid, 0) == 0
+                ownerIsAlive: processIsAlive(pid)
             ))
         }
         return found
@@ -368,7 +409,9 @@ final class RecordingSession {
     ///
     /// Returns the recovered folders, oldest first.
     @discardableResult
-    static func recoverInterrupted(root: URL) -> [URL] {
+    static func recoverInterrupted(
+        root: URL, writeFile: FileWriter = RecordingSession.durableWrite
+    ) -> [URL] {
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: root, includingPropertiesForKeys: nil
         ) else { return [] }
@@ -397,8 +440,9 @@ final class RecordingSession {
             // A live owner means a second amanu is recording into this folder
             // right now. Leave it strictly alone. (A recycled PID could fool
             // this; the cost is deferring recovery to the next launch, which
-            // is the safe direction to be wrong in.)
-            if let pid = manifest["pid"] as? Int32, kill(pid, 0) == 0 { continue }
+            // is the safe direction to be wrong in.) A manifest without a pid
+            // is one a stop left behind when meta.json would not write.
+            if let pid = manifest["pid"] as? Int32, processIsAlive(pid) { continue }
 
             // Something has to be in the tracks, or there's nothing to recover.
             let files = (manifest["files"] as? [String: String]) ?? [:]
@@ -408,9 +452,14 @@ final class RecordingSession {
                 ))?[.size] as? Int64
             }
             guard let largest = sizes.max(), largest > 0 else {
+                // Its owner is gone, so nothing will ever be written here.
+                // Leaving the manifest meant saying "has no audio" on every
+                // launch and `amanu doctor` warning about an unrecovered
+                // recording forever.
                 FileHandle.standardError.write(Data(
-                    "interrupted session \(dir.lastPathComponent) has no audio — skipping\n".utf8
+                    "interrupted session \(dir.lastPathComponent) has no audio — removing it\n".utf8
                 ))
+                removeEmptySession(dir)
                 continue
             }
 
@@ -439,8 +488,24 @@ final class RecordingSession {
             if let calendar = manifest["calendar"] as? [String: Any] {
                 meta["calendar"] = calendar
             }
+            // A stop that could not write meta.json kept what it would have
+            // written here, and that is a better account than one rebuilt
+            // from file dates: it knows why the recording ended and what the
+            // microphone did.
+            if let stopped = manifest["meta"] as? [String: Any] {
+                meta = stopped
+                meta["recovered"] = true
+            }
 
-            write(meta: meta, to: dir)
+            // The manifest goes only once meta.json is on disk. Without either
+            // the folder is not a session to anything that lists them, and
+            // the recording disappears with its audio still in it.
+            do {
+                try writeFile(json(meta), dir.appendingPathComponent("meta.json"))
+            } catch {
+                reportMetaFailure(error, in: dir)
+                continue
+            }
             try? fm.removeItem(at: manifestURL)
             Analytics.track(.sessionInterrupted, [
                 .trigger: .text(manifest["trigger"] as? String ?? Trigger.manual.rawValue),
@@ -464,58 +529,159 @@ final class RecordingSession {
         return recovered
     }
 
+    /// Whether the process that wrote a manifest is still running.
+    ///
+    /// `EPERM` is an answer, not a failure: it means the process exists and
+    /// belongs to someone we may not signal. Reading it as "gone" would let
+    /// recovery adopt a recording still being written, and the queue then
+    /// transcribe it and settle its audio out from under the recorder.
+    nonisolated static func processIsAlive(_ pid: Int32) -> Bool {
+        kill(pid, 0) == 0 || errno == EPERM
+    }
+
+    /// Remove a session whose owner is gone and that holds no audio. The
+    /// manifest always goes; the folder goes too when nothing in it has a
+    /// byte in it, so an empty folder does not outlive its manifest.
+    private static func removeEmptySession(_ dir: URL) {
+        let fm = FileManager.default
+        let contents = (try? fm.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey])) ?? []
+        let onlyEmpty = contents.allSatisfy { item in
+            if item.lastPathComponent == manifestFile { return true }
+            let values = try? item.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            return values?.isRegularFile == true && (values?.fileSize ?? 1) == 0
+        }
+        if onlyEmpty {
+            try? fm.removeItem(at: dir)
+        } else {
+            try? fm.removeItem(at: dir.appendingPathComponent(manifestFile))
+        }
+    }
+
     // MARK: -
 
     /// Record who owns this folder and what it is, so a crash is recoverable.
     /// Written once at start and refreshed when the tracks' first buffers have
     /// landed (the offsets aren't known before then).
-    private func writeManifest() {
+    ///
+    /// `stopped` is the meta.json a stop could not write. It is kept here
+    /// instead, without our pid, so that the folder stays a session and the
+    /// next recovery adopts it rather than mistaking it for one in progress.
+    private func writeManifest(stopped: [String: Any]? = nil) {
         let iso = ISO8601DateFormatter()
         var manifest: [String: Any] = [
-            "pid": ProcessInfo.processInfo.processIdentifier,
             "started": iso.string(from: startedAt),
             "files": ["mic": "mic.caf", "system": "system.caf"],
             "trigger": trigger.rawValue,
         ]
+        if let stopped {
+            manifest["meta"] = stopped
+        } else {
+            manifest["pid"] = ProcessInfo.processInfo.processIdentifier
+        }
         if let title { manifest["title"] = title }
         manifest.merge(context.metaFields) { current, _ in current }
-        if let micStart = mic.firstBufferAt, let systemStart = system.firstBufferAt {
-            let earliest = min(micStart, systemStart)
-            manifest["start_offset_ms"] = [
-                "mic": Int(micStart.timeIntervalSince(earliest) * 1000),
-                "system": Int(systemStart.timeIntervalSince(earliest) * 1000),
-            ]
+        if mic.firstBufferAt != nil || system.firstBufferAt != nil {
+            manifest["start_offset_ms"] = Self.startOffsets(
+                mic: mic.firstBufferAt, system: system.firstBufferAt)
         }
-        if let data = try? JSONSerialization.data(
-            withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]
-        ) {
-            try? data.write(to: dir.appendingPathComponent(Self.manifestFile), options: .atomic)
+        do {
+            try writeFile(Self.json(manifest), dir.appendingPathComponent(Self.manifestFile))
+        } catch {
+            FileHandle.standardError.write(Data(
+                "couldn't write the recording manifest in \(dir.lastPathComponent): \(error)\n".utf8
+            ))
         }
     }
 
-    private static func write(meta: [String: Any], to dir: URL) {
-        if let data = try? JSONSerialization.data(
-            withJSONObject: meta,
-            options: [.prettyPrinted, .sortedKeys]
-        ) {
-            try? data.write(to: dir.appendingPathComponent("meta.json"), options: .atomic)
+    /// How far each track's first buffer lags the earlier of the two, so the
+    /// transcripts share one clock.
+    ///
+    /// A track that never delivered a buffer takes no part in choosing the
+    /// reference and is put at zero: it has no audio for an offset to move,
+    /// and counting it from when the session was created would push the
+    /// track that did record later than it happened.
+    nonisolated static func startOffsets(mic: Date?, system: Date?) -> [String: Int] {
+        guard let earliest = [mic, system].compactMap({ $0 }).min() else {
+            return ["mic": 0, "system": 0]
         }
+        func offset(_ start: Date?) -> Int {
+            start.map { Int($0.timeIntervalSince(earliest) * 1000) } ?? 0
+        }
+        return ["mic": offset(mic), "system": offset(system)]
+    }
+
+    nonisolated static func json(_ object: [String: Any]) throws -> Data {
+        try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+    }
+
+    /// Write `data` so that once this returns it is on the disk, not in a
+    /// cache: a temporary beside the destination, flushed, then renamed over
+    /// it. The manifest is removed on the strength of this returning, so
+    /// "the write call did not complain" is not enough.
+    nonisolated static func durableWrite(_ data: Data, _ url: URL) throws {
+        let fm = FileManager.default
+        let temporary = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+        guard fm.createFile(atPath: temporary.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: temporary.path])
+        }
+        do {
+            let handle = try FileHandle(forWritingTo: temporary)
+            do {
+                try handle.write(contentsOf: data)
+                try handle.synchronize()
+                try handle.close()
+            } catch {
+                try? handle.close()
+                throw error
+            }
+            guard rename(temporary.path, url.path) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        } catch {
+            try? fm.removeItem(at: temporary)
+            throw error
+        }
+    }
+
+    /// Say so when meta.json cannot be written. The session is not lost —
+    /// the manifest stays behind for recovery — but it will not be
+    /// transcribed until that happens, and a full disk is worth hearing about
+    /// while there is still a meeting to save.
+    nonisolated static func reportMetaFailure(_ error: Error, in dir: URL) {
+        FileHandle.standardError.write(Data(
+            "couldn't write meta.json in \(dir.lastPathComponent): \(error)\n".utf8
+        ))
+        notifyUser(
+            title: localised(
+                "amanu: couldn't save the recording's details",
+                "amanu: не удалось сохранить сведения о записи"),
+            body: localised(
+                "The audio is kept and will be picked up again at the next launch. Is the disk full?",
+                "Звук сохранён и будет подхвачен при следующем запуске. Не заполнен ли диск?"),
+            opening: dir
+        )
     }
 
     /// Compare each track file's size against the last poll. Growth clears any
     /// stall state (and announces recovery); a freeze past the threshold
     /// notifies once per stall episode, so a track that dies, recovers, and
     /// dies again alerts both times without spamming in between.
-    private func checkTrackLiveness() {
-        let now = Date()
+    ///
+    /// A track that is not there at all is the worst stall of all, not a
+    /// reason to look away. The mic recorder deletes its file when voice
+    /// processing turns out silent at the start and rebuilds it raw; if that
+    /// rebuild fails there is no file, and skipping missing files meant the
+    /// one banner that could have said so never came.
+    func checkTrackLiveness(now: Date = Date()) {
         var offsetsPending = false
 
         for name in ["mic", "system"] {
             let path = dir.appendingPathComponent("\(name).caf").path
-            guard let size = (try? FileManager.default
-                .attributesOfItem(atPath: path))?[.size] as? Int64 else { continue }
+            let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? Int64
 
-            if size != trackSize[name] {
+            if let size, size != trackSize[name] {
                 trackSize[name] = size
                 trackLastGrew[name] = now
                 if trackStalled.remove(name) != nil {
@@ -529,20 +695,30 @@ final class RecordingSession {
                         opening: dir
                     )
                 }
-            } else if let last = trackLastGrew[name], !trackStalled.contains(name),
-                      now.timeIntervalSince(last) >= Self.stallThreshold {
-                trackStalled.insert(name)
-                trackEverStalled.insert(name)
-                notifyUser(
-                    title: localised(
-                        "amanu: \(name) track stalled", "amanu: дорожка \(name) встала"),
-                    body: localised(
-                        "No \(name) audio written for \(Int(now.timeIntervalSince(last)))s",
-                        "Звук \(name) не пишется уже \(Int(now.timeIntervalSince(last))) с")
-                        + " — the recording may be incomplete.",
-                    opening: dir
-                )
+                continue
             }
+            // Counted from the start for a track that has never grown, so a
+            // file that never appeared stalls on the same clock as one that
+            // stopped.
+            let last = trackLastGrew[name] ?? startedAt
+            guard !trackStalled.contains(name),
+                  now.timeIntervalSince(last) >= Self.stallThreshold
+            else { continue }
+            trackStalled.insert(name)
+            trackEverStalled.insert(name)
+            let silentFor = Int(now.timeIntervalSince(last))
+            notifyUser(
+                title: localised(
+                    "amanu: \(name) track stalled", "amanu: дорожка \(name) встала"),
+                body: size == nil
+                    ? localised(
+                        "There is no \(name) track being written — the recording may be incomplete.",
+                        "Дорожка \(name) не записывается — запись может быть неполной.")
+                    : localised(
+                        "No \(name) audio written for \(silentFor)s — the recording may be incomplete.",
+                        "Звук \(name) не пишется уже \(silentFor) с — запись может быть неполной."),
+                opening: dir
+            )
         }
 
         followCallApp(now: now)

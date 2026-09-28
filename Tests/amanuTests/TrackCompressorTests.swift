@@ -9,26 +9,60 @@ import Testing
 /// deleted before something readable has taken its place, and meta.json must
 /// never point at a file that isn't there.
 struct TrackCompressorTests {
+    /// Which channels of a stereo fixture carry the tone. The system track is
+    /// always stereo in production — the tap is a stereo mixdown — and a
+    /// source panned to one side is ordinary.
+    enum Pan { case both, leftOnly, rightOnly }
+
     private func writePCM(
         _ url: URL,
         seconds: Double,
         frequency: Double,
-        leadingSilence: Double = 0
+        leadingSilence: Double = 0,
+        channels: AVAudioChannelCount = 1,
+        pan: Pan = .both
     ) throws {
         let rate = 48000.0
-        try TestAudio.write(to: url, seconds: seconds, sampleRate: rate) { _, frame in
-            Double(frame) / rate < leadingSilence
-                ? 0
-                : 0.45 * Float(sin(2 * .pi * frequency * Double(frame) / rate))
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: rate,
+            channels: channels, interleaved: false)!
+        let file = try AVAudioFile(
+            forWriting: url,
+            settings: AudioFormats.pcmSettings(sampleRate: rate, channels: channels),
+            commonFormat: format.commonFormat,
+            interleaved: format.isInterleaved)
+        let chunk = AVAudioFrameCount(4800)
+        var written = 0
+        let total = Int(seconds * rate)
+        while written < total {
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunk)!
+            let n = min(Int(chunk), total - written)
+            buffer.frameLength = AVAudioFrameCount(n)
+            for channel in 0..<Int(channels) {
+                let data = buffer.floatChannelData![channel]
+                let silent = channels > 1
+                    && ((pan == .leftOnly && channel == 1) || (pan == .rightOnly && channel == 0))
+                for i in 0..<n {
+                    let frame = written + i
+                    data[i] = silent || Double(frame) / rate < leadingSilence
+                        ? 0
+                        : 0.45 * Float(sin(2 * .pi * frequency * Double(frame) / rate))
+                }
+            }
+            try file.write(from: buffer)
+            written += n
         }
     }
 
-    private func makeTwoTrackSession() throws -> URL {
+    /// A mono mic track and a stereo system track, as the recorders write them.
+    private func makeTwoTrackSession(systemPan: Pan = .both) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("amanu-stereo-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try writePCM(dir.appendingPathComponent("mic.caf"), seconds: 3, frequency: 220)
-        try writePCM(dir.appendingPathComponent("system.caf"), seconds: 2, frequency: 660)
+        try writePCM(
+            dir.appendingPathComponent("system.caf"), seconds: 2, frequency: 660,
+            channels: 2, pan: systemPan)
         try JSONSerialization.data(withJSONObject: [
             "files": ["mic": "mic.caf", "system": "system.caf"],
             "start_offset_ms": ["mic": 0, "system": 500],
@@ -240,5 +274,83 @@ struct TrackCompressorTests {
         TrackCompressor.compress(sessionDir: dir)
 
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("mic.caf").path))
+    }
+
+    // MARK: - what must never be lost
+
+    /// The converter's default for stereo to mono keeps the left channel and
+    /// drops the right. A far end panned right was archived as silence and
+    /// the original deleted.
+    @Test("A system track heard only on the right is archived, not dropped",
+          arguments: [Pan.leftOnly, .rightOnly])
+    func oneSidedSystemTrackSurvives(pan: Pan) throws {
+        let dir = try makeTwoTrackSession(systemPan: pan)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        TrackCompressor.compress(sessionDir: dir)
+
+        let archive = dir.appendingPathComponent("audio.m4a")
+        #expect(try peak(in: archive, channel: 1, from: 0.7, to: 1.2) > 0.1)
+    }
+
+    /// Truncated after it was written: the header promises three seconds and
+    /// the disk holds half of it. A read that fails partway used to be taken
+    /// for the end of the file, the rest padded with zeros to the header's
+    /// length, and the original deleted.
+    @Test("A track that cannot be read to its end keeps its originals")
+    func midFileReadFailureKeepsOriginals() throws {
+        let dir = try makeTwoTrackSession()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let system = dir.appendingPathComponent("system.caf")
+        let bytes = try #require(
+            (try FileManager.default.attributesOfItem(atPath: system.path))[.size] as? Int)
+        let handle = try FileHandle(forWritingTo: system)
+        try handle.truncate(atOffset: UInt64(bytes / 2))
+        try handle.close()
+
+        TrackCompressor.compress(sessionDir: dir)
+
+        #expect(FileManager.default.fileExists(atPath: system.path))
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("mic.caf").path))
+        #expect((try meta(in: dir)["files"] as? [String: String])?["system"] == "system.caf")
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("audio.m4a").path))
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("audio.tmp.m4a").path))
+    }
+
+    /// Interrupted after meta.json was pointed at the archive and before the
+    /// PCM was deleted: every later pass returned early and a gigabyte an
+    /// hour stayed behind.
+    @Test("A compression interrupted before deleting the originals finishes on the next pass")
+    func interruptedCompressionFinishes() throws {
+        let dir = try makeTwoTrackSession()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let mic = dir.appendingPathComponent("mic.caf")
+        let system = dir.appendingPathComponent("system.caf")
+        let savedMic = try Data(contentsOf: mic), savedSystem = try Data(contentsOf: system)
+        TrackCompressor.compress(sessionDir: dir)
+        // Put the originals back as the interruption would have left them.
+        try savedMic.write(to: mic)
+        try savedSystem.write(to: system)
+
+        TrackCompressor.compress(sessionDir: dir)
+
+        #expect(!FileManager.default.fileExists(atPath: mic.path))
+        #expect(!FileManager.default.fileExists(atPath: system.path))
+        #expect(try peak(in: dir.appendingPathComponent("audio.m4a"), channel: 0, from: 0.7, to: 1.2) > 0.2)
+    }
+
+    @Test("Leftovers are kept when the archive they were replaced by cannot be read")
+    func leftoversSurviveABrokenArchive() throws {
+        let dir = try makeTwoTrackSession()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let mic = dir.appendingPathComponent("mic.caf")
+        let savedMic = try Data(contentsOf: mic)
+        TrackCompressor.compress(sessionDir: dir)
+        try savedMic.write(to: mic)
+        try Data("not audio".utf8).write(to: dir.appendingPathComponent("audio.m4a"))
+
+        TrackCompressor.compress(sessionDir: dir)
+
+        #expect(FileManager.default.fileExists(atPath: mic.path))
     }
 }

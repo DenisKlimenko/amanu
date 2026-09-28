@@ -35,7 +35,9 @@ enum Notifications {
     }
 
     @MainActor
-    static func post(title: String, body: String, opening session: URL?) {
+    static func post(
+        title: String, body: String, opening session: URL?, replacing identifier: String? = nil
+    ) {
         guard usesNotificationCenter else { return }
 
         let content = UNMutableNotificationContent()
@@ -55,7 +57,7 @@ enum Notifications {
             guard await request.value else { return }
             try? await UNUserNotificationCenter.current().add(
                 UNNotificationRequest(
-                    identifier: UUID().uuidString, content: content, trigger: nil))
+                    identifier: identifier ?? UUID().uuidString, content: content, trigger: nil))
         }
     }
 
@@ -96,9 +98,14 @@ enum Notifications {
     }
 }
 
-/// Best-effort user-visible notification.
-func notifyUser(title: String, body: String, opening session: URL? = nil) {
+/// Best-effort user-visible notification. A banner posted with the same
+/// `replacing` identifier as one still on screen takes its place instead of
+/// stacking under it — for a failure that repeats, the second banner says
+/// nothing the first did not.
+func notifyUser(
+    title: String, body: String, opening session: URL? = nil, replacing identifier: String? = nil
+) {
     Task { @MainActor in
-        Notifications.post(title: title, body: body, opening: session)
+        Notifications.post(title: title, body: body, opening: session, replacing: identifier)
     }
 }

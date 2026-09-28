@@ -90,22 +90,6 @@ struct SetupTests {
         #expect(check.remediation?.contains("8 days ago") == true)
     }
 
-    @Test("A running system tap distinguishes digital zero from ordinary quiet")
-    func systemAudioDigitalSilenceDecision() {
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let began = now.addingTimeInterval(-15)
-
-        #expect(SystemAudioRecorder.isDigitallySilent(
-            firstBufferAt: began, bufferCount: 100, highestPeak: 0, now: now
-        ))
-        #expect(!SystemAudioRecorder.isDigitallySilent(
-            firstBufferAt: began, bufferCount: 100, highestPeak: 0.000_001, now: now
-        ))
-        #expect(!SystemAudioRecorder.isDigitallySilent(
-            firstBufferAt: now.addingTimeInterval(-2), bufferCount: 100, highestPeak: 0, now: now
-        ))
-    }
-
     /// The warning is for a conversation with one side missing: you have
     /// spoken lately and the far end has said nothing for five minutes. The
     /// scope is passed but decides nothing — both kinds of tap can lose their

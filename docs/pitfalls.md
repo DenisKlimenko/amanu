@@ -381,6 +381,22 @@ reasoning alone. Worth knowing before trusting any of them in front of someone.
   `docs/testing/setup-window-manual-checklist.md` — a recording with real
   microphone speech and real playback, checked by ear; a permission denied and
   re-granted; a recordings folder moved into Documents.
+- **The mic's retreats against a real device.** A call app on a microphone
+  that refuses `setDeviceID`, or whose engine will not start, is now given up
+  for the default and not asked again for a minute, then two, up to fifteen;
+  a session whose voice processing will not start begins raw instead of
+  failing. The decisions are tested; no real device has refused in front of
+  them yet.
+- **Silence for a gap, written off the tap callback.** Buffers after a gap go
+  through `TrackWriter`'s queue until it catches up. Order and length are
+  tested against a file; a real route change has not been listened to since.
+- **Stopping on sleep.** The recording ends on `willSleepNotification`, which
+  macOS delivers with a little time to spare. That the files and meta.json
+  are complete when the lid opens again has not been checked on a real lid.
+- **The system tap has no restart.** Unlike the mic, a tap that dies mid-call
+  is only reported — by the stall watchdog and the far-end warning — and never
+  rebuilt. `AVAudioFile` cannot append, so a rebuilt tap would need a second
+  file and meta.json to learn about segments.
 
 ## Bold in the release notes cannot cross a line wrap
 

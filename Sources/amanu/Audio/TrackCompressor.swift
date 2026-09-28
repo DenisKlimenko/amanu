@@ -49,6 +49,7 @@ enum TrackCompressor {
             candidates.insert("\(stem).m4a")
         }
         candidates.insert("mixed.m4a")
+        candidates.insert("mixed.tmp.m4a")
         candidates.insert("multichannel.m4a")
         candidates.insert("multichannel.tmp.m4a")
         candidates.insert("audio.m4a")
@@ -105,6 +106,10 @@ enum TrackCompressor {
         if files["mic"] == "audio.m4a",
            files["system"] == "audio.m4a",
            FileManager.default.fileExists(atPath: dir.appendingPathComponent("audio.m4a").path) {
+            // Already archived — but possibly interrupted between rewriting
+            // meta.json and deleting the originals, which leaves a gigabyte an
+            // hour of PCM that nothing else would ever remove.
+            removeLeftovers(in: dir, meta: meta, log: log)
             return
         }
 
@@ -137,6 +142,9 @@ enum TrackCompressor {
         }
 
         meta["files"] = ["mic": "audio.m4a", "system": "audio.m4a"]
+        // What the archive replaced, so a compression interrupted after this
+        // point can finish deleting it on the next pass.
+        meta["archived_from"] = files
         meta["audio_channels"] = ["mic": 0, "system": 1]
         if let original = meta["start_offset_ms"] {
             meta["recorded_start_offset_ms"] = original
@@ -167,10 +175,41 @@ enum TrackCompressor {
         // Derived from the tracks and regenerated on demand; keeping it costs
         // more than the tracks themselves.
         try? FileManager.default.removeItem(at: dir.appendingPathComponent("mixed.m4a"))
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent("mixed.tmp.m4a"))
         try? FileManager.default.removeItem(at: dir.appendingPathComponent("multichannel.m4a"))
         try? FileManager.default.removeItem(
             at: dir.appendingPathComponent("multichannel.tmp.m4a"))
         log("archived mic left + system right → audio.m4a (\(saved))")
+    }
+
+    /// Finish a compression that was interrupted after meta.json had been
+    /// pointed at the archive: delete the originals it replaced, once the
+    /// archive has been opened and found to hold two channels of audio.
+    /// Sessions archived before `archived_from` existed name no originals, and
+    /// theirs were always `mic.caf` and `system.caf`.
+    private static func removeLeftovers(
+        in dir: URL, meta: [String: Any], log: (String) -> Void
+    ) {
+        let fm = FileManager.default
+        let originals = (meta["archived_from"] as? [String: String]).map { Array($0.values) }
+            ?? ["mic.caf", "system.caf"]
+        let leftovers = Set(originals + ["mixed.m4a", "mixed.tmp.m4a", "multichannel.m4a",
+                                         "multichannel.tmp.m4a", "audio.tmp.m4a"])
+            .filter { $0 != "audio.m4a" && fm.fileExists(atPath: dir.appendingPathComponent($0).path) }
+        guard !leftovers.isEmpty else { return }
+        guard let archive = try? AVAudioFile(forReading: dir.appendingPathComponent("audio.m4a")),
+              archive.processingFormat.channelCount == 2, archive.length > 0
+        else {
+            log("audio.m4a can't be read — keeping \(leftovers.sorted().joined(separator: ", "))")
+            return
+        }
+        var freed: Int64 = 0
+        for name in leftovers.sorted() {
+            let url = dir.appendingPathComponent(name)
+            let bytes = size(of: url)
+            if (try? fm.removeItem(at: url)) != nil { freed += bytes }
+        }
+        log("finished an interrupted compression — \(mb(freed)) of originals removed")
     }
 
     // MARK: -
@@ -197,6 +236,12 @@ enum TrackCompressor {
 
     /// Stream two independently recorded tracks into a stereo AAC file. This
     /// never holds more than a few seconds in memory, even for a long meeting.
+    ///
+    /// Each track is mixed down to mono for its channel — the system track is
+    /// stereo — and any failure to read one throws, so the caller keeps the
+    /// originals rather than archiving silence in place of what it could not
+    /// read. A track that is missing, or holds no frames, becomes a silent
+    /// channel: there is nothing in it to lose.
     static func encodeStereo(
         mic: StereoTrack?,
         system: StereoTrack?,
@@ -204,39 +249,35 @@ enum TrackCompressor {
     ) throws -> String {
         let fm = FileManager.default
 
-        func source(_ track: StereoTrack?) throws -> StereoSource? {
-            guard let track else { return nil }
-            guard fm.fileExists(atPath: track.url.path) else { return nil }
-            guard let file = try? AVAudioFile(forReading: track.url), file.length > 0 else {
+        func probe(_ track: StereoTrack?) throws -> AudioTrackReader? {
+            guard let track, fm.fileExists(atPath: track.url.path) else { return nil }
+            do {
+                return try AudioTrackReader(url: track.url)
+            } catch AudioTrackReader.ReadError.empty {
+                return nil
+            } catch {
                 throw CompressionError.unreadable(track.url)
             }
-            return StereoSource(file: file, offsetMs: track.offsetMs)
         }
 
-        let micSource = try source(mic)
-        let systemSource = try source(system)
-        let sources = [micSource, systemSource].compactMap { $0 }
-        guard !sources.isEmpty else { throw CompressionError.noUsableTracks }
-
-        let rate = sources.map(\.rate).max()!
-        guard let mono = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: rate,
-            channels: 1,
-            interleaved: false
-        ), let stereo = AVAudioFormat(
+        let rates = [try probe(mic), try probe(system)].compactMap { $0?.sourceRate }
+        guard let rate = rates.max() else { throw CompressionError.noUsableTracks }
+        guard let stereo = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: rate,
             channels: 2,
             interleaved: false
         ) else { throw CompressionError.noUsableTracks }
 
-        let micReader = micSource.flatMap { StereoReader($0, to: mono) }
-        let systemReader = systemSource.flatMap { StereoReader($0, to: mono) }
-        let totalFrames = sources.map { source in
-            AVAudioFramePosition((Double(source.file.length) * rate / source.rate).rounded(.up))
-                + AVAudioFramePosition(Double(source.offsetMs) * rate / 1000)
-        }.max()!
+        func reader(_ track: StereoTrack?) throws -> AudioTrackReader? {
+            guard try probe(track) != nil, let track else { return nil }
+            return try AudioTrackReader(
+                url: track.url, rate: rate, offset: Double(track.offsetMs) / 1000)
+        }
+        let micReader = try reader(mic)
+        let systemReader = try reader(system)
+        let readers = [micReader, systemReader].compactMap { $0 }
+        let totalFrames = readers.map { $0.start + $0.length }.max()!
         let blockFrames = AVAudioFrameCount(rate)
         try? fm.removeItem(at: destination)
 
@@ -262,8 +303,10 @@ enum TrackCompressor {
                 buffer.frameLength = count
                 buffer.floatChannelData![0].update(repeating: 0, count: Int(count))
                 buffer.floatChannelData![1].update(repeating: 0, count: Int(count))
-                micReader?.fill(buffer.floatChannelData![0], frames: count, at: position)
-                systemReader?.fill(buffer.floatChannelData![1], frames: count, at: position)
+                _ = try micReader?.read(
+                    into: buffer.floatChannelData![0], frames: count, at: position)
+                _ = try systemReader?.read(
+                    into: buffer.floatChannelData![1], frames: count, at: position)
                 try output.write(from: buffer)
                 position += AVAudioFramePosition(count)
             }
@@ -277,71 +320,8 @@ enum TrackCompressor {
             throw CompressionError.tooShort(source: totalFrames, encoded: encoded.length)
         }
 
-        let before = sources.reduce(Int64(0)) { $0 + size(of: $1.file.url) }
+        let before = readers.reduce(Int64(0)) { $0 + size(of: $1.url) }
         return "\(mb(before)) → \(mb(size(of: destination)))"
-    }
-
-    private struct StereoSource {
-        let file: AVAudioFile
-        let offsetMs: Int
-        var rate: Double { file.processingFormat.sampleRate }
-    }
-
-    /// AVAudioConverter invokes its input block synchronously; each reader is
-    /// confined to the one compression call despite the block's Sendable type.
-    private final class StereoReader: @unchecked Sendable {
-        private let file: AVAudioFile
-        private let converter: AVAudioConverter
-        private let staging: AVAudioPCMBuffer
-        private let format: AVAudioFormat
-        private let start: AVAudioFramePosition
-        private var spent = false
-
-        init?(_ source: StereoSource, to format: AVAudioFormat) {
-            let input = source.file.processingFormat
-            guard let converter = AVAudioConverter(from: input, to: format),
-                  let staging = AVAudioPCMBuffer(
-                    pcmFormat: input,
-                    frameCapacity: AVAudioFrameCount(input.sampleRate))
-            else { return nil }
-            file = source.file
-            self.converter = converter
-            self.staging = staging
-            self.format = format
-            start = AVAudioFramePosition(Double(source.offsetMs) * format.sampleRate / 1000)
-        }
-
-        func fill(
-            _ destination: UnsafeMutablePointer<Float>,
-            frames: AVAudioFrameCount,
-            at position: AVAudioFramePosition
-        ) {
-            guard !spent else { return }
-            let lead = max(0, start - position)
-            guard lead < AVAudioFramePosition(frames) else { return }
-            let wanted = frames - AVAudioFrameCount(lead)
-            guard let output = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: wanted)
-            else { return }
-
-            var error: NSError?
-            let status = converter.convert(to: output, error: &error) { [self] _, status in
-                staging.frameLength = 0
-                guard file.framePosition < file.length,
-                      (try? file.read(into: staging)) != nil,
-                      staging.frameLength > 0
-                else {
-                    status.pointee = .endOfStream
-                    return nil
-                }
-                status.pointee = .haveData
-                return staging
-            }
-            if status == .endOfStream || status == .error { spent = true }
-            guard output.frameLength > 0, let samples = output.floatChannelData?[0] else { return }
-            destination.advanced(by: Int(lead)).update(
-                from: samples,
-                count: Int(output.frameLength))
-        }
     }
 
     private static func size(of url: URL) -> Int64 {
