@@ -7,7 +7,7 @@ import Testing
 struct RecordingsOpenActionsTests {
     @Test("Open Transcript is available when Markdown or canonical JSON exists")
     @MainActor
-    func transcriptButtonTracksReadableFile() throws {
+    func transcriptButtonTracksReadableFile() async throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("amanu-open-actions-\(UUID().uuidString)")
@@ -31,11 +31,13 @@ struct RecordingsOpenActionsTests {
         try JSONEncoder().encode(transcript)
             .write(to: session.appendingPathComponent("transcript.json"))
         window.show()
+        await window.settled()
         #expect(button.isEnabled)
 
         try FileManager.default.removeItem(at: session.appendingPathComponent("transcript.json"))
         try Data("# Meeting\n".utf8).write(to: session.appendingPathComponent("transcript.md"))
         window.show()
+        await window.settled()
         #expect(button.isEnabled)
         #expect(button.target != nil)
         #expect(button.action != nil)

@@ -468,6 +468,7 @@ final class AppController {
             // pass gets named and summarized by the coordinator itself, and
             // the sweep is only for what was left over from earlier runs.
             await PostProcessor.sweep(root: root)
+            sessionsChanged()
         }
 
         // A backlog deferred for want of a model is only half-solved by
@@ -477,6 +478,7 @@ final class AppController {
             Task { @MainActor [weak self] in
                 guard let root = self?.root else { return }
                 await PostProcessor.sweep(root: root)
+                self?.sessionsChanged()
             }
         }
         monitor.start()
@@ -888,6 +890,16 @@ final class AppController {
         let text = Self.transcriptionLine(for: status)
         menuBar.updateTranscription(text)
         window.updateTranscription(text)
+        // Each change of status follows the end of a session's work — its
+        // transcript, names and summary — or the start of the next, so the
+        // recordings window reads again rather than going on offering
+        // Finish processing for work that has been done.
+        sessionsChanged()
+    }
+
+    /// The recordings folder changed behind the recordings window's back.
+    private func sessionsChanged() {
+        if recordingsBuilt { recordings.sessionsChanged() }
     }
 
     private func showLive(_ snapshot: LiveTranscriptionCoordinator.Snapshot) {
