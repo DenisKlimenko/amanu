@@ -63,8 +63,6 @@ final class SystemAudioRecorder {
         var firstBufferAt: Date?
         var lastSoundAt: Date?
         var levelMeasurable = true
-        var bufferCount = 0
-        var highestPeak: Float = 0
         var muted = false
     }
     private let state = OSAllocatedUnfairLock(initialState: LockedState())
@@ -75,31 +73,6 @@ final class SystemAudioRecorder {
 
     /// False once a buffer arrived in a sample format we can't measure.
     var levelMeasurable: Bool { state.withLock { $0.levelMeasurable } }
-
-    /// A process tap can start successfully yet return zeroes forever when its
-    /// privacy grant is missing. File growth cannot distinguish that failure.
-    func isDigitallySilent(now: Date = Date()) -> Bool {
-        state.withLock { s in
-            guard s.levelMeasurable else { return false }
-            return Self.isDigitallySilent(
-                firstBufferAt: s.firstBufferAt,
-                bufferCount: s.bufferCount,
-                highestPeak: s.highestPeak,
-                now: now
-            )
-        }
-    }
-
-    static func isDigitallySilent(
-        firstBufferAt: Date?,
-        bufferCount: Int,
-        highestPeak: Float,
-        now: Date,
-        grace: TimeInterval = 10
-    ) -> Bool {
-        guard let firstBufferAt, bufferCount > 0 else { return false }
-        return now.timeIntervalSince(firstBufferAt) >= grace && highestPeak == 0
-    }
 
     /// While muted the tap keeps running and silence is written instead of the
     /// audio, so the track stays wall-clock aligned across a pause.
@@ -324,9 +297,7 @@ final class SystemAudioRecorder {
     private func writeTracked(_ buffer: AVAudioPCMBuffer, to file: AVAudioFile) {
         let peak = AudioLevel.peak(of: buffer)
         let muted: Bool = state.withLock { s in
-            s.bufferCount += 1
             if let peak {
-                s.highestPeak = max(s.highestPeak, peak)
                 if peak >= AudioLevel.speechThreshold { s.lastSoundAt = Date() }
             } else {
                 s.levelMeasurable = false
