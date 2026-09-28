@@ -552,7 +552,7 @@ final class AppController {
 
         autoRecord.currentSession = { [weak self] in self?.session }
         autoRecord.startRecording = { [weak self] trigger, context in
-            self?.startSession(trigger: trigger, context: context)
+            self?.startSession(trigger: trigger, context: context) ?? false
         }
         autoRecord.stopRecording = { [weak self] reason in
             self?.stopSession(reason: reason)
@@ -591,6 +591,10 @@ final class AppController {
         configWatch = ConfigWatch.observe { [weak self] in
             self?.window.updateLivePreference(enabled: Config.liveTranscriptionEnabled())
             self?.applyIconPreferences()
+            // auto_record.enabled is written by Settings, the setup form, the
+            // menu and the status window alike, and obeyed from here.
+            self?.autoRecord.reloadSettings()
+            self?.showAutoRecord()
         }
         setupRequestObserver = SetupRequest.observe { [weak self] in self?.showSetup() }
         activateObserver = SingleInstance.observe { [weak self] in self?.showWindow() }
@@ -653,11 +657,14 @@ final class AppController {
         monitor.start()
         network = monitor
 
-        autoRecord.enabled = Config.autoRecord().enabled
-        let shouldStart = autoRecord.enabled
+        // The loop runs whether or not auto-record is on; a tick with it off
+        // reads the switch and does nothing else. Starting it only when the
+        // switch was on at launch is how turning it on later used to do
+        // nothing until the next launch.
+        autoRecord.reloadSettings()
         Task { [weak self] in
             if requestCalendarAccess { await self?.calendar?.requestAccess() }
-            if shouldStart { self?.autoRecord.start() }
+            self?.autoRecord.start()
         }
         menuBar.updateAutoRecord(enabled: autoRecord.enabled, decision: nil)
         window.updateAutoRecord(enabled: autoRecord.enabled, decision: nil)
@@ -787,9 +794,15 @@ final class AppController {
         tick()
     }
 
+    /// The menu's and the status window's switch. It writes
+    /// `auto_record.enabled` like every other surface does, so the answer
+    /// survives a relaunch and Settings shows the same thing.
     private func toggleAutoRecord() {
-        autoRecord.enabled.toggle()
-        if autoRecord.enabled { autoRecord.start() } else { autoRecord.stop() }
+        autoRecord.setEnabled(!autoRecord.enabled)
+        showAutoRecord()
+    }
+
+    private func showAutoRecord() {
         let decision = autoRecord.enabled ? autoRecord.lastDecision : nil
         menuBar.updateAutoRecord(enabled: autoRecord.enabled, decision: decision)
         window.updateAutoRecord(enabled: autoRecord.enabled, decision: decision)
@@ -823,8 +836,11 @@ final class AppController {
         )
     }
 
-    private func startSession(trigger: RecordingSession.Trigger, context: MeetingContext) {
-        guard session == nil else { return }
+    /// Whether a recording is running once this returns. The auto-record
+    /// loop decides from the answer when to try again.
+    @discardableResult
+    private func startSession(trigger: RecordingSession.Trigger, context: MeetingContext) -> Bool {
+        guard session == nil else { return true }
         do {
             let newSession = try RecordingSession(root: root, context: context, trigger: trigger)
             try newSession.start()
@@ -847,17 +863,21 @@ final class AppController {
                 .reason: .text(Analytics.reason(for: error).rawValue),
             ])
             FileHandle.standardError.write(Data("recording start failed: \(error)\n".utf8))
+            // One banner, replaced by each repeat rather than stacked under
+            // it: an auto-start retrying against the same refusal has nothing
+            // new to say the second time.
             notifyUser(
                 title: localised("amanu — recording failed", "amanu — не удалось начать запись"),
-                body: "\(error)")
-            return
+                body: "\(error)",
+                replacing: Self.startFailedBanner)
+            return false
         }
 
         recordingActivity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiated, .idleSystemSleepDisabled],
             reason: "amanu is recording a meeting")
 
-        guard let newSession = session else { return }
+        guard let newSession = session else { return true }
         let liveEnabled = Config.liveTranscriptionEnabled()
         let liveLanguage = LiveTranscriptionLanguage.prompt(for: Config.transcriptionLanguage())
         Task { [weak self, liveTranscription] in
@@ -881,7 +901,10 @@ final class AppController {
         }
 
         present(.recording, elapsed: "0:00")
+        return true
     }
+
+    private static let startFailedBanner = "recording-start-failed"
 
     private func stopSession(reason: String = "manual") {
         if let recordingActivity {
