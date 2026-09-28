@@ -679,10 +679,6 @@ struct SetupTests {
     @Test("Local engines are separate cards with their download sizes")
     @MainActor
     func localEngineCards() throws {
-        let previous = InterfaceLanguage.current
-        InterfaceLanguage.current = .english
-        defer { InterfaceLanguage.current = previous }
-
         let setup = SetupWindow()
         defer { withExtendedLifetime(setup) {} }
         let panel = try #require(NSApp.windows.last { $0.title == "amanu setup" })
@@ -1230,12 +1226,6 @@ struct SetupTests {
             anthropicKey: nil, openAIKey: nil, claudeRuns: false, codexRuns: true))
         #expect(!DoctorReport.hasSummaryBackend(
             anthropicKey: nil, openAIKey: nil, claudeRuns: false, codexRuns: false))
-    }
-}
-
-private extension NSView {
-    var allDescendants: [NSView] {
-        subviews + subviews.flatMap(\.allDescendants)
     }
 }
 

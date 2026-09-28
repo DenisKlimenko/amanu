@@ -31,19 +31,14 @@ import Testing
 /// pair rather than in either picture alone.
 ///
 /// `docs/testing/window-shots.md` says what comes out and how to read it.
-@Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["AMANU_SHOTS"] != nil))
+@Suite(
+    .serialized, .enabled(if: ProcessInfo.processInfo.environment["AMANU_SHOTS"] != nil),
+    .speaking(shotsLanguage))
 struct WindowShots {
     private var directory: String {
         ProcessInfo.processInfo.environment["AMANU_SHOTS"] ?? NSTemporaryDirectory()
     }
 
-    /// The language to build the windows in. Nothing else in the suite ever
-    /// leaves English, so this is set and put back around each test rather
-    /// than once for the process.
-    private var language: InterfaceLanguage {
-        ProcessInfo.processInfo.environment["AMANU_SHOTS_LANGUAGE"]
-            .flatMap(InterfaceLanguage.init(rawValue:)) ?? .english
-    }
 
     private var light: NSAppearance? { NSAppearance(named: .aqua) }
     private var dark: NSAppearance? { NSAppearance(named: .darkAqua) }
@@ -52,9 +47,6 @@ struct WindowShots {
     @MainActor
     func setupWindow() throws {
         _ = NSApplication.shared
-        let spoken = InterfaceLanguage.current
-        InterfaceLanguage.current = language
-        defer { InterfaceLanguage.current = spoken }
 
         var owners: [Any] = []
         defer { withExtendedLifetime(owners) {} }
@@ -86,9 +78,6 @@ struct WindowShots {
     @MainActor
     func settingsWindow() throws {
         _ = NSApplication.shared
-        let spoken = InterfaceLanguage.current
-        InterfaceLanguage.current = language
-        defer { InterfaceLanguage.current = spoken }
 
         var owners: [Any] = []
         defer { withExtendedLifetime(owners) {} }
@@ -135,9 +124,6 @@ struct WindowShots {
     @MainActor
     func aboutWindow() throws {
         _ = NSApplication.shared
-        let spoken = InterfaceLanguage.current
-        InterfaceLanguage.current = language
-        defer { InterfaceLanguage.current = spoken }
 
         var owners: [Any] = []
         defer { withExtendedLifetime(owners) {} }
@@ -155,9 +141,6 @@ struct WindowShots {
     @MainActor
     func viewTree() throws {
         _ = NSApplication.shared
-        let spoken = InterfaceLanguage.current
-        InterfaceLanguage.current = language
-        defer { InterfaceLanguage.current = spoken }
 
         var owners: [Any] = []
         defer { withExtendedLifetime(owners) {} }
@@ -356,16 +339,14 @@ private final class Ground: NSView {
 /// ```sh
 /// AMANU_SHOTS=/tmp/shots swift test --filter WindowGallery
 /// ```
-@Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["AMANU_SHOTS"] != nil))
+@Suite(
+    .serialized, .enabled(if: ProcessInfo.processInfo.environment["AMANU_SHOTS"] != nil),
+    .speaking(shotsLanguage))
 struct WindowGallery {
     private var directory: String {
         ProcessInfo.processInfo.environment["AMANU_SHOTS"] ?? NSTemporaryDirectory()
     }
 
-    private var language: InterfaceLanguage {
-        ProcessInfo.processInfo.environment["AMANU_SHOTS_LANGUAGE"]
-            .flatMap(InterfaceLanguage.init(rawValue:)) ?? .english
-    }
 
     private var light: NSAppearance? { NSAppearance(named: .aqua) }
     private var dark: NSAppearance? { NSAppearance(named: .darkAqua) }
@@ -384,9 +365,6 @@ struct WindowGallery {
     @MainActor
     func setupWhole() throws {
         _ = NSApplication.shared
-        let spoken = InterfaceLanguage.current
-        InterfaceLanguage.current = language
-        defer { InterfaceLanguage.current = spoken }
 
         var owners: [Any] = []
         defer { withExtendedLifetime(owners) {} }
@@ -427,9 +405,6 @@ struct WindowGallery {
     @MainActor
     func statusWindow() throws {
         _ = NSApplication.shared
-        let spoken = InterfaceLanguage.current
-        InterfaceLanguage.current = language
-        defer { InterfaceLanguage.current = spoken }
 
         var owners: [Any] = []
         defer { withExtendedLifetime(owners) {} }
@@ -473,9 +448,6 @@ struct WindowGallery {
     @MainActor
     func recordingsWindow() throws {
         _ = NSApplication.shared
-        let spoken = InterfaceLanguage.current
-        InterfaceLanguage.current = language
-        defer { InterfaceLanguage.current = spoken }
 
         let root = try Self.fixture()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -689,3 +661,9 @@ private final class GalleryGround: NSView {
         dirtyRect.fill()
     }
 }
+
+/// `AMANU_SHOTS_LANGUAGE`, or English — put in force by each suite's trait
+/// for its own tests' tasks rather than for the process.
+private let shotsLanguage: InterfaceLanguage =
+    ProcessInfo.processInfo.environment["AMANU_SHOTS_LANGUAGE"]
+        .flatMap(InterfaceLanguage.init(rawValue:)) ?? .english
