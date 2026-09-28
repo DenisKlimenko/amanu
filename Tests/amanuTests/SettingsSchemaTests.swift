@@ -277,63 +277,125 @@ struct SettingsSchemaTests {
     /// paths had no entry, so a config written straight from the README was
     /// reported as unread.
     ///
-    /// The sample below is every key `Config` reads, which is what the README
-    /// documents. Adding a setting to `Config` without adding it here is the
-    /// mistake this catches.
-    @Test("No setting amanu reads is reported as one it ignores")
-    func everySettingConfigReadsIsKnown() {
-        let config: [String: Any] = [
-            "recordings_dir": "~/Recordings",
-            "on_stop": "my-hook",
-            "mic_voice_processing": true,
-            "transcript_echo_filter": true,
-            "system_audio": "app",
-            "calendar": true,
-            "dock_icon": true,
-            "menu_bar_icon": true,
-            "window": true,
-            "user_name": "Samat Galimov",
-            "transcription": [
-                "enabled": true,
-                "engine": "auto",
-                "model": "v3",
-                "language": "ru",
-                "assemblyai": [
-                    "api_key": "secret",
-                    "api_key_path": "~/.config/assemblyai/token",
-                    "speech_model": "best",
-                ],
-            ],
-            "live_transcription": ["enabled": true],
-            "auto_record": [
-                "enabled": true,
-                "mic_activity": true,
-                "calendar": false,
-                "start_delay_seconds": 12,
-                "stop_delay_seconds": 15,
-                "min_duration_seconds": 45,
-                "max_duration_minutes": 300,
-                "silence_stop_minutes": 10,
-                "apps": ["us.zoom"],
-                "ignore_apps": [],
-            ],
-            "speaker_names": ["enabled": true, "backend": "auto", "model": "claude-sonnet-5"],
-            "summary": [
-                "enabled": true,
-                "backend": "auto",
-                "language": "ru",
-                "model": "claude-opus-5",
-                "openai_model": "gpt-5",
-                "ollama_model": "qwen3:8b",
-                "openai_base_url": "https://llm.example/v1",
-                "ollama_base_url": "http://127.0.0.1:11434",
-                "template": "## Decisions",
-                "api_key_path": "~/.config/anthropic/token",
-                "openai_api_key_path": "~/.config/openai/token",
-            ],
-        ]
-        #expect(SettingsSchema.strayKeys(in: config).isEmpty,
-                "reported as unread: \(SettingsSchema.strayKeys(in: config))")
+    /// This used to be checked against a sample written out by hand as "every
+    /// key Config reads", which could not notice a key nobody had added to
+    /// the sample. `Config` now reads only through `Config.Key`, so the two
+    /// lists are compared whole, in both directions: a key read and not
+    /// described, and a key described and never read.
+    @Test("Config reads exactly the keys the schema describes")
+    func configAndSchemaAgree() {
+        let read = Set(Config.Key.allCases.map(\.rawValue))
+        let described = Set(SettingsSchema.knownKeys)
+            .subtracting(SettingsSchema.deprecatedKeys)
+        #expect(read.subtracting(described).isEmpty,
+                "read but not in the schema: \(read.subtracting(described).sorted())")
+        #expect(described.subtracting(read).isEmpty,
+                "in the schema but read by nothing: \(described.subtracting(read).sorted())")
+    }
+
+    /// The other half of the drift: the default. The window shows the
+    /// schema's as a placeholder, and `Config` used to write its own inline —
+    /// two numbers that only agreed because somebody kept them agreeing. The
+    /// readers now take theirs from the schema, and this checks the settings
+    /// structs the rest of amanu is handed, not just the readers.
+    @Test("An empty config reads as the schema's defaults", .freshHome)
+    func emptyConfigIsTheSchemasDefaults() throws {
+        for entry in SettingsSchema.everyEntry where entry.hasValueDefault {
+            let key = try #require(Config.Key(rawValue: entry.path.joined(separator: ".")))
+            switch entry.kind {
+            case .toggle:
+                #expect(Config.flag(key, in: [:]) == entry.defaultValue as? Bool, "\(key)")
+            case .number:
+                #expect(Config.number(key, in: [:]) == (entry.defaultValue as? Int).map(Double.init),
+                        "\(key)")
+            default:
+                #expect(Config.string(key, in: [:]) == entry.defaultValue as? String, "\(key)")
+            }
+        }
+
+        func schema(_ key: Config.Key) -> SettingsSchema.ValueDefault? {
+            SettingsSchema.valueDefault(for: key)
+        }
+        let summary = Config.summary()
+        #expect(schema(.summaryModel) == .string(summary.model))
+        #expect(schema(.summaryOpenAIModel) == .string(summary.openAIModel))
+        #expect(schema(.summaryOllamaBaseURL) == .string(summary.ollamaBaseURL))
+        #expect(schema(.summaryTemplate) == .string(summary.template))
+        let auto = Config.autoRecord()
+        #expect(schema(.autoRecordStartDelay) == .number(auto.startDelay))
+        #expect(schema(.autoRecordMaxDuration) == .number(auto.maxDuration / 60))
+        #expect(schema(.autoRecordCalendar) == .flag(auto.calendar))
+        #expect(schema(.offlineEchoCancellation) == .flag(Config.offlineEchoCancellation()))
+        #expect(schema(.keepAudio) == .flag(Config.keepAudio()))
+        #expect(schema(.transcriptionEngine) == .string(Config.transcriptionEngine()))
+        #expect(schema(.systemAudio) == .string(Config.systemAudioScope()))
+        #expect(schema(.analytics) == .flag(AnalyticsIdentity.isEnabled()))
+    }
+
+    /// A setting whose default is described in words has no value to fall
+    /// back on, so a reader asking for one is a mistake — and it is caught
+    /// where it is written rather than read as `false`.
+    @Test("Asking the schema for a default it describes only in words stops the run")
+    func describedDefaultsAreNotValues() async {
+        #expect(SettingsSchema.valueDefault(for: .userName) == nil)
+        await #expect(processExitsWith: .failure) {
+            _ = Config.defaultString(.userName)
+        }
+    }
+
+    @Test("Writing a key nothing reads stops the run")
+    func writingAnUnknownKeyStops() async {
+        await #expect(processExitsWith: .failure) {
+            _ = Config.update(path: ["recordings_directory"], value: "~/Meetings")
+        }
+    }
+
+    /// `"enabled": "false"` reads as off to a person and as nothing to a JSON
+    /// parser, and the default — on — used to apply without a word.
+    @Test("A value of the wrong kind is reported, and the default still applies",
+          .freshHome(config: #"""
+          {
+            "transcription": { "enabled": "false", "language": "" },
+            "auto_record": { "start_delay_seconds": "12", "apps": "us.zoom.xos" },
+            "system_audio": "everything",
+            "keep_audio": true,
+            "summary": { "model": 5 }
+          }
+          """#))
+    func wrongKindsAreReported() {
+        let problems = Config.problems()
+        let keys = problems.compactMap { problem -> String? in
+            if case .unusable(let key, _, _) = problem { return key }
+            return nil
+        }
+        #expect(Set(keys) == [
+            "transcription.enabled", "auto_record.start_delay_seconds", "auto_record.apps",
+            "system_audio", "summary.model",
+        ])
+        #expect(Config.transcriptionEnabled(), "the default no longer applies")
+        let enabled = problems.first {
+            if case .unusable("transcription.enabled", _, _) = $0 { return true }
+            return false
+        }
+        #expect(enabled?.explanation.contains(#""false""#) == true)
+        #expect(enabled?.explanation.contains("true or false") == true)
+
+        guard case .warn = DoctorReport.checkConfig().status else {
+            Issue.record("the doctor said nothing about it")
+            return
+        }
+    }
+
+    @Test("A config holding only usable values has nothing to report",
+          .freshHome(config: #"""
+          {
+            "transcription": { "enabled": false, "engine": "assemblyai", "language": "ru" },
+            "auto_record": { "start_delay_seconds": 20, "apps": [] },
+            "summary": { "template": "## Decisions", "api_key_path": "~/key" }
+          }
+          """#))
+    func usableValuesAreQuiet() {
+        #expect(Config.problems().isEmpty, "\(Config.problems())")
     }
 
     /// The settings window on an Intel Mac renders neither of these — there is

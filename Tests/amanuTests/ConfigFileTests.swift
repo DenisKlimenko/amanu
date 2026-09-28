@@ -202,16 +202,22 @@ struct ConfigFileTests {
                 "the settings window should say it once, under both tabs")
     }
 
-    @Test("Every sentence about it is said in Russian too")
+    @Test("Every sentence about the file is said in Russian too")
     func russianToo() {
-        let problem = Config.Problem.unreadable(reason: "Unexpected end of file")
-        let english = (problem.headline, problem.explanation)
-        let russian = InterfaceLanguage.$scoped.withValue(.russian) {
-            (problem.headline, problem.explanation)
+        let problems: [Config.Problem] = [
+            .unreadable(reason: "Unexpected end of file"),
+            .unusable(key: "keep_audio", found: #""yes""#, expected: "true or false"),
+        ]
+        for problem in problems {
+            let english = (problem.headline, problem.explanation)
+            let russian = InterfaceLanguage.$scoped.withValue(.russian) {
+                (problem.headline, problem.explanation)
+            }
+            #expect(english.0 != russian.0)
+            #expect(english.1 != russian.1)
         }
-        #expect(english.0 != russian.0)
-        #expect(english.1 != russian.1)
-        #expect(russian.1.contains("Unexpected end of file"), "the parser's reason is kept")
+        let unreadable = InterfaceLanguage.$scoped.withValue(.russian) { problems[0].explanation }
+        #expect(unreadable.contains("Unexpected end of file"), "the parser's reason is kept")
     }
 
     // MARK: - coming back

@@ -35,7 +35,7 @@ enum AnalyticsIdentity {
     }
 
     static func isEnabled(in json: [String: Any]) -> Bool {
-        json["analytics"] as? Bool ?? true
+        Config.flag(.analytics, in: json)
     }
 
     /// The identifier, made on first read and stable afterwards.

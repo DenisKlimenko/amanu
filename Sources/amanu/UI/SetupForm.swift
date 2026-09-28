@@ -1707,7 +1707,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
             menuBar: Config.menuBarIcon(), dock: Config.dockIcon())
         noIconsNote.isHidden = noIconsNote.stringValue.isEmpty
 
-        let autoRecordOn = (config["auto_record"] as? [String: Any])?["enabled"] as? Bool ?? true
+        let autoRecordOn = Config.flag(.autoRecordEnabled, in: config)
         autoRecord.state = autoRecordOn ? .on : .off
         analytics.state = AnalyticsIdentity.isEnabled() ? .on : .off
 
