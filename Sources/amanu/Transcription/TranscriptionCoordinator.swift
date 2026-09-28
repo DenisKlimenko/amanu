@@ -26,7 +26,13 @@ actor TranscriptionCoordinator {
     }
 
     private var queue: [URL] = []
+    /// Sessions a drain set aside because the machine could not transcribe
+    /// them — a model that would not download, no network, no key. They go
+    /// back in front of the queue the next time something is queued, rather
+    /// than at once: the same drain would only fail them the same way.
+    private var heldBack: [URL] = []
     private var draining = false
+    private var environmentalFailureNoted = false
     private var lastFailure: String?
     private var statusHandler: (@Sendable (Status) -> Void)?
 
@@ -65,8 +71,15 @@ actor TranscriptionCoordinator {
             }
             return
         }
-        queue.append(sessionDir)
+        requeueHeldBack()
+        if !queue.contains(sessionDir) { queue.append(sessionDir) }
         drainIfIdle()
+    }
+
+    private func requeueHeldBack() {
+        guard !draining else { return }
+        queue = heldBack.filter { !queue.contains($0) } + queue
+        heldBack = []
     }
 
     /// With no transcript the audio is the only copy of the meeting. Archive
@@ -85,6 +98,7 @@ actor TranscriptionCoordinator {
         // A config that cannot be read holds the queue — see `Config.Unreadable`.
         // The app offers the folder again once the file is fixed.
         guard Config.unreadableReason == nil, Config.transcriptionEnabled() else { return }
+        requeueHeldBack()
         let pending = Self.pendingSessions(in: root)
         for dir in pending where !queue.contains(dir) {
             queue.append(dir)
@@ -134,6 +148,7 @@ actor TranscriptionCoordinator {
         guard !draining, !queue.isEmpty else { return }
         draining = true
         lastFailure = nil
+        environmentalFailureNoted = false
         Task { await drain() }
     }
 
@@ -160,7 +175,12 @@ actor TranscriptionCoordinator {
             } catch {
                 log(dir, "transcription failed: \(error)")
                 lastFailure = dir.lastPathComponent
-                TranscriptionFailurePolicy.record(error, for: dir, engine: current)
+                let outcome = TranscriptionFailurePolicy.record(
+                    error, for: dir, engine: current, notify: !environmentalFailureNoted)
+                if outcome == .environmental {
+                    environmentalFailureNoted = true
+                    heldBack.append(dir)
+                }
             }
         }
         await releaseEngine()

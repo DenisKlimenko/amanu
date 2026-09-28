@@ -41,6 +41,10 @@ actor EngineResolver {
     private let fixedEngine: TranscriptionEngine?
     let environment: Environment
     private var held: [String: TranscriptionEngine] = [:]
+    /// Engines that could not be prepared during this drain. Asked for again,
+    /// they fail at once rather than starting another half-gigabyte download
+    /// for every session in the queue; the next drain tries afresh.
+    private var unpreparable: [String: EnginePreparationFailed] = [:]
 
     init(fixed: TranscriptionEngine? = nil, environment: Environment = .live) {
         fixedEngine = fixed
@@ -104,6 +108,7 @@ actor EngineResolver {
     func release() async {
         let engines = held.values
         held = [:]
+        unpreparable = [:]
         for engine in engines { await engine.release() }
     }
 
@@ -123,7 +128,16 @@ actor EngineResolver {
 
     private func hold(_ name: String, _ engine: TranscriptionEngine) async throws -> TranscriptionEngine {
         if let held = held[name] { return held }
-        try await engine.prepare()
+        if let failed = unpreparable[name] { throw failed }
+        do {
+            try await engine.prepare()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            let failed = EnginePreparationFailed(engine: name, underlying: error)
+            unpreparable[name] = failed
+            throw failed
+        }
         held[name] = engine
         return engine
     }
@@ -210,6 +224,7 @@ actor EngineResolver {
         case noLocalModels
 
         var isPermanent: Bool { false }
+        var isEnvironmental: Bool { true }
 
         var description: String {
             "local transcription needs Apple Silicon, and this Mac has no key "
