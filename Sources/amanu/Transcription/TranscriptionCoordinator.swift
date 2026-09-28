@@ -94,8 +94,9 @@ actor TranscriptionCoordinator {
     func archiveRecordingOnly(_ dir: URL) async throws {
         try SessionClaim.acquire(dir, stage: .transcribe)
         await Task.detached(priority: .utility) { TrackCompressor.compress(sessionDir: dir) }.value
+        StopHook.owe(dir)
         SessionClaim.release(dir)
-        runHook(for: dir)
+        StopHook.fireIfOwed(dir, command: onStop())
     }
 
     /// Scan the recordings root for sessions that finished (meta.json exists)
@@ -280,7 +281,7 @@ actor TranscriptionCoordinator {
             title: localised("amanu — transcript ready", "amanu — расшифровка готова"),
             body: dir.lastPathComponent,
             opening: dir)
-        runHook(for: dir)
+        StopHook.fireIfOwed(dir, command: onStop())
     }
 
     private func releaseEngine() async {
@@ -383,6 +384,7 @@ actor TranscriptionCoordinator {
         )
         try transcript.write(to: dir)
         SessionState.update(dir, with: [
+            StopHook.key: StopHook.owed,
             "transcription_input": engine.input.metadataName,
             "echo_filter": [
                 "ran": echoFilterRan,
@@ -456,23 +458,6 @@ actor TranscriptionCoordinator {
         ]])
         log(dir, "audio echo cancellation complete; original tracks kept")
         return prepared
-    }
-
-    /// Fires the configured on_stop shell command with the session directory
-    /// as its sole argument, after the transcript exists (or immediately after
-    /// recording when transcription is disabled).
-    private func runHook(for dir: URL) {
-        guard let cmd = onStop() else { return }
-        let task = Process()
-        task.launchPath = "/bin/sh"
-        task.arguments = ["-c", "\(cmd) \"$0\"", dir.path]
-        // The session it was fired for is the only sensible place to stand.
-        task.currentDirectoryURL = dir
-        do {
-            try task.run()
-        } catch {
-            log(dir, "on_stop hook failed to launch: \(error)")
-        }
     }
 
     private func log(_ dir: URL, _ message: String) {

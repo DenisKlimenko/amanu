@@ -156,6 +156,7 @@ struct ProcessSession: ParsableCommand {
 
         case .finish:
             let work = try runBlocking { await PostProcessor.finish(dir) }
+            StopHook.fireIfOwed(dir)
             if work.isEmpty {
                 // Nothing done has two meanings and only one of them is good
                 // news. A session the app is naming and summarizing right now

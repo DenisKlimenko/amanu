@@ -158,6 +158,7 @@ enum PostProcessor {
             ) else { continue }
             let work = await finish(dir)
             if !work.isEmpty { finished += 1 }
+            StopHook.fireIfOwed(dir)
         }
         return finished
     }
