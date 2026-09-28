@@ -422,6 +422,20 @@ reasoning alone. Worth knowing before trusting any of them in front of someone.
   is only reported — by the stall watchdog and the far-end warning — and never
   rebuilt. `AVAudioFile` cannot append, so a rebuilt tap would need a second
   file and meta.json to learn about segments.
+- **The cloud transcription paths against the real services, since they
+  moved onto `CloudHTTP`.** Every status, `Retry-After`, a poll through
+  network failures, a resumed AssemblyAI job and cache reuse are tested
+  against a `URLProtocol` stub. Nobody has yet watched AssemblyAI answer a
+  resumed poll for a job submitted by an earlier attempt, or seen what the
+  three services actually send with a 429.
+- **Model downloads resuming from Hugging Face.** The `Range` request, the
+  206 and the fallback to a whole file on a 200 are tested against a stub;
+  whether the CDN behind a `resolve/<revision>` redirect honours `Range` for
+  both models has not been checked, and neither has two amanu processes
+  meeting at the model's lock with a real download between them.
+- **Whisper and GigaAM decoding on their own threads.** The move off the
+  cooperative pool is tested with a stand-in for the native call; neither
+  runtime has been run that way against a real model, cancellation included.
 
 ## Bold in the release notes cannot cross a line wrap
 
