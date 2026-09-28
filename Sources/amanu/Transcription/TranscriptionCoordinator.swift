@@ -698,11 +698,7 @@ actor TranscriptionCoordinator {
     }
 
     private static func cloudKey(for provider: String) -> String? {
-        switch provider {
-        case "openai": return Config.openAIKey()
-        case "elevenlabs": return Config.elevenLabsKey()
-        default: return Config.assemblyAIKey()
-        }
+        CloudService(provider: provider).key()
     }
 
     private static func cloudEngine(_ provider: String) throws -> TranscriptionEngine {
@@ -785,25 +781,8 @@ actor TranscriptionCoordinator {
         return (try? cloudEngine(provider)) ?? localEngine(named: local)
     }
 
-    /// A short, cheap "is the API there" probe. Any HTTP answer counts,
-    /// including an unauthorized one: the question is whether the network is
-    /// up, not whether the key is good.
     private static func cloudReachable(_ provider: String) async -> Bool {
-        let url: URL
-        switch provider {
-        case "openai": url = URL(string: "https://api.openai.com/v1/models")!
-        case "elevenlabs": url = URL(string: "https://api.elevenlabs.io/v1/user")!
-        default: url = URL(string: "https://api.assemblyai.com/v2/transcript")!
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "HEAD"
-        request.timeoutInterval = 5
-        do {
-            _ = try await URLSession.shared.data(for: request)
-            return true
-        } catch {
-            return false
-        }
+        await CloudService(provider: provider).reachable()
     }
 
     /// Fires the configured on_stop shell command with the session directory

@@ -71,16 +71,6 @@ struct ElevenLabsEngineTests {
         #expect(ElevenLabsEngine.EngineError.empty.isPermanent)
     }
 
-    @Test("Each channel has a separate response cache")
-    func channelCachesAreDistinct() {
-        #expect(ElevenLabsEngine.cacheName(audio: "multichannel", channel: 0)
-            == "transcript.elevenlabs.multichannel.channel1.json")
-        #expect(ElevenLabsEngine.cacheName(audio: "multichannel", channel: 1)
-            == "transcript.elevenlabs.multichannel.channel2.json")
-        #expect(ElevenLabsEngine.cacheName(audio: "multichannel", channel: nil)
-            == "transcript.elevenlabs.multichannel.json")
-    }
-
     @Test("The upload is multipart audio with Scribe's fields")
     func uploadBodyContainsAudioAndFields() throws {
         let dir = FileManager.default.temporaryDirectory
@@ -91,7 +81,7 @@ struct ElevenLabsEngineTests {
         let body = dir.appendingPathComponent("request.multipart")
         try Data([0, 1, 2, 255]).write(to: audio)
 
-        try ElevenLabsEngine.writeMultipart(
+        try CloudHTTP.writeMultipart(
             fields: ElevenLabsEngine.requestFields(),
             file: audio, boundary: "test-boundary", to: body)
 
@@ -116,7 +106,7 @@ struct ElevenLabsEngineTests {
         let body = dir.appendingPathComponent("request.multipart")
         try Data([0, 1]).write(to: audio)
 
-        try ElevenLabsEngine.writeMultipart(
+        try CloudHTTP.writeMultipart(
             fields: ElevenLabsEngine.requestFields(),
             file: audio, boundary: "test-boundary", to: body)
 

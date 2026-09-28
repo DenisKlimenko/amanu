@@ -63,14 +63,6 @@ struct AssemblyAIEngineTests {
         #expect(detection["fallback_language"] as? String == "ru")
     }
 
-    @Test("Multichannel responses never reuse a cache made from a mono mix")
-    func multichannelCacheHasItsOwnName() {
-        let audio = URL(fileURLWithPath: "/tmp/meeting/multichannel.m4a")
-        let cache = AssemblyAIEngine.cacheURL(for: audio)
-        #expect(cache.lastPathComponent == "transcript.assemblyai.multichannel.json")
-        #expect(cache.lastPathComponent != "transcript.assemblyai.json")
-    }
-
     /// The server's verdict on a silent recording, verbatim from the call that
     /// found this: a nineteen-second join with nobody speaking.
     @Test("A server-side verdict of no speech is permanent")
@@ -91,7 +83,8 @@ struct AssemblyAIEngineTests {
     func everythingElseIsTemporary() {
         #expect(!AssemblyAIEngine.EngineError.transcriptFailed(
             "Transcoding failed. Please try again.").isPermanent)
-        #expect(!AssemblyAIEngine.EngineError.http("upload", 500, "").isPermanent)
+        #expect(!CloudHTTP.Failure.unavailable(
+            service: "assemblyai", what: "upload", status: 500, body: "").isPermanent)
         #expect(!AssemblyAIEngine.EngineError.timedOut.isPermanent)
         #expect(!AssemblyAIEngine.EngineError.noAPIKey.isPermanent)
     }

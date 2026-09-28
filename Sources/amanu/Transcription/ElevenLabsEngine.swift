@@ -7,11 +7,15 @@ import Foundation
 actor ElevenLabsEngine: TranscriptionEngine {
     enum EngineError: TranscriptionFailure, CustomStringConvertible {
         case noAPIKey
-        case http(Int, String)
         case empty
 
         var isPermanent: Bool {
             if case .empty = self { return true }
+            return false
+        }
+
+        var isEnvironmental: Bool {
+            if case .noAPIKey = self { return true }
             return false
         }
 
@@ -21,8 +25,6 @@ actor ElevenLabsEngine: TranscriptionEngine {
                 return "no ElevenLabs API key — put one in \(Config.elevenLabsKeyPath.path)"
                     + " (chmod 600), set ELEVENLABS_API_KEY, or configure"
                     + " transcription.elevenlabs.api_key_path"
-            case .http(let code, let body):
-                return "elevenlabs transcription failed: HTTP \(code) \(body.prefix(400))"
             case .empty:
                 return "elevenlabs returned no speech"
             }
@@ -36,10 +38,17 @@ actor ElevenLabsEngine: TranscriptionEngine {
     nonisolated let input: TranscriptionInput = .multichannel
 
     private let apiKey: String
+    private let http: CloudHTTP
 
-    init() throws {
-        guard let key = Config.elevenLabsKey() else { throw EngineError.noAPIKey }
-        apiKey = key
+    init(
+        apiKey: String? = nil,
+        session: URLSession = .shared,
+        retry: CloudHTTP.RetryPolicy = .standard,
+        sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+    ) throws {
+        guard let key = apiKey ?? Config.elevenLabsKey() else { throw EngineError.noAPIKey }
+        self.apiKey = key
+        http = CloudHTTP(service: .elevenLabs, session: session, retry: retry, sleep: sleep)
     }
 
     func prepare() async throws {}
@@ -55,10 +64,11 @@ actor ElevenLabsEngine: TranscriptionEngine {
         var all: [TranscriptSegment] = []
         for index in 0..<channels {
             let channel: Int? = channels > 1 ? index : nil
-            let cache = audio.deletingLastPathComponent().appendingPathComponent(
-                Self.cacheName(
-                    audio: audio.deletingPathExtension().lastPathComponent,
-                    channel: channel))
+            let cache = ProviderCache.url(
+                in: audio.deletingLastPathComponent(), provider: .elevenLabs,
+                parts: [audio.lastPathComponent, model]
+                    + Self.requestFields().map { "\($0.0)=\($0.1)" },
+                suffix: channel.map { "channel\($0 + 1)" })
             let response: Response
             if let cached = try? Data(contentsOf: cache),
                let decoded = try? JSONDecoder().decode(Response.self, from: cached) {
@@ -83,19 +93,16 @@ actor ElevenLabsEngine: TranscriptionEngine {
                 defer {
                     if channel != nil { try? FileManager.default.removeItem(at: upload) }
                 }
-                let data = try await send(upload)
-                response = try JSONDecoder().decode(Response.self, from: data)
+                let data = try await http.sendMultipart(
+                    to: Self.endpoint, fields: Self.requestFields(), file: upload,
+                    key: apiKey, what: "transcription", timeout: 1800)
+                response = try http.decode(Response.self, from: data, what: "transcription")
                 try? data.write(to: cache, options: .atomic)
             }
             all += Self.segments(from: response, duration: duration, channel: channel)
         }
         guard !all.isEmpty else { throw EngineError.empty }
         return all.sorted { $0.start < $1.start }
-    }
-
-    static func cacheName(audio: String, channel: Int?) -> String {
-        "transcript.elevenlabs.\(audio)"
-            + (channel.map { ".channel\($0 + 1)" } ?? "") + ".json"
     }
 
     static func requestFields() -> [(String, String)] {
@@ -187,64 +194,5 @@ actor ElevenLabsEngine: TranscriptionEngine {
         else { return speaker == "speaker" ? "" : " \(speaker)" }
         let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
         return index < 26 ? String(letters[index]) : "A\(letters[index - 26])"
-    }
-
-    private func send(_ audio: URL) async throws -> Data {
-        let boundary = "amanu.\(UUID().uuidString)"
-        let body = FileManager.default.temporaryDirectory
-            .appendingPathComponent("amanu-elevenlabs-\(UUID().uuidString).multipart")
-        try Self.writeMultipart(
-            fields: Self.requestFields(), file: audio,
-            boundary: boundary, to: body)
-        defer { try? FileManager.default.removeItem(at: body) }
-
-        var request = URLRequest(url: Self.endpoint)
-        request.httpMethod = "POST"
-        request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
-        request.setValue(
-            "multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "content-type")
-        request.timeoutInterval = 1800
-
-        let (data, response) = try await URLSession.shared.upload(for: request, fromFile: body)
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw EngineError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
-        }
-        return data
-    }
-
-    static func writeMultipart(
-        fields: [(String, String)], file: URL, boundary: String, to destination: URL
-    ) throws {
-        FileManager.default.createFile(atPath: destination.path, contents: nil)
-        let output = try FileHandle(forWritingTo: destination)
-        defer { try? output.close() }
-        for (name, value) in fields {
-            let field = "--\(boundary)\r\n"
-                + "Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n"
-                + "\(value)\r\n"
-            try output.write(contentsOf: Data(field.utf8))
-        }
-        let header = "--\(boundary)\r\n"
-            + "Content-Disposition: form-data; name=\"file\";"
-            + " filename=\"\(file.lastPathComponent)\"\r\n"
-            + "Content-Type: \(contentType(for: file))\r\n\r\n"
-        try output.write(contentsOf: Data(header.utf8))
-        let source = try FileHandle(forReadingFrom: file)
-        defer { try? source.close() }
-        while let chunk = try source.read(upToCount: 1 << 20), !chunk.isEmpty {
-            try output.write(contentsOf: chunk)
-        }
-        try output.write(contentsOf: Data("\r\n--\(boundary)--\r\n".utf8))
-    }
-
-    private static func contentType(for file: URL) -> String {
-        switch file.pathExtension.lowercased() {
-        case "m4a", "mp4": return "audio/mp4"
-        case "wav": return "audio/wav"
-        case "mp3": return "audio/mpeg"
-        case "flac": return "audio/flac"
-        case "aiff", "aif": return "audio/aiff"
-        default: return "application/octet-stream"
-        }
     }
 }

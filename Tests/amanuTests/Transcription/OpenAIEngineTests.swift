@@ -104,13 +104,6 @@ struct OpenAIEngineTests {
             for: MeetingLanguages.expected(primary: "en")) == "en")
     }
 
-    @Test("Cached responses are named per piece only when there is more than one")
-    func cacheNames() {
-        #expect(OpenAITranscriptionEngine.cacheName(0, of: 1) == "transcript.openai.json")
-        #expect(OpenAITranscriptionEngine.cacheName(0, of: 3) == "transcript.openai.1.json")
-        #expect(OpenAITranscriptionEngine.cacheName(2, of: 3) == "transcript.openai.3.json")
-    }
-
     /// 25 MB is the API's ceiling; the pieces have to come in under it with
     /// room for a bitrate that isn't perfectly constant.
     @Test("Slice length keeps every piece under the request limit")
