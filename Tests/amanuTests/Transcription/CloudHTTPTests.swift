@@ -205,6 +205,71 @@ struct CloudHTTPTests {
         #expect(stub.requests(to: "/v2/upload").count == 1)
     }
 
+    /// A job belongs to the key that submitted it. With a new key the
+    /// service answers 401 about it, which is "the machine's fault" — so the
+    /// session was held for ever over a job only the old key could see.
+    @Test("A job submitted with another key is dropped, and a new one submitted")
+    func jobFromAnotherKeyIsResubmitted() async throws {
+        let fixture = try Fixture()
+        let stub = StubHTTP { request, _ in
+            if request.path == "/v2/transcript/job-old" { return .json(401, "{}") }
+            return Fixture.happyPath(request)
+        }
+        let engine = try fixture.engine(stub)
+        try JSONSerialization.data(withJSONObject: [
+            "id": "job-old", "key": AssemblyAIEngine.digest(of: "the-old-key"),
+        ]).write(to: await fixture.jobFile(for: engine))
+
+        let segments = try await engine.transcribe(fixture.audio)
+
+        #expect(segments.count == 1)
+        #expect(stub.requests(to: "/v2/transcript/job-old").isEmpty,
+                "the old key's job was asked about with the new key")
+        #expect(stub.requests(to: "/v2/upload").count == 1)
+    }
+
+    @Test("A resumed job the service refuses to show is taken for gone",
+          arguments: [401, 403])
+    func refusedResumeIsResubmitted(status: Int) async throws {
+        let fixture = try Fixture()
+        let stub = StubHTTP { request, _ in
+            if request.path == "/v2/transcript/job-hidden" { return .json(status, "{}") }
+            return Fixture.happyPath(request)
+        }
+        let engine = try fixture.engine(stub)
+        // Written before the key was recorded beside the id.
+        try JSONSerialization.data(withJSONObject: ["id": "job-hidden"])
+            .write(to: await fixture.jobFile(for: engine))
+
+        let segments = try await engine.transcribe(fixture.audio)
+
+        #expect(segments.count == 1)
+        #expect(stub.requests(to: "/v2/transcript/job-hidden").count == 1)
+        #expect(stub.requests(to: "/v2/upload").count == 1)
+    }
+
+    @Test("The job file records which key submitted it")
+    func jobRecordsItsKey() async throws {
+        let fixture = try Fixture()
+        let stub = StubHTTP { request, _ in
+            if request.path == "/v2/transcript/job-1" {
+                return .json(200, #"{"status":"processing"}"#)
+            }
+            return Fixture.happyPath(request)
+        }
+        let impatient = try fixture.engine(
+            stub, timing: .init(pollInterval: .milliseconds(5), pollTimeout: 0.02))
+        await #expect(throws: AssemblyAIEngine.EngineError.self) {
+            try await impatient.transcribe(fixture.audio)
+        }
+        let file = try #require(fixture.jobFiles.first)
+        let json = try #require(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        #expect(json["id"] as? String == "job-1")
+        #expect(json["key"] as? String == AssemblyAIEngine.digest(of: "test-key"))
+        #expect(!(String(decoding: try Data(contentsOf: file), as: UTF8.self)).contains("test-key"))
+    }
+
     @Test("Cancelling a poll stops it at once and keeps the job for next time")
     func cancellationKeepsTheJob() async throws {
         let fixture = try Fixture()

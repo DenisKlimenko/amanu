@@ -427,7 +427,10 @@ reasoning alone. Worth knowing before trusting any of them in front of someone.
   network failures, a resumed AssemblyAI job and cache reuse are tested
   against a `URLProtocol` stub. Nobody has yet watched AssemblyAI answer a
   resumed poll for a job submitted by an earlier attempt, or seen what the
-  three services actually send with a 429.
+  three services actually send with a 429. That a job asked about with a
+  different key comes back 401 or 403, rather than 404, is an assumption:
+  the job file records a digest of its key so that the question is rarely
+  asked, and all three answers are taken for a job that is gone.
 - **Model downloads resuming from Hugging Face.** The `Range` request, the
   206 and the fallback to a whole file on a 200 are tested against a stub;
   whether the CDN behind a `resolve/<revision>` redirect honours `Range` for

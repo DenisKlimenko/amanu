@@ -1,4 +1,5 @@
 import AVFoundation
+import CryptoKit
 import Foundation
 
 /// AssemblyAI, with speaker diarization, over aligned two-channel audio.
@@ -163,18 +164,32 @@ actor AssemblyAIEngine: TranscriptionEngine {
 
     /// The completed response for this audio: from a job an earlier attempt
     /// submitted when the service still knows it, from a new upload otherwise.
+    ///
+    /// A job belongs to the key that submitted it. Asked about with another
+    /// key — the person pasted a new one, or moved to another account — the
+    /// service answers 401 or 403, and a refused key is the machine's fault,
+    /// not the recording's, so the session used to be held for ever over a
+    /// job only the old key could see. The job file carries a digest of its
+    /// key and is dropped when the key has changed; and a resumed poll the
+    /// service refuses or no longer knows is taken for a job that is gone.
     private func result(
         of audio: URL, multichannel: Bool, job: URL
     ) async throws -> (TranscriptResponse, Data) {
-        if let id = Self.submittedJob(at: job) {
-            note("resuming \(id)")
-            do {
-                return try await poll(id: id, job: job)
-            } catch let failure as CloudHTTP.Failure where failure.status == 404 {
-                // Expired or deleted on their side. The upload is the only
-                // way back to a transcript.
-                note("\(id) is gone — submitting again")
+        if let submitted = Self.submittedJob(at: job) {
+            if let key = submitted.keyDigest, key != Self.digest(of: apiKey) {
+                note("\(submitted.id) was submitted with another key — submitting again")
                 try? FileManager.default.removeItem(at: job)
+            } else {
+                note("resuming \(submitted.id)")
+                do {
+                    return try await poll(id: submitted.id, job: job)
+                } catch let failure as CloudHTTP.Failure
+                    where [401, 403, 404].contains(failure.status ?? 0) {
+                    // Expired, deleted, or not this key's to see. The upload
+                    // is the only way back to a transcript.
+                    note("\(submitted.id) is gone (\(failure)) — submitting again")
+                    try? FileManager.default.removeItem(at: job)
+                }
             }
         }
         let uploadURL = try await upload(audio)
@@ -182,8 +197,15 @@ actor AssemblyAIEngine: TranscriptionEngine {
         note("submitted \(id)")
         // Written before the first poll, which is the whole point of it: the
         // transcript is being paid for from this moment on.
-        try? JSONSerialization.data(withJSONObject: ["id": id]).write(to: job, options: .atomic)
+        try? JSONSerialization.data(withJSONObject: ["id": id, "key": Self.digest(of: apiKey)])
+            .write(to: job, options: .atomic)
         return try await poll(id: id, job: job)
+    }
+
+    /// Enough of a key to tell it from another, and nothing a reader of the
+    /// folder could use.
+    static func digest(of key: String) -> String {
+        SHA256.hash(data: Data(key.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 
     /// A job that ended in an error will end in the same error however often
@@ -197,12 +219,14 @@ actor AssemblyAIEngine: TranscriptionEngine {
         }
     }
 
-    private static func submittedJob(at url: URL) -> String? {
+    /// The job an earlier attempt submitted, and the digest of the key it
+    /// was submitted with — nil in a file written before that was recorded.
+    private static func submittedJob(at url: URL) -> (id: String, keyDigest: String?)? {
         guard let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let id = json["id"] as? String, !id.isEmpty
         else { return nil }
-        return id
+        return (id, json["key"] as? String)
     }
 
     /// Provider timestamps are untrusted data. AssemblyAI has returned an
