@@ -22,10 +22,12 @@ jobs:
       - name: Build and verify LocalVQE assets
         run: make verify-localvqe
       - name: Swift tests
-        # The native echo test occupies CPU workers for tens of seconds.
-        # Keep unrelated suites from starving bounded async transport tests;
-        # concurrency exercised inside each test remains unchanged.
-        run: swift test --no-parallel
+        # In parallel: the analytics tests that were starved of threads while
+        # the native echo test held them now await their sends instead of
+        # timing them, and the suite passes with a one-thread cooperative
+        # pool (LIBDISPATCH_COOPERATIVE_POOL_STRICT=1), which is harder on
+        # it than any runner.
+        run: swift test
         env:
           # The assets were built in the step above, so the tests that use
           # them run here whether or not they are found: a missing asset is
