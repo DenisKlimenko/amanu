@@ -67,6 +67,8 @@ struct TranscriptionChoiceTests {
             cloud: true, local: false, provider: "assemblyai"))
         #expect(Self.read("openai") == TranscriptionChoice(
             cloud: true, local: false, provider: "openai"))
+        #expect(Self.read("gemini") == TranscriptionChoice(
+            cloud: true, local: false, provider: "gemini"))
 
         let cloudOnly = Self.written(
             TranscriptionChoice(cloud: true, local: false, provider: "openai"))
@@ -178,6 +180,9 @@ struct TranscriptionChoiceTests {
         #expect(TranscriptionChoice.keyPrompt(
             pending: "openai", inForce: "assemblyai", cloudOn: true)
             == "paste a key to move to OpenAI")
+        #expect(TranscriptionChoice.keyPrompt(
+            pending: "gemini", inForce: "openai", cloudOn: true)
+            == "paste a key to move to Gemini")
 
         #expect(TranscriptionChoice.rowNeedsKey(pending: "openai", cloudOn: false))
         #expect(!TranscriptionChoice.rowNeedsKey(pending: "openai", cloudOn: true))

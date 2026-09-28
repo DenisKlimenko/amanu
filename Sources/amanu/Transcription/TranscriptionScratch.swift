@@ -14,7 +14,7 @@ import Foundation
 /// before a session is transcribed again.
 enum TranscriptionScratch {
     static let echoFolderPrefix = ".transcription-aec-"
-    static let sliceFolder = "openai-slices"
+    static let sliceFolders = ["openai-slices", "gemini-slices"]
     static let derivedAudio = [
         TranscriptionInputs.mixedFile, "mixed.tmp.m4a",
         TranscriptionInputs.multichannelFile, TranscriptionInputs.multichannelTemporary,
@@ -25,7 +25,7 @@ enum TranscriptionScratch {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
         var found = ProviderCache.files(in: dir)
         found += names
-            .filter { $0.hasPrefix(echoFolderPrefix) || $0 == sliceFolder }
+            .filter { $0.hasPrefix(echoFolderPrefix) || sliceFolders.contains($0) }
             .map { dir.appendingPathComponent($0) }
         if includingDerivedAudio {
             found += names.filter(derivedAudio.contains).map { dir.appendingPathComponent($0) }

@@ -29,7 +29,7 @@ actor EngineResolver {
 
         static let live = Environment(
             localModels: { Platform.supportsLocalModels },
-            hasKey: { CloudService(provider: $0).key() != nil },
+            hasKey: { Credentials.hasTranscriptionKey(for: $0) },
             reachable: { await CloudService(provider: $0).reachable() },
             cloudEngine: { try EngineResolver.cloudEngine($0) },
             localEngine: { EngineResolver.localEngine(named: $0) })
@@ -157,7 +157,7 @@ actor EngineResolver {
 
     /// Which cloud service a configuration means. A configured engine naming
     /// a provider outright is that provider; anything else defers to the
-    /// `cloud` setting, which is what the setup window's two cards write.
+    /// `cloud` setting, which is what the setup window's cards write.
     static func cloudProvider(configured: String) -> String {
         Config.cloudEngines.contains(configured)
             ? configured
@@ -169,6 +169,7 @@ actor EngineResolver {
         case .openAI: return try OpenAITranscriptionEngine()
         case .elevenLabs: return try ElevenLabsEngine()
         case .assemblyAI: return try AssemblyAIEngine()
+        case .gemini: return try GeminiTranscriptionEngine()
         }
     }
 

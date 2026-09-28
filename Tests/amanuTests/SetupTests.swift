@@ -467,8 +467,9 @@ struct SetupTests {
         let assembly = try #require(cards.first { $0.id == "assemblyai" })
         let openai = try #require(cards.first { $0.id == "openai" })
         let elevenlabs = try #require(cards.first { $0.id == "elevenlabs" })
+        let gemini = try #require(cards.first { $0.id == "gemini" })
 
-        for card in [assembly, openai, elevenlabs] {
+        for card in [assembly, openai, elevenlabs, gemini] {
             let detail = card.allDescendants
                 .compactMap { $0 as? NSTextField }
                 .map(\.stringValue)
@@ -476,7 +477,7 @@ struct SetupTests {
             #expect(detail.contains("an hour"), "\(card.id) doesn't say what it costs")
         }
 
-        let links = [assembly, openai, elevenlabs].compactMap { card in
+        let links = [assembly, openai, elevenlabs, gemini].compactMap { card in
             card.allDescendants
                 .compactMap { $0 as? NSButton }
                 .first { $0.title.hasPrefix("Get a key") }?
@@ -485,6 +486,7 @@ struct SetupTests {
         #expect(links.contains("https://www.assemblyai.com/dashboard/signup"))
         #expect(links.contains("https://platform.openai.com/api-keys"))
         #expect(links.contains("https://elevenlabs.io/app/developers/api-keys"))
+        #expect(links.contains("https://aistudio.google.com/apikey"))
     }
 
     /// Return in a key field must not reach the window's default button.

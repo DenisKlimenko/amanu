@@ -1,14 +1,15 @@
 import CryptoKit
 import Foundation
 
-/// The three services a meeting's audio can be sent to, and the parts of
-/// talking to them that are the same shape in all three: where the key is
-/// kept, how a request carries it, and where to knock to find out whether the
-/// service is there at all.
+/// The services a meeting's audio can be sent to, and the parts of talking
+/// to them that are the same shape in all of them: where the key is kept, how
+/// a request carries it, and where to knock to find out whether the service
+/// is there at all.
 enum CloudService: String, CaseIterable, Sendable {
     case assemblyAI = "assemblyai"
     case openAI = "openai"
     case elevenLabs = "elevenlabs"
+    case gemini
 
     /// The provider a configuration names, with anything unknown meaning the
     /// one the setup window defaults to.
@@ -21,6 +22,7 @@ enum CloudService: String, CaseIterable, Sendable {
         case .assemblyAI: return Config.assemblyAIKey()
         case .openAI: return Config.openAIKey()
         case .elevenLabs: return Config.elevenLabsKey()
+        case .gemini: return Config.geminiKey()
         }
     }
 
@@ -31,6 +33,15 @@ enum CloudService: String, CaseIterable, Sendable {
         case .assemblyAI: request.setValue(key, forHTTPHeaderField: "authorization")
         case .openAI: request.setValue("Bearer \(key)", forHTTPHeaderField: "authorization")
         case .elevenLabs: request.setValue(key, forHTTPHeaderField: "xi-api-key")
+        // Gemini is reached two ways: an AI Studio key goes in a header of its
+        // own, and Vertex takes an OAuth token, which the engine hands over
+        // already spelled as a bearer.
+        case .gemini:
+            if key.hasPrefix("Bearer ") {
+                request.setValue(key, forHTTPHeaderField: "authorization")
+            } else {
+                request.setValue(key, forHTTPHeaderField: "x-goog-api-key")
+            }
         }
     }
 
@@ -41,6 +52,7 @@ enum CloudService: String, CaseIterable, Sendable {
         case .assemblyAI: return URL(string: "https://api.assemblyai.com/v2/transcript")!
         case .openAI: return URL(string: "https://api.openai.com/v1/models")!
         case .elevenLabs: return URL(string: "https://api.elevenlabs.io/v1/user")!
+        case .gemini: return URL(string: "https://aiplatform.googleapis.com/")!
         }
     }
 

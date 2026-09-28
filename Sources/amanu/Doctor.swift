@@ -486,13 +486,13 @@ enum DoctorReport {
     /// happen — the cloud engine, or nothing at all — because the time to
     /// learn there is no engine is before the meeting.
     private static func checkWithoutLocalModels(_ provider: String) -> Check {
-        guard cloudKey(provider) != nil else {
+        guard Credentials.hasTranscriptionKey(for: provider) else {
             return Check(
                 name: "transcription",
                 status: .warn("local transcription needs Apple Silicon and there is no "
-                    + "\(cloudName(provider)) key"),
-                remediation: "printf '%s' YOUR_KEY > \(cloudKeyPath(provider).path)"
-                    + " && chmod 600 \(cloudKeyPath(provider).path)"
+                    + "\(TranscriptionChoice.displayName(provider)) key"),
+                remediation: "printf '%s' YOUR_KEY > \(keyFile(provider))"
+                    + " && chmod 600 \(keyFile(provider))"
             )
         }
         return checkCloud(provider)
@@ -535,12 +535,22 @@ enum DoctorReport {
     private static func checkCloud(_ provider: String) -> Check {
         // A warning, not a failure: a missing key costs you the transcript,
         // and refusing to launch over it would cost you the recording too.
-        guard cloudKey(provider) != nil else {
+        guard Credentials.hasTranscriptionKey(for: provider) else {
+            if provider == "gemini" {
+                return Check(
+                    name: "transcription",
+                    status: .warn("gemini engine selected but there is neither an AI Studio "
+                        + "key nor a Vertex AI project with a gcloud login — transcripts will fail"),
+                    remediation: "pbpaste > \(keyFile(provider)) && chmod 600 \(keyFile(provider))"
+                        + " — or, for Vertex, set transcription.gemini.project and run "
+                        + "gcloud auth application-default login (brew install --cask gcloud-cli)"
+                )
+            }
             return Check(
                 name: "transcription",
                 status: .warn("\(provider) engine selected but no API key — transcripts will fail"),
-                remediation: "printf '%s' YOUR_KEY > \(cloudKeyPath(provider).path)"
-                    + " && chmod 600 \(cloudKeyPath(provider).path)"
+                remediation: "printf '%s' YOUR_KEY > \(keyFile(provider))"
+                    + " && chmod 600 \(keyFile(provider))"
             )
         }
         let expected = MeetingLanguages.expected(primary: Config.transcriptionLanguage())
@@ -561,24 +571,9 @@ enum DoctorReport {
         )
     }
 
-    private static func cloudKey(_ provider: String) -> String? {
-        switch provider {
-        case "openai": return Config.openAIKey()
-        case "elevenlabs": return Config.elevenLabsKey()
-        default: return Config.assemblyAIKey()
-        }
-    }
-
-    private static func cloudKeyPath(_ provider: String) -> URL {
-        switch provider {
-        case "openai": return Config.openAIKeyPath
-        case "elevenlabs": return Config.elevenLabsKeyPath
-        default: return Config.assemblyAIKeyPath
-        }
-    }
-
-    private static func cloudName(_ provider: String) -> String {
-        TranscriptionChoice.displayName(provider)
+    /// The file a cloud engine's key is read from, and so the one to put it in.
+    private static func keyFile(_ provider: String) -> String {
+        Credentials.transcriptionSlot(for: provider, in: Config.raw()).path.path
     }
 
     static func print(_ checks: [Check]) {

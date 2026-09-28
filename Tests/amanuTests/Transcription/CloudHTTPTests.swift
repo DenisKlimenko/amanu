@@ -330,9 +330,20 @@ struct CloudHTTPTests {
                 .send(URLRequest(url: URL(string: "https://example.test/\(service.rawValue)")!),
                       key: "secret", what: "probe")
         }
-        let headers = stub.requests.map { ($0.header("authorization"), $0.header("xi-api-key")) }
-        #expect(headers.map(\.0) == ["secret", "Bearer secret", nil])
-        #expect(headers.map(\.1) == [nil, nil, "secret"])
+        let headers = stub.requests.map {
+            ($0.header("authorization"), $0.header("xi-api-key"), $0.header("x-goog-api-key"))
+        }
+        #expect(headers.map(\.0) == ["secret", "Bearer secret", nil, nil])
+        #expect(headers.map(\.1) == [nil, nil, "secret", nil])
+        #expect(headers.map(\.2) == [nil, nil, nil, "secret"])
+
+        // Vertex takes an OAuth token, which the Gemini engine hands over
+        // already spelled as a bearer, rather than an AI Studio key.
+        _ = try await CloudHTTP(service: .gemini, session: stub.session)
+            .send(URLRequest(url: URL(string: "https://example.test/vertex")!),
+                  key: "Bearer token", what: "probe")
+        #expect(stub.requests.last?.header("authorization") == "Bearer token")
+        #expect(stub.requests.last?.header("x-goog-api-key") == nil)
     }
 
     // MARK: -

@@ -22,6 +22,7 @@ final class RecordingsWindow: NSObject {
         .init(id: "assemblyai", title: "AssemblyAI"),
         .init(id: "openai", title: "OpenAI"),
         .init(id: "elevenlabs", title: "ElevenLabs"),
+        .init(id: "gemini", title: "Gemini"),
     ] }
 
     var onImportFiles: (([URL]) -> Void)?

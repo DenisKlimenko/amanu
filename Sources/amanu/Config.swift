@@ -98,8 +98,82 @@ enum Config {
 
     /// The cloud engines, by the name they carry in the config and in
     /// transcript.json's provenance.
-    static let cloudEngines: Set<String> = ["assemblyai", "openai", "elevenlabs"]
+    static let cloudEngines: Set<String> = ["assemblyai", "openai", "elevenlabs", "gemini"]
     static let localEngines: Set<String> = ["parakeet", "whisper", "gigaam"]
+
+    /// Where Gemini transcription runs, from `transcription.gemini`. The
+    /// project only matters for Vertex, and it is named here or nowhere — not
+    /// `GOOGLE_CLOUD_PROJECT`, not whatever `gcloud` is configured for. Both
+    /// are set for other work, and a project somebody keeps for other work is
+    /// not one they chose to bill their meetings to. The model defaults per
+    /// route, since Vertex and the Gemini API name the same model differently.
+    struct GeminiSettings {
+        var project: String?
+        var location = Config.defaultString(.transcriptionGeminiLocation)
+        var model: String?
+    }
+
+    /// An AI Studio key, which sends Gemini transcription to the Gemini API
+    /// instead of Vertex. Read from amanu's own key file and nowhere else —
+    /// not `GEMINI_API_KEY`, which is gemini-cli's too: a key somebody keeps
+    /// for another tool, possibly on the free tier, is not one they chose to
+    /// send their meetings under.
+    static func geminiKey() -> String? {
+        secret(at: geminiKeyPath)
+    }
+
+    /// How Gemini transcription gets in: an AI Studio key sends it to the
+    /// Gemini API, and without one Vertex takes a token from gcloud for the
+    /// project the config names.
+    enum GeminiRoute: Equatable {
+        case apiKey
+        case vertex
+    }
+
+    /// nil when Gemini has no way in. gcloud on the disk is not one by
+    /// itself: the token Vertex takes is minted from the credentials that
+    /// `gcloud auth application-default login` writes, and until somebody has
+    /// run it every request fails. So the file is part of the answer — and
+    /// asking after a file costs a stat, where asking gcloud costs a process.
+    /// Nor is a login without a project named in the config: a signed-in
+    /// gcloud has usually been pointed at some project, and falling back on
+    /// it is how a meeting ends up billed to whichever one was set last.
+    static func geminiRoute(
+        gcloud: String?,
+        key: String? = Config.geminiKey(),
+        project: String? = Config.gemini().project,
+        credentials: URL = Config.applicationDefaultCredentials()
+    ) -> GeminiRoute? {
+        if key != nil { return .apiKey }
+        guard gcloud != nil, project != nil,
+              FileManager.default.fileExists(atPath: credentials.path)
+        else { return nil }
+        return .vertex
+    }
+
+    /// Where Google's own libraries look for application-default credentials:
+    /// the file `GOOGLE_APPLICATION_CREDENTIALS` names, or else the one the
+    /// login writes into gcloud's configuration directory, which
+    /// `CLOUDSDK_CONFIG` moves.
+    static func applicationDefaultCredentials(home: Home = .current) -> URL {
+        func path(_ name: String) -> URL? {
+            guard let value = home.variable(name)?.trimmed, !value.isEmpty else { return nil }
+            return home.expanding(value)
+        }
+        if let named = path("GOOGLE_APPLICATION_CREDENTIALS") { return named }
+        return (path("CLOUDSDK_CONFIG")
+            ?? home.url.appendingPathComponent(".config/gcloud", isDirectory: true))
+            .appendingPathComponent("application_default_credentials.json")
+    }
+
+    static func gemini() -> GeminiSettings {
+        let json = load()
+        var settings = GeminiSettings()
+        settings.project = text(.transcriptionGeminiProject, in: json)?.trimmed
+        settings.location = string(.transcriptionGeminiLocation, in: json).trimmed
+        settings.model = text(.transcriptionGeminiModel, in: json)?.trimmed
+        return settings
+    }
 
     /// OpenAI's transcription model. The default is the only one of theirs
     /// that returns timings and speakers; the setting exists for the day they
@@ -156,6 +230,7 @@ enum Config {
     static var openAIKeyPath: URL { keysDir.appendingPathComponent("openai") }
     static var elevenLabsKeyPath: URL { keysDir.appendingPathComponent("elevenlabs") }
     static var anthropicKeyPath: URL { keysDir.appendingPathComponent("anthropic") }
+    static var geminiKeyPath: URL { keysDir.appendingPathComponent("gemini") }
 
     /// Where the rest of a machine's toolchain tends to keep the same secret.
     /// Read-only as far as amanu is concerned.
