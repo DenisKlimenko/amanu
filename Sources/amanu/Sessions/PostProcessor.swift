@@ -382,11 +382,14 @@ enum PostProcessor {
     /// the transcript out from under a run in flight is how a summarizer ends
     /// up reading a file that no longer exists, and the run it would have
     /// interrupted is producing the very transcript being asked for.
-    static func markForRetranscription(_ dir: URL) {
+    ///
+    /// Returns whether the session was cleared.
+    @discardableResult
+    static func markForRetranscription(_ dir: URL) -> Bool {
         guard !SessionClaim.isHeld(dir) else {
             appendSessionLog(
                 "not clearing for re-transcription — another amanu has this session", to: dir)
-            return
+            return false
         }
 
         let fm = FileManager.default
@@ -407,6 +410,7 @@ enum PostProcessor {
             SessionState.Key.summaryDeferrals: nil,
         ])
         appendSessionLog("queued for re-transcription", to: dir)
+        return true
     }
 
     /// Put a name to a label by hand, and re-render the transcript against it.

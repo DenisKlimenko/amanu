@@ -483,6 +483,10 @@ final class RecordingsWindow: NSObject {
         // Asked without a confirmation, unlike Re-transcribe: there is no
         // transcript here for the work to throw away.
         case .transcribe(let clearingFirst):
+            if clearingFirst, let why = Self.retranscriptionRefusal(for: item.dir) {
+                say(why, about: item)
+                return
+            }
             if clearingFirst { PostProcessor.markForRetranscription(item.dir) }
             onRetranscribe?(item.dir)
             reload()
@@ -494,13 +498,40 @@ final class RecordingsWindow: NSObject {
                 let work = await PostProcessor.finish(item.dir)
                 working = false
                 reload()
-                // Empty after all means the transcript could not be read —
-                // the one thing the decision above cannot see. The command
-                // line answers that the same way, and the session log has
-                // the detail either way.
-                if work.isEmpty { say(Self.nothingOwedLine, about: item) }
+                if work.isEmpty { say(Self.nothingDoneLine(for: item.dir), about: item) }
             }
         }
+    }
+
+    /// What to say when Finish processing came back having done nothing.
+    ///
+    /// Not always good news, which is how it used to read: the work also
+    /// comes back empty when another amanu — or this one's own queue — has
+    /// the session, and when the config file broke after the button was
+    /// offered. Only once both are ruled out does it mean what it says, or
+    /// that the transcript could not be read, which the log has.
+    static func nothingDoneLine(for dir: URL) -> String {
+        if let reason = Config.unreadableReason {
+            return PostProcessor.Refusal.configUnreadable(reason).described
+        }
+        if let holder = SessionClaim.holder(dir), holder.isAlive {
+            return SessionClaim.Busy(session: dir.lastPathComponent, holder: holder).described
+        }
+        return nothingOwedLine
+    }
+
+    /// Why a recording cannot be cleared for re-transcription right now, or
+    /// nil when it can. Asked before anything is written: the engine choice
+    /// used to be stored first and the clearing then refused in silence, so
+    /// the recording kept its transcript, gained an engine nobody saw take
+    /// effect, and the window said nothing.
+    static func retranscriptionRefusal(for dir: URL) -> String? {
+        if let reason = Config.unreadableReason {
+            return PostProcessor.Refusal.configUnreadable(reason).described
+        }
+        guard SessionClaim.isHeld(dir) else { return nil }
+        return SessionClaim.Busy(session: dir.lastPathComponent, holder: SessionClaim.holder(dir))
+            .described
     }
 
     /// An answer with nothing to decide: the recording it is about, and one
@@ -543,16 +574,33 @@ final class RecordingsWindow: NSObject {
         alert.addButton(withTitle: localised("Cancel", "Отмена"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        Self.markForRetranscription(item.dir, engine: engine)
+        if let why = Self.markForRetranscription(item.dir, engine: engine) {
+            say(why, about: item)
+            return
+        }
         onRetranscribe?(item.dir)
         reload()
     }
 
-    static func markForRetranscription(_ dir: URL, engine: String?) {
+    /// Clear a recording for re-transcription with the engine chosen for it,
+    /// or say why not. The engine is written only once the clearing is sure
+    /// to happen.
+    @discardableResult
+    static func markForRetranscription(_ dir: URL, engine: String?) -> String? {
+        if let why = retranscriptionRefusal(for: dir) { return why }
+        let previous = SessionState.value(dir, SessionState.Key.transcriptionEngine)
         if let engine {
             SessionState.update(dir, with: [SessionState.Key.transcriptionEngine: engine])
         }
-        PostProcessor.markForRetranscription(dir)
+        guard PostProcessor.markForRetranscription(dir) else {
+            // Taken between the question and the clearing: put the choice
+            // back as it was, and say so.
+            if engine != nil {
+                SessionState.update(dir, with: [SessionState.Key.transcriptionEngine: previous])
+            }
+            return retranscriptionRefusal(for: dir) ?? nothingOwedLine
+        }
+        return nil
     }
 
     @objc private func inlineRetranscribeClicked(_ sender: NSButton) {

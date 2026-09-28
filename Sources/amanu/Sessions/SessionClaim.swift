@@ -83,6 +83,39 @@ enum SessionClaim {
             return "Another amanu (pid \(holder.pid)) is already \(what). Let it finish, "
                 + "or quit it and run this again."
         }
+
+        /// The same account for the recordings window, which a person reads
+        /// in their own language and which is never the command line.
+        var described: String {
+            guard let holder else {
+                return localised(
+                    "Something else is already working on this recording: its "
+                        + "\(SessionClaim.file) can't be read, so amanu is leaving it alone.",
+                    "Этой записью уже кто-то занят: её \(SessionClaim.file) не читается, "
+                        + "поэтому amanu её не трогает.")
+            }
+            let finishing = holder.stage == Stage.finish.rawValue
+            guard holder.pid != ProcessInfo.processInfo.processIdentifier else {
+                return finishing
+                    ? localised(
+                        "amanu is naming and summarizing this recording right now.",
+                        "amanu прямо сейчас подбирает имена и пишет саммари для этой записи.")
+                    : localised(
+                        "amanu is transcribing this recording right now.",
+                        "amanu прямо сейчас расшифровывает эту запись.")
+            }
+            return finishing
+                ? localised(
+                    "Another amanu (pid \(holder.pid)) is naming and summarizing this "
+                        + "recording. Let it finish, then try again.",
+                    "Другая amanu (pid \(holder.pid)) подбирает имена и пишет саммари для "
+                        + "этой записи. Дайте ей закончить и попробуйте снова.")
+                : localised(
+                    "Another amanu (pid \(holder.pid)) is transcribing this recording. "
+                        + "Let it finish, then try again.",
+                    "Другая amanu (pid \(holder.pid)) расшифровывает эту запись. "
+                        + "Дайте ей закончить и попробуйте снова.")
+        }
     }
 
     /// How long an unreadable claim is taken at its word.

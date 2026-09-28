@@ -513,6 +513,61 @@ struct RetranscriptionTests {
         #expect(EngineResolver.configuredEngine(for: dir) == "whisper")
     }
 
+    /// The engine choice was written first and the clearing then refused
+    /// in silence: the recording kept its transcript, gained an engine
+    /// nobody saw take effect, and the window said nothing.
+    @MainActor
+    @Test("Re-transcribing a recording another amanu has is refused before anything is written")
+    func retranscriptionUnderAClaimIsRefused() throws {
+        let dir = try Self.settledSession()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Transcript(
+            engine: "parakeet", model: "v3", created_at: "2026-08-20T09:00:00Z",
+            segments: [.init(speaker: "me", start_ms: 0, end_ms: 1000, text: "Привет.")]
+        ).write(to: dir)
+        let claim = try Self.claim(dir, pid: ProcessInfo.processInfo.processIdentifier)
+
+        let refusal = RecordingsWindow.markForRetranscription(dir, engine: "whisper")
+
+        #expect(refusal == SessionClaim.Busy(
+            session: dir.lastPathComponent, holder: SessionClaim.holder(dir)).described)
+        #expect(SessionState.value(dir, SessionState.Key.transcriptionEngine) == nil,
+                "the engine choice was left behind by a clearing that never happened")
+        #expect(FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent("transcript.json").path))
+
+        try FileManager.default.removeItem(at: claim)
+        #expect(RecordingsWindow.markForRetranscription(dir, engine: "whisper") == nil)
+        #expect(SessionState.value(dir, SessionState.Key.transcriptionEngine) as? String
+            == "whisper")
+    }
+
+    /// Finish processing came back empty and said everything was done — also
+    /// when the session was somebody else's, or the config file had broken.
+    @MainActor
+    @Test("Finish processing that did nothing says why, when there is a why")
+    func emptyFinishIsExplained() throws {
+        let dir = try Self.settledSession()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(RecordingsWindow.nothingDoneLine(for: dir) == RecordingsWindow.nothingOwedLine)
+
+        let claim = try Self.claim(dir, pid: ProcessInfo.processInfo.processIdentifier, stage: "finish")
+        let busy = RecordingsWindow.nothingDoneLine(for: dir)
+        #expect(busy != RecordingsWindow.nothingOwedLine)
+        #expect(busy.contains("naming and summarizing"))
+        let russian = InterfaceLanguage.$scoped.withValue(.russian) {
+            RecordingsWindow.nothingDoneLine(for: dir)
+        }
+        #expect(russian != busy && russian.contains("саммари"))
+        try FileManager.default.removeItem(at: claim)
+
+        try Home.current.writeConfig(text: #"{ "keep_audio": "#)
+        let config = RecordingsWindow.nothingDoneLine(for: dir)
+        #expect(config.contains("config.json"))
+        #expect(RecordingsWindow.retranscriptionRefusal(for: dir) == config)
+        try Home.current.writeConfig(["offline_echo_cancellation": false])
+    }
+
     @Test("A recording whose audio was discarded is refused in the window too")
     @MainActor
     func theWindowRefusesDiscardedAudio() throws {
