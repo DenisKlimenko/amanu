@@ -58,22 +58,21 @@ enum Credentials {
 
     /// The file a cloud transcription key is read from.
     static func transcriptionSlot(for provider: String, in config: [String: Any]?) -> Slot {
-        let transcription = config?["transcription"] as? [String: Any]
         switch provider {
         case "openai":
             // `Config.openAIKey` reads this summary setting for transcription
             // too; the two share one OpenAI key.
-            if let named = pathSetting(config, ["summary", "openai_api_key_path"]) {
+            if let named = pathSetting(.summaryOpenAIKeyPath, in: config) {
                 return Slot(path: named, isNamedInConfig: true)
             }
             return Slot(path: Config.openAIKeyPath, isNamedInConfig: false)
         case "elevenlabs":
-            if let named = pathSetting(transcription, ["elevenlabs", "api_key_path"]) {
+            if let named = pathSetting(.elevenLabsKeyPath, in: config) {
                 return Slot(path: named, isNamedInConfig: true)
             }
             return Slot(path: Config.elevenLabsKeyPath, isNamedInConfig: false)
         default:
-            if let named = pathSetting(transcription, ["assemblyai", "api_key_path"]) {
+            if let named = pathSetting(.assemblyAIKeyPath, in: config) {
                 return Slot(path: named, isNamedInConfig: true)
             }
             return Slot(path: Config.assemblyAIKeyPath, isNamedInConfig: false)
@@ -84,12 +83,12 @@ enum Credentials {
     /// or `openai-api`.
     static func summarySlot(for backend: String, in config: [String: Any]?) -> Slot {
         if backend == "anthropic-api" {
-            if let named = pathSetting(config, ["summary", "api_key_path"]) {
+            if let named = pathSetting(.summaryKeyPath, in: config) {
                 return Slot(path: named, isNamedInConfig: true)
             }
             return Slot(path: Config.anthropicKeyPath, isNamedInConfig: false)
         }
-        if let named = pathSetting(config, ["summary", "openai_api_key_path"]) {
+        if let named = pathSetting(.summaryOpenAIKeyPath, in: config) {
             return Slot(path: named, isNamedInConfig: true)
         }
         let baseURL = Config.summary(in: config).openAIBaseURL
@@ -107,18 +106,14 @@ enum Credentials {
     static func summaryOpenAIKey(in config: [String: Any]? = Config.raw()) -> String? {
         let baseURL = Config.summary(in: config).openAIBaseURL
         guard !isOpenAIItself(baseURL) else { return Config.openAIKey() }
-        if let named = pathSetting(config, ["summary", "openai_api_key_path"]) {
+        if let named = pathSetting(.summaryOpenAIKeyPath, in: config) {
             return Config.secret(at: named)
         }
         return Config.secret(at: openAICompatibleKeyPath) ?? Config.openAIKey()
     }
 
-    private static func pathSetting(_ object: [String: Any]?, _ path: [String]) -> URL? {
-        var node: Any? = object
-        for key in path { node = (node as? [String: Any])?[key] }
-        guard let raw = node as? String, !raw.trimmingCharacters(in: .whitespaces).isEmpty
-        else { return nil }
-        return Home.current.expanding(raw)
+    private static func pathSetting(_ key: Config.Key, in config: [String: Any]?) -> URL? {
+        Config.text(key, in: config).map { Home.current.expanding($0) }
     }
 
     // MARK: - writing one
