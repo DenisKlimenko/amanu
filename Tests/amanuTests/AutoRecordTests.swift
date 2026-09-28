@@ -322,6 +322,20 @@ struct AutoRecordLoopTests {
         #expect(h.starts.isEmpty)
     }
 
+    /// The ceiling sat behind the auto-record switch, so with the switch off
+    /// a recording started by hand and forgotten ran until the disk filled.
+    @Test("The ceiling stops a recording with auto-record off as well")
+    func ceilingWithAutoRecordOff() {
+        let h = AutoRecordHarness {
+            $0.enabled = false
+            $0.maxDuration = 60 * 60
+        }
+        h.session = FakeAutoSession(startedAt: h.now, trigger: .manual)
+        h.run(for: 61 * 60)
+        #expect(h.stops == ["max-duration"])
+        #expect(h.starts.isEmpty)
+    }
+
     /// "Can't measure" and "silent" look identical to the meter, and only
     /// one of them should end a meeting.
     @Test("The silence backstop stands down when levels cannot be measured")

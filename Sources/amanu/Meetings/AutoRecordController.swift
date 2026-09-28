@@ -253,12 +253,24 @@ final class AutoRecordController {
     func tick() {
         let settings = loadSettings()
         apply(enabled: settings.enabled)
+        let now = now()
+
+        // Before the switch, because the ceiling is not part of automatic
+        // recording: it applies to every recording, a manual one included,
+        // and with auto-record off it used to apply to none of them.
+        if let session = currentSession?(),
+           now.timeIntervalSince(session.startedAt) > settings.maxDuration {
+            lastDecision = localised(
+                "stopped at the duration ceiling", "остановила на пределе длительности")
+            stop("max-duration")
+            return
+        }
+
         guard enabled else {
             lastDecision = localised("auto-record off", "автозапись выключена")
             return
         }
 
-        let now = now()
         let mic = checkMic(settings)
 
         if mic.active {
@@ -438,14 +450,8 @@ final class AutoRecordController {
     ) {
         let elapsed = now.timeIntervalSince(session.startedAt)
 
-        // The ceiling applies to manual recordings too: whatever this is, it
-        // stopped being a meeting hours ago.
-        if elapsed > settings.maxDuration {
-            lastDecision = localised(
-                "stopped at the duration ceiling", "остановила на пределе длительности")
-            stop("max-duration")
-            return
-        }
+        // The ceiling is `tick`'s, ahead of the switch. What is left here is
+        // automatic recording's own business.
         guard session.trigger != .manual else {
             lastDecision = localised("manual recording in progress", "идёт ручная запись")
             return
