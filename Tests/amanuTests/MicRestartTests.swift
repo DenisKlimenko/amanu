@@ -79,4 +79,180 @@ struct MicRestartTests {
         #expect(meta["at"] != nil)
         #expect(JSONSerialization.isValidJSONObject(meta))
     }
+
+    // MARK: - which restart a gap belongs to
+
+    /// The first buffer of a new engine can land before the restart that
+    /// built it has been written up. The entry used to be appended only
+    /// then, so that buffer's gap went onto the previous restart.
+    @Test("A gap closed before its restart is written up still lands on that restart")
+    func gapLandsOnItsOwnRestart() {
+        let t = Date(timeIntervalSince1970: 1_800_000_000)
+        var log = MicRecorder.RestartLog()
+
+        let first = log.open(at: t, lastBufferAt: t)
+        _ = log.close(now: t.addingTimeInterval(1.5), carried: 0)
+        log.update(first) { $0.inputNow = "AirPods" }
+
+        let second = log.open(at: t.addingTimeInterval(60), lastBufferAt: t.addingTimeInterval(60))
+        // The new engine's first buffer, before the restart is written up.
+        let gap = log.close(now: t.addingTimeInterval(60.4), carried: 0.1)
+        log.update(second) { $0.inputNow = "MacBook Pro Microphone" }
+
+        #expect(abs((gap ?? 0) - 0.3) < 0.001)
+        #expect(log.entries.map(\.gapMs) == [1500, 300])
+        #expect(log.entries.map(\.inputNow) == ["AirPods", "MacBook Pro Microphone"])
+    }
+
+    @Test("A restart that fails and retries is one gap, measured from the first attempt")
+    func retriesAreOneGap() {
+        let t = Date(timeIntervalSince1970: 1_800_000_000)
+        var log = MicRecorder.RestartLog()
+        let first = log.open(at: t, lastBufferAt: t)
+        let again = log.open(at: t.addingTimeInterval(2), lastBufferAt: t)
+        #expect(first == again)
+        #expect(log.entries.count == 1)
+        #expect(log.close(now: t.addingTimeInterval(4), carried: 0) == 4)
+        #expect(log.recent(within: 30, of: t.addingTimeInterval(5)) == 1)
+    }
+
+    @Test("The storm guard does not count the restart under way")
+    func stormCountExcludesTheOpenRestart() {
+        let t = Date(timeIntervalSince1970: 1_800_000_000)
+        var log = MicRecorder.RestartLog()
+        log.open(at: t, lastBufferAt: t)
+        #expect(log.recent(within: 30, of: t) == 0)
+    }
+
+    // MARK: - microphones that refuse
+
+    /// A call app on a microphone that will not let us record it used to be
+    /// chased every fifteen seconds: restart, refusal, fall back to the
+    /// default, and the next route check found the same device again.
+    @Test("A microphone that refused is not followed again until its wait is over")
+    func refusedMicrophoneIsNotChased() {
+        let t = Date(timeIntervalSince1970: 1_800_000_000)
+        let zoomMic: AudioObjectID = 71, builtIn: AudioObjectID = 42
+        var refused = MicRecorder.RefusedDevices()
+
+        #expect(MicRecorder.routeTarget(wanted: zoomMic, fallback: builtIn, refused: refused, now: t)
+                == zoomMic)
+        refused.refuse(zoomMic, at: t)
+        for tick in stride(from: 15.0, to: 60, by: 15) {
+            #expect(MicRecorder.routeTarget(
+                wanted: zoomMic, fallback: builtIn, refused: refused, now: t.addingTimeInterval(tick))
+                    == builtIn)
+        }
+        #expect(MicRecorder.routeTarget(
+            wanted: zoomMic, fallback: builtIn, refused: refused, now: t.addingTimeInterval(61))
+                == zoomMic)
+
+        // Refused again: twice as long before the next try.
+        refused.refuse(zoomMic, at: t.addingTimeInterval(61))
+        #expect(refused.isRefused(zoomMic, at: t.addingTimeInterval(61 + 119)))
+        #expect(!refused.isRefused(zoomMic, at: t.addingTimeInterval(61 + 121)))
+        #expect(MicRecorder.RefusedDevices.wait(afterRefusals: 20) == 15 * 60)
+    }
+
+    // MARK: - bringing capture up
+
+    struct Refused: Error {}
+
+    /// At the start of a session a single refusal used to fail the whole
+    /// recording, system track included, while the same refusal mid-session
+    /// already fell back.
+    @Test("A chosen microphone that refuses gives way to the default, voice processing still on")
+    func chosenDeviceGivesWayFirst() throws {
+        var attempts: [Bool] = []
+        var chosen = true
+        try MicRecorder.attachWithFallbacks(
+            voiceProcessing: true,
+            attempt: { voice in
+                attempts.append(voice)
+                if chosen { chosen = false; throw Refused() }
+            },
+            failedOnChosenDevice: { attempts.count == 1 })
+        #expect(attempts == [true, true])
+    }
+
+    @Test("Voice processing that will not start gives way to raw capture")
+    func voiceGivesWayToRaw() throws {
+        var attempts: [Bool] = []
+        try MicRecorder.attachWithFallbacks(
+            voiceProcessing: true,
+            attempt: { voice in
+                attempts.append(voice)
+                if voice { throw Refused() }
+            },
+            failedOnChosenDevice: { false })
+        #expect(attempts == [true, false])
+    }
+
+    @Test("Capture that will not start any way at all is an error")
+    func nothingWorksThrows() {
+        var attempts: [Bool] = []
+        #expect(throws: Refused.self) {
+            try MicRecorder.attachWithFallbacks(
+                voiceProcessing: false,
+                attempt: { voice in attempts.append(voice); throw Refused() },
+                failedOnChosenDevice: { false })
+        }
+        #expect(attempts == [false])
+    }
+
+    // MARK: - writing after a gap
+
+    private func readSamples(_ url: URL) throws -> [Float] {
+        let file = try AVAudioFile(forReading: url)
+        let buffer = AVAudioPCMBuffer(
+            pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length))!
+        try file.read(into: buffer)
+        return Array(UnsafeBufferPointer(start: buffer.floatChannelData![0], count: Int(buffer.frameLength)))
+    }
+
+    private func constant(_ value: Float, frames: Int, format: AVAudioFormat) -> AVAudioPCMBuffer {
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))!
+        buffer.frameLength = AVAudioFrameCount(frames)
+        buffer.floatChannelData![0].update(repeating: value, count: frames)
+        return buffer
+    }
+
+    /// The silence for a gap is written off the capture callback, and the
+    /// audio that follows it must still come after it, in order.
+    @Test("Audio after a gap reaches the file after its silence, in order")
+    func writerKeepsOrderAcrossAGap() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-writer-\(UUID().uuidString).caf")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 8_000, channels: 1, interleaved: false)!
+        do {
+            let file = try AVAudioFile(
+                forWriting: url,
+                settings: AudioFormats.pcmSettings(sampleRate: 8_000, channels: 1),
+                commonFormat: .pcmFormatFloat32, interleaved: false)
+            let writer = TrackWriter(file: file, label: "test")
+            writer.write(constant(0.5, frames: 100, format: format))
+            writer.write(constant(0.25, frames: 100, format: format), after: 20_000)
+            for _ in 0..<5 { writer.write(constant(0.125, frames: 100, format: format)) }
+            writer.drain()
+        }
+
+        let samples = try readSamples(url)
+        #expect(samples.count == 100 + 20_000 + 100 + 500)
+        #expect(samples[0..<100].allSatisfy { abs($0 - 0.5) < 0.001 })
+        #expect(samples[100..<20_100].allSatisfy { $0 == 0 })
+        #expect(samples[20_100..<20_200].allSatisfy { abs($0 - 0.25) < 0.001 })
+        #expect(samples[20_200...].allSatisfy { abs($0 - 0.125) < 0.001 })
+    }
+
+    @Test("A restart's meta says how much of a very long gap was padded")
+    func paddedShortOfTheGapIsRecorded() {
+        var restart = MicRecorder.Restart(at: Date())
+        restart.gapMs = 3_600_000
+        restart.paddedMs = Int(MicRecorder.longestPad * 1000)
+        let meta = restart.meta(iso: ISO8601DateFormatter())
+        #expect(meta["gap_ms"] as? Int == 3_600_000)
+        #expect(meta["padded_ms"] as? Int == 600_000)
+    }
 }
