@@ -1788,7 +1788,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     private func refreshTranscription() {
         let choice = transcriptionChoice
         provider = choice.provider
-        pendingProvider = TranscriptionChoice.stillPending(pendingProvider) { [weak self] in
+        pendingProvider = TranscriptionChoice.stillPending(pendingProvider) {
             Credentials.hasTranscriptionKey(for: $0)
         }
 
