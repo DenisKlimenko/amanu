@@ -38,6 +38,10 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         panel.isReleasedWhenClosed = false
         panel.delegate = self
         panel.minSize = NSSize(width: 640, height: 460)
+        // Rows and cards come and go as the form redraws; the Tab order has
+        // to follow them, or a choice card that appeared after the window
+        // opened could never be reached from the keyboard.
+        panel.autorecalculatesKeyViewLoop = true
 
         let scroll = SetupLayout.scroller(around: form.view)
 

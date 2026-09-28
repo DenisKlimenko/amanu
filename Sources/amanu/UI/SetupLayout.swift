@@ -78,6 +78,8 @@ enum SetupLayout {
         label.font = sectionFont
         label.textColor = .secondaryLabelColor
 
+        // A switch that governs the section is named by the section.
+        if let toggle = leading as? NSSwitch { toggle.setAccessibilityLabel(name) }
         let heading = NSStackView(views: leading.map { [$0, label] } ?? [label])
         heading.orientation = .horizontal
         heading.alignment = .centerY
@@ -191,6 +193,15 @@ enum SetupLayout {
         if let toggle {
             words.addGestureRecognizer(NSClickGestureRecognizer(
                 target: toggle, action: #selector(NSSwitch.toggleFromItsLabel)))
+            // And they are its name. A switch is a bare control to the
+            // accessibility API, so without this VoiceOver said "switch, on"
+            // for every row in the window and nothing about what it was.
+            if let title = title as? NSTextField {
+                toggle.setAccessibilityLabel(title.stringValue)
+            }
+            if let detail = detail as? NSTextField, !detail.stringValue.isEmpty {
+                toggle.setAccessibilityHelp(detail.stringValue)
+            }
         }
         views.append(words)
         views.append(spacer())

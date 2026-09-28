@@ -1,10 +1,22 @@
 import AppKit
 
 /// A card in a row of mutually exclusive choices.
+///
+/// A radio button as far as anything but the eye is concerned. It was a plain
+/// view that answered the mouse and nothing else, so choosing a transcription
+/// provider, a local engine or a summary backend could not be done from the
+/// keyboard at all, and VoiceOver passed over the cards as a stretch of
+/// unlabelled text. It takes focus, draws the focus ring around its whole
+/// outline, chooses itself on Space or Return, moves to its neighbour on the
+/// arrow keys, and says to the accessibility API what it is, what it is
+/// called and whether it is the one chosen.
 @MainActor
 final class ChoiceCard: NSView, LayerTinted {
     let id: String
     var onSelect: ((String) -> Void)?
+    /// Move to the card `offset` places along in the same group; set by the
+    /// group, which is the only thing that knows the order.
+    var onStep: ((_ offset: Int) -> Void)?
 
     private let radio = NSImageView()
     private let titleLabel: NSTextField
@@ -53,6 +65,12 @@ final class ChoiceCard: NSView, LayerTinted {
         didSet { alphaValue = isEnabled ? 1 : 0.45 }
     }
 
+    /// What the card is called, and what it says beneath that — the words a
+    /// screen reader has to say for it, since the labels themselves are not
+    /// what gets focus.
+    private let title: String
+    private let detail: String
+
     var isSelected: Bool {
         get { selected }
         set {
@@ -72,8 +90,11 @@ final class ChoiceCard: NSView, LayerTinted {
     init(id: String, title: String, detail: String, accessories: [NSView] = [],
          compact: Bool = false) {
         self.id = id
+        self.title = title
+        self.detail = detail
         titleLabel = NSTextField(labelWithString: title)
         super.init(frame: .zero)
+        identifier = NSUserInterfaceItemIdentifier("choice.\(id)")
 
         titleLabel.font = SetupLayout.titleFont
         radio.symbolConfiguration = .init(pointSize: 15, weight: .regular)
@@ -178,6 +199,70 @@ final class ChoiceCard: NSView, LayerTinted {
         guard isEnabled else { return }
         onSelect?(id)
     }
+
+    // MARK: - keyboard
+
+    override var acceptsFirstResponder: Bool { isEnabled }
+    override var canBecomeKeyView: Bool { isEnabled && !isHiddenOrHasHiddenAncestor }
+
+    override func becomeFirstResponder() -> Bool {
+        noteFocusRingMaskChanged()
+        return super.becomeFirstResponder()
+    }
+
+    override func resignFirstResponder() -> Bool {
+        noteFocusRingMaskChanged()
+        return super.resignFirstResponder()
+    }
+
+    override var focusRingMaskBounds: NSRect { bounds }
+
+    override func drawFocusRingMask() {
+        NSBezierPath(
+            roundedRect: bounds, xRadius: SetupLayout.corner, yRadius: SetupLayout.corner
+        ).fill()
+    }
+
+    /// Space and Return choose, as they press a radio button; the arrows move
+    /// along the row, as they do in a radio group.
+    override func keyDown(with event: NSEvent) {
+        guard isEnabled else { return super.keyDown(with: event) }
+        switch event.specialKey {
+        case .carriageReturn?, .enter?:
+            onSelect?(id)
+        case .leftArrow?, .upArrow?:
+            onStep?(-1)
+        case .rightArrow?, .downArrow?:
+            onStep?(1)
+        default:
+            if event.charactersIgnoringModifiers == " " {
+                onSelect?(id)
+            } else {
+                super.keyDown(with: event)
+            }
+        }
+    }
+
+    // MARK: - accessibility
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .radioButton }
+    override func accessibilityLabel() -> String? { title }
+    override func accessibilityValue() -> Any? { NSNumber(value: selected ? 1 : 0) }
+    override func isAccessibilityEnabled() -> Bool { isEnabled }
+    override func isAccessibilitySelected() -> Bool { selected }
+
+    /// The description and what the machine said about it, read after the
+    /// name: "OpenAI, radio button, selected — $0.36 an hour. key works".
+    override func accessibilityHelp() -> String? {
+        [detail, status].filter { !$0.isEmpty }.joined(separator: ". ")
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled else { return false }
+        onSelect?(id)
+        return true
+    }
 }
 
 /// A set of cards where exactly one is chosen. AppKit only groups radio
@@ -197,6 +282,26 @@ final class ChoiceGroup {
                 self?.select(id)
                 self?.onChange?(id)
             }
+            card.onStep = { [weak self, weak card] offset in
+                guard let self, let card else { return }
+                self.step(from: card, by: offset)
+            }
+        }
+    }
+
+    /// An arrow key on a card: focus and choose the next enabled card along,
+    /// the way arrows move the choice in any radio group.
+    private func step(from card: ChoiceCard, by offset: Int) {
+        guard let start = cards.firstIndex(where: { $0 === card }) else { return }
+        var index = start + offset
+        while cards.indices.contains(index) {
+            let next = cards[index]
+            if next.isEnabled, !next.isHiddenOrHasHiddenAncestor {
+                next.window?.makeFirstResponder(next)
+                next.onSelect?(next.id)
+                return
+            }
+            index += offset
         }
     }
 

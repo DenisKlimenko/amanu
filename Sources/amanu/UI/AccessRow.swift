@@ -83,6 +83,11 @@ final class AccessRow: NSView, LayerTinted {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    /// The row's button is found by the row's name with `.action` after it.
+    override var identifier: NSUserInterfaceItemIdentifier? {
+        didSet { button.identifier = identifier.map { .init($0.rawValue + ".action") } }
+    }
+
     func tintLayer() {
         layer?.backgroundColor = wantsAttention
             ? NSColor.systemOrange.withAlphaComponent(0.12).cgColor
@@ -101,6 +106,7 @@ final class AccessRow: NSView, LayerTinted {
     func working(_ message: String) {
         button.isEnabled = false
         detail.stringValue = message
+        detail.isHidden = false
     }
 
     /// The one row the person is being asked to act on right now is tinted.
@@ -118,6 +124,13 @@ final class AccessRow: NSView, LayerTinted {
                     "needs your attention", "требует внимания"))
             mark.contentTintColor = .systemOrange
         }
+    }
+
+    /// The button's name for a screen reader: what it does and to what.
+    /// "Allow" four times down a list says nothing about which of the four
+    /// grants each one asks for.
+    private func nameButton() {
+        button.setAccessibilityLabel("\(button.title) — \(title.stringValue)")
     }
 
     /// `action` keeps a button on a granted row — for the one permission
@@ -173,5 +186,6 @@ final class AccessRow: NSView, LayerTinted {
             mark.contentTintColor = .tertiaryLabelColor
             button.isHidden = false
         }
+        nameButton()
     }
 }

@@ -298,6 +298,17 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
                 equalTo: form.widthAnchor, constant: -2 * SetupLayout.gutter).isActive = true
         }
 
+        // Names for the switches that do not depend on the words beside
+        // them, so a test can find a switch without walking up from its
+        // label through however many stacks the layout has this week.
+        for (toggle, name) in [
+            (cloudSwitch, "transcription.cloud"), (localSwitch, "transcription.local"),
+            (liveTranscription, "transcription.live"), (keepAudio, "files.keep-audio"),
+            (summariesOn, "summary.enabled"), (menuBarIcon, "icons.menu-bar"),
+            (dockIcon, "icons.dock"), (autoRecord, "auto-record"), (analytics, "analytics"),
+        ] {
+            toggle.identifier = NSUserInterfaceItemIdentifier(name)
+        }
         wireActions()
         refresh()
         configWatch = ConfigWatch.observe { [weak self] in self?.refresh() }
@@ -528,6 +539,8 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
 
         language.target = self
         language.action = #selector(languageChanged)
+        language.identifier = NSUserInterfaceItemIdentifier("transcription.language")
+        language.setAccessibilityLabel(label.stringValue)
         buildLanguageMenu()
 
         let picker = NSStackView(views: [label, language, NSView()])
