@@ -75,8 +75,7 @@ enum SpeakerNamer {
 
         guard !asking.isEmpty else {
             log("naming — every speaker already has a name")
-            let merged = existing?.merged(with: resolved) ?? resolved
-            return finish(merged, transcript: transcript, dir: dir, log: log)
+            return finish(resolved, transcript: transcript, dir: dir, log: log)
         }
 
         // The naming model is configurable separately because this is an
@@ -115,10 +114,9 @@ enum SpeakerNamer {
                     fresh.speakers[label] = SpeakerNames.Entry(name: nil, source: .model)
                 }
 
-                let merged = existing?.merged(with: fresh) ?? fresh
-                log("named \(merged.namedCount) of \(labels.count) speaker(s)")
-                let finished = finish(merged, transcript: transcript, dir: dir, log: log)
-                if finished != nil {
+                let finished = finish(fresh, transcript: transcript, dir: dir, log: log)
+                if let finished {
+                    log("named \(finished.namedCount) of \(labels.count) speaker(s)")
                     Analytics.track(.speakerNamesFinished, [
                         .backend: .text(backend.name),
                         .model: .text(AnalyticsCatalogue.summaryModel(
@@ -156,20 +154,30 @@ enum SpeakerNamer {
         return nil
     }
 
-    /// Write the file, re-render the markdown against it, and clear the
-    /// session's pending state. Naming is the only thing that rewrites
-    /// `transcript.md`, and it never touches `transcript.json`.
+    /// Merge a pass into whatever `speakers.json` says now, write it,
+    /// re-render the markdown against it, and clear the session's pending
+    /// state. Naming is the only thing that rewrites `transcript.md`, and it
+    /// never touches `transcript.json`.
+    ///
+    /// The file is read again here, under the session's lock, rather than
+    /// merged into the copy read before the model was asked: a person can
+    /// name a speaker in the recordings window during the minutes the model
+    /// takes, and merging into the older copy wrote their name away.
     private static func finish(
-        _ names: SpeakerNames,
+        _ fresh: SpeakerNames,
         transcript: Transcript,
         dir: URL,
         log: (String) -> Void
     ) -> SpeakerNames? {
         do {
-            try names.write(to: dir)
-            try transcript.writeMarkdown(to: dir, names: names)
-            SessionState.update(dir, with: [SessionState.Key.speakersStatus: nil])
-            return names
+            return try SessionLock.withLock(dir) {
+                let current = SpeakerNames.read(from: dir)
+                let merged = current?.merged(with: fresh) ?? fresh
+                try merged.write(to: dir)
+                try transcript.writeMarkdown(to: dir, names: merged)
+                SessionState.update(dir, with: [SessionState.Key.speakersStatus: nil])
+                return merged
+            }
         } catch {
             // The transcript is intact either way — this only costs the names.
             log("couldn't write speaker names: \(error)")

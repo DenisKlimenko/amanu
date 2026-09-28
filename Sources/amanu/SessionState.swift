@@ -40,18 +40,60 @@ enum SessionState {
         read(dir)?[key]
     }
 
+    /// Why meta.json could not be amended.
+    enum StateError: Error, CustomStringConvertible {
+        case unreadable(URL)
+        case unwritable(URL, Error)
+
+        var description: String {
+            switch self {
+            case .unreadable(let url): return "can't read \(url.path)"
+            case .unwritable(let url, let error): return "can't write \(url.path): \(error)"
+            }
+        }
+    }
+
     /// Merge fields into meta.json, leaving everything else alone. A value of
     /// `nil` removes its key — that's how a state that no longer applies gets
     /// cleared rather than lingering as a stale claim.
-    static func update(_ dir: URL, with fields: [String: Any?]) {
+    ///
+    /// The read and the write are one step under the session's lock, so two
+    /// writers amending different keys both land; before, each wrote back the
+    /// copy it had read, and the later one erased the earlier one's keys.
+    static func amend(_ dir: URL, with fields: [String: Any?]) throws {
         let url = dir.appendingPathComponent("meta.json")
-        guard var json = read(dir) else { return }
-        for (key, value) in fields {
-            if let value { json[key] = value } else { json.removeValue(forKey: key) }
+        try SessionLock.withLock(dir) {
+            // A missing or unparsable meta.json is not recreated from the
+            // fields alone: a file holding nothing but a status would read as
+            // a session with no audio, and the recording's own record of
+            // itself is worth more than the note being added to it.
+            guard var json = read(dir) else { throw StateError.unreadable(url) }
+            for (key, value) in fields {
+                if let value { json[key] = value } else { json.removeValue(forKey: key) }
+            }
+            do {
+                let data = try JSONSerialization.data(
+                    withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: url, options: .atomic)
+            } catch {
+                throw StateError.unwritable(url, error)
+            }
         }
-        guard let data = try? JSONSerialization.data(
-            withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
-        ) else { return }
-        try? data.write(to: url, options: .atomic)
+    }
+
+    /// `amend` for callers with nothing better to do about a failure than to
+    /// say so. It used to be swallowed whole, which is how a status that could
+    /// not be written looked exactly like a status that had been: the log is
+    /// where somebody reading the session later will see it.
+    @discardableResult
+    static func update(_ dir: URL, with fields: [String: Any?]) -> Bool {
+        do {
+            try amend(dir, with: fields)
+            return true
+        } catch {
+            appendSessionLog("couldn't record \(fields.keys.sorted().joined(separator: ", ")) "
+                + "in meta.json: \(error)", to: dir)
+            return false
+        }
     }
 }

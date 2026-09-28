@@ -350,21 +350,27 @@ enum PostProcessor {
     ///
     /// An empty name clears the entry back to unnamed, so a correction can be
     /// taken back as easily as it was made.
+    ///
+    /// The read, the change and the write are one step under the session's
+    /// lock, the same one a naming run merges its answer under, so the two
+    /// cannot write each other's work away.
     static func rename(_ label: String, to name: String?, in dir: URL) {
         let cleaned = name?.trimmingCharacters(in: .whitespacesAndNewlines)
-        var names = SpeakerNames.read(from: dir) ?? SpeakerNames()
-        names.speakers[label] = SpeakerNames.Entry(
-            name: (cleaned?.isEmpty ?? true) ? nil : cleaned,
-            source: .manual
-        )
         do {
-            try names.write(to: dir)
-            if let transcript = readTranscript(dir) {
-                try transcript.writeMarkdown(to: dir, names: names)
+            try SessionLock.withLock(dir) {
+                var names = SpeakerNames.read(from: dir) ?? SpeakerNames()
+                names.speakers[label] = SpeakerNames.Entry(
+                    name: (cleaned?.isEmpty ?? true) ? nil : cleaned,
+                    source: .manual
+                )
+                try names.write(to: dir)
+                if let transcript = readTranscript(dir) {
+                    try transcript.writeMarkdown(to: dir, names: names)
+                }
+                // The label now has an answer, so the session is no longer
+                // waiting on a model for it.
+                SessionState.update(dir, with: [SessionState.Key.speakersStatus: nil])
             }
-            // The label now has an answer, so the session is no longer waiting
-            // on a model for it.
-            SessionState.update(dir, with: [SessionState.Key.speakersStatus: nil])
             appendSessionLog(
                 cleaned?.isEmpty == false
                     ? "\(label) named \"\(cleaned!)\" by hand"
