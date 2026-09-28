@@ -165,9 +165,11 @@ enum SessionInventory {
                 enabled: policy.names,
                 blocked: transcriptStep != .done
             ),
+            // A summary of a transcript since replaced is not this
+            // session's summary, however long it stays on disk.
             summary: step(
                 dir: dir,
-                artifact: exists("summary.md"),
+                artifact: PostProcessor.hasCurrentSummary(dir, meta: meta),
                 statusKey: SessionState.Key.summaryStatus,
                 enabled: policy.summary,
                 blocked: transcriptStep != .done

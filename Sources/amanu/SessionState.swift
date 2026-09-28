@@ -33,6 +33,12 @@ enum SessionState {
         /// How many times each pass has been deferred after reaching a
         /// backend — see `ChainAttempt`.
         static let summaryDeferrals = "summary_deferrals"
+        /// True while `summary.md` was written from a transcript that has
+        /// since been discarded for a new one. The file is kept until a
+        /// summary of the new transcript replaces it — a re-transcription
+        /// that fails for good would otherwise have cost the only summary
+        /// there was — and until then it is owed, and not shown as done.
+        static let summaryStale = "summary_stale"
         static let speakersDeferrals = "speakers_deferrals"
     }
 

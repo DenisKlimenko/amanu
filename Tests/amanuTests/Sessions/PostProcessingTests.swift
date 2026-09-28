@@ -60,6 +60,43 @@ struct PostProcessingTests {
         #expect(Self.status(dir, SessionState.Key.summaryStatus) == nil)
     }
 
+    /// Re-transcription deleted summary.md before it knew whether a new
+    /// transcript would ever exist, so a retry that failed for good cost the
+    /// meeting its only summary.
+    @Test("A summary outlives re-transcription, marked stale, until a new one replaces it")
+    func staleSummaryIsKeptUntilReplaced() async throws {
+        let dir = try SessionFixture.make()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let summary = dir.appendingPathComponent("summary.md")
+        try Data("## Old\nFrom the first transcript.\n".utf8).write(to: summary)
+        let policy = PostProcessor.Policy(names: false, summary: true)
+        let model = FakeModel("claude-cli", answer: "## New\nFrom the second transcript.")
+
+        try await Self.withModels([model]) {
+            PostProcessor.markForRetranscription(dir)
+
+            #expect(FileManager.default.fileExists(atPath: summary.path),
+                    "the only summary went before the retry had produced anything")
+            #expect(!PostProcessor.hasCurrentSummary(dir))
+            let cleared = try #require(SessionInventory.item(for: dir, policy: policy))
+            #expect(cleared.summary != .done, "a summary of a discarded transcript shown as done")
+            #expect(PostProcessor.outstanding(dir, policy: policy).isEmpty,
+                    "nothing to summarize until there is a transcript again")
+
+            // The retry succeeds, and the summary owed is written over the old.
+            try SessionFixture.transcript.write(to: dir)
+            #expect(PostProcessor.outstanding(dir, policy: policy).summary)
+            await PostProcessor.finish(dir, policy: policy)
+        }
+
+        #expect(model.callCount == 1)
+        #expect(try String(contentsOf: summary, encoding: .utf8)
+            == "## New\nFrom the second transcript.\n")
+        #expect(PostProcessor.hasCurrentSummary(dir))
+        #expect(SessionState.value(dir, SessionState.Key.summaryStale) == nil)
+        #expect(SessionInventory.item(for: dir, policy: policy)?.summary == .done)
+    }
+
     @Test("An unreachable backend hands over to the next one, which writes the summary")
     func transientThenSuccess() async throws {
         let dir = try SessionFixture.make()

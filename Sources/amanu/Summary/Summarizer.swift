@@ -81,6 +81,7 @@ enum Summarizer {
                     SessionState.Key.summaryStatus: nil,
                     SessionState.Key.summaryFailedFor: nil,
                     SessionState.Key.summaryDeferrals: nil,
+                    SessionState.Key.summaryStale: nil,
                 ])
                 Analytics.track(.summaryFinished, [
                     .backend: .text(backend.name),

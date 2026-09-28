@@ -63,10 +63,13 @@ struct TranscriptionScratchTests {
 
         PostProcessor.markForRetranscription(dir)
 
-        for name in ["transcript.json", "transcript.md", "summary.md", SpeakerNames.file] {
+        for name in ["transcript.json", "transcript.md", SpeakerNames.file] {
             #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent(name).path),
                     "\(name) survived")
         }
+        // Kept until a new summary replaces it, but no longer this session's.
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("summary.md").path))
+        #expect(!PostProcessor.hasCurrentSummary(dir))
         for url in planted {
             #expect(!FileManager.default.fileExists(atPath: url.path), "\(url.lastPathComponent) survived")
         }

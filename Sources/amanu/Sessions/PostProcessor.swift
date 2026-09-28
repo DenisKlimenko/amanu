@@ -72,10 +72,20 @@ enum PostProcessor {
             && !gaveUp(SessionState.Key.speakersStatus, SessionState.Key.speakersFailedFor,
                        .speakerNames)
         work.summary = policy.summary
-            && !exists("summary.md")
+            && !hasCurrentSummary(dir, meta: meta)
             && !gaveUp(SessionState.Key.summaryStatus, SessionState.Key.summaryFailedFor,
                        .summary)
         return work
+    }
+
+    /// Whether `summary.md` is there and was written from the transcript
+    /// that is there now.
+    static func hasCurrentSummary(_ dir: URL, meta: [String: Any]? = nil) -> Bool {
+        guard FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent("summary.md").path)
+        else { return false }
+        let meta = meta ?? SessionState.read(dir) ?? [:]
+        return meta[SessionState.Key.summaryStale] as? Bool != true
     }
 
     /// Run whatever is outstanding for one session. Returns what it did.
@@ -355,10 +365,14 @@ enum PostProcessor {
 
     /// Offer a session to the transcription queue again.
     ///
-    /// Clears the marks that retired it and removes everything made from the
-    /// old transcript — the transcript itself, the names, the summary — so the
-    /// queue treats it as untranscribed at the next scan and nothing of the
-    /// old answer survives next to the new one. The services' cached
+    /// Clears the marks that retired it and removes what was made from the
+    /// old transcript — the transcript itself and the names — so the queue
+    /// treats it as untranscribed at the next scan and nothing of the old
+    /// answer survives next to the new one. The summary is the exception: it
+    /// is kept, marked stale, and replaced only when the new transcript has a
+    /// summary of its own. It used to be deleted here, before anything was
+    /// known about whether the new transcript would ever exist, and a retry
+    /// that failed for good cost the one summary the meeting had. The services' cached
     /// responses go too: they used to be kept on purpose, to make a second
     /// run free, which made it a second rendering of the first answer rather
     /// than a second transcription — whatever had changed since, the engine's
@@ -376,11 +390,13 @@ enum PostProcessor {
         }
 
         let fm = FileManager.default
-        for file in ["transcript.json", "transcript.md", SpeakerNames.file, "summary.md"] {
+        for file in ["transcript.json", "transcript.md", SpeakerNames.file] {
             try? fm.removeItem(at: dir.appendingPathComponent(file))
         }
         TranscriptionScratch.remove(in: dir, includingDerivedAudio: true)
+        let summaryKept = fm.fileExists(atPath: dir.appendingPathComponent("summary.md").path)
         SessionState.update(dir, with: [
+            SessionState.Key.summaryStale: summaryKept ? true : nil,
             SessionState.Key.transcriptionFailed: nil,
             SessionState.Key.transcriptionAttempts: nil,
             SessionState.Key.speakersStatus: nil,
