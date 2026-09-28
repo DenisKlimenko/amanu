@@ -91,6 +91,33 @@ struct SetupFormBehaviourTests {
         for _ in 0..<5 where tones == 0 { await Task.yield() }
         #expect(tones == 1)
     }
+
+    /// Grants are given in System Settings, and the person comes back to
+    /// amanu from there. Nothing redrew the rows when they did, so the
+    /// microphone row went on saying denied beside a grant that existed.
+    @Test("Coming back to amanu redraws a form that is on screen, and only one that is")
+    func activationRedraws() {
+        let form = SetupForm()
+        defer { form.stop() }
+        var redraws = 0
+        form.onStateChange = { redraws += 1 }
+
+        NotificationCenter.default.post(
+            name: NSApplication.didBecomeActiveNotification, object: NSApp)
+        #expect(redraws == 0, "a form nobody can see asked macOS for its grants")
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = form.view
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+
+        NotificationCenter.default.post(
+            name: NSApplication.didBecomeActiveNotification, object: NSApp)
+        #expect(redraws == 1)
+    }
 }
 
 extension SetupFormBehaviourTests {

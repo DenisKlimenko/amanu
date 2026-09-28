@@ -91,7 +91,12 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// window showing the same form, the Advanced tab beside it, or the
     /// status window's live-transcript switch.
     private var configWatch: ConfigWatch.Token?
-
+    /// Redraws this copy when amanu comes back to the front. Every grant the
+    /// Access rows ask for is given somewhere else — System Settings, a
+    /// Login Items switch — and the person comes back from there to a window
+    /// that went on saying the microphone was denied until something else
+    /// happened to redraw it. Coming back is the moment to look again.
+    private var activation: ConfigWatch.Token?
 
     private let launchRow = AccessRow(
         title: localised("Start at login", "Запуск при входе"),
@@ -296,6 +301,21 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         wireActions()
         refresh()
         configWatch = ConfigWatch.observe { [weak self] in self?.refresh() }
+        // A token of the same kind as the config watch's: it ends the
+        // observation when the form goes.
+        activation = ConfigWatch.Token(NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.cameBack() }
+        })
+    }
+
+    /// Only a form somebody can see: asking whether a login item is
+    /// registered is a round trip to another daemon, and a window that is
+    /// closed will be redrawn by `reload` when it opens anyway.
+    func cameBack() {
+        guard view.window?.isVisible == true else { return }
+        refresh()
     }
 
     /// Re-read the machine and the config file. A host calls this when the

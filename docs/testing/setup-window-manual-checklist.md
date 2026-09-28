@@ -87,7 +87,9 @@ The section is four rows: Start at login, Microphone, System audio, Calendar.
 
 - Microphone: click **Allow**, accept the macOS prompt, and confirm the row
   turns green. **By hand** if it was previously denied: confirm the button
-  opens the right System Settings pane.
+  opens the right System Settings pane, grant it there, click back into
+  amanu, and confirm the row turns green without closing the window. The
+  same for **Start at login** allowed in Login Items.
 - System audio: click **Allow and test**, accept the prompt, hear the short
   tone, and confirm the row says it heard it — it reads `heard the tone · <date>`
   afterwards, and offers **Test again**. **By hand**: the tone is the point.
