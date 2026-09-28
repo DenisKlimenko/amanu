@@ -347,11 +347,21 @@ enum LLMError: Error, CustomStringConvertible {
         "insufficient_quota", "429",
     ]
 
+    /// What a CLI says when the fault is the network or the far end rather
+    /// than the request. The claude CLI's own offline answer is
+    /// "API Error: Connection error." and names no errno at all, so it went
+    /// unrecognised and a summary skipped on a plane was written off for
+    /// good; the Node errors under it, and codex's "error sending request" and
+    /// "stream disconnected", are the same event in other words.
     private static let transientMarkers = [
         "connection refused", "could not connect", "network is unreachable",
         "no route to host", "temporary failure in name resolution", "dns",
         "timed out", "timeout", "offline", "connection reset", "econnrefused",
         "service unavailable", "overloaded",
+        "connection error", "network error", "fetch failed", "unable to connect",
+        "enotfound", "eai_again", "etimedout", "econnreset", "ehostunreach", "enetunreach",
+        "socket hang up", "error sending request", "stream disconnected",
+        "internal server error", "bad gateway", "gateway timeout",
     ]
 
     /// Classify any error, not just this type — the backends throw URLSession

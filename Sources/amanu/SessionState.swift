@@ -24,7 +24,15 @@ enum SessionState {
         /// won't work on a retry. Absent — nothing to do, either because
         /// `speakers.json` exists or because naming is off.
         static let speakersStatus = "speakers_status"
+        /// Beside a `failed` status, what the configuration was when it
+        /// failed — `MeetingEgress.fingerprint`. A `failed` step is offered
+        /// again once the configuration no longer matches; one without a
+        /// fingerprint, written before there were any, stays written off.
+        static let summaryFailedFor = "summary_failed_for"
+        static let speakersFailedFor = "speakers_failed_for"
     }
+
+    static let failed = "failed"
 
     static let deferred = "deferred"
 

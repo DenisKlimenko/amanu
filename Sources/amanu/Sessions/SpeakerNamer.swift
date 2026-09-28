@@ -89,7 +89,10 @@ enum SpeakerNamer {
         let backends = LLMBackend.available(
             preference: route.preference, anthropicModel: route.anthropicModel
         )
-        var allTransient = true
+        // Deferred if any backend failed in a way that passes, for the same
+        // reason as the summary: a bad answer from one reachable backend must
+        // not write off the one that was merely offline.
+        var anyTransient = false
         var lastBackend = route.preference
         var lastModel: String?
         var lastReason = Analytics.Reason.unknown
@@ -131,8 +134,7 @@ enum SpeakerNamer {
                 }
                 return finished
             } catch {
-                let transient = LLMError.isTransient(error)
-                allTransient = allTransient && transient
+                anyTransient = anyTransient || LLMError.isTransient(error)
                 lastBackend = backend.name
                 lastModel = backend.model
                 lastReason = Analytics.reason(for: error)
@@ -144,19 +146,23 @@ enum SpeakerNamer {
 
         SessionState.update(dir, with: [
             SessionState.Key.speakersStatus:
-                allTransient ? SessionState.deferred : "failed",
+                anyTransient ? SessionState.deferred : SessionState.failed,
+            SessionState.Key.speakersFailedFor:
+                anyTransient ? nil : MeetingEgress.fingerprint(for: .speakerNames),
         ])
         Analytics.track(.speakerNamesFailed, [
             .backend: .text(lastBackend),
             .model: .text(AnalyticsCatalogue.summaryModel(
                 backend: lastBackend, model: lastModel)),
             .reason: .text(lastReason.rawValue),
-            .outcome: .text((allTransient
+            .outcome: .text((anyTransient
                 ? Analytics.Outcome.deferred : .gaveUp).rawValue),
         ])
-        log(allTransient
-            ? "no backend could be reached — naming deferred, will be retried later"
-            : "every backend failed for good — giving up on speaker names")
+        log(anyTransient
+            ? "no backend answered, and at least one could not be reached — naming deferred, "
+                + "will be retried later"
+            : "every backend failed for good — giving up on speaker names until the "
+                + "naming settings, keys or backends change")
         return nil
     }
 
@@ -181,7 +187,10 @@ enum SpeakerNamer {
                 let merged = current?.merged(with: fresh) ?? fresh
                 try merged.write(to: dir)
                 try transcript.writeMarkdown(to: dir, names: merged)
-                SessionState.update(dir, with: [SessionState.Key.speakersStatus: nil])
+                SessionState.update(dir, with: [
+                    SessionState.Key.speakersStatus: nil,
+                    SessionState.Key.speakersFailedFor: nil,
+                ])
                 return merged
             }
         } catch {
@@ -246,6 +255,32 @@ enum SpeakerNamer {
         let confidence: String?
         let quote: String?
         let at_ms: Int?
+
+        private enum CodingKeys: String, CodingKey {
+            case label, name, confidence, quote, at_ms
+        }
+
+        /// Lenient about everything the gates don't depend on. Models hand
+        /// back `"at_ms": "194000"` or `194000.0` about as often as the
+        /// number asked for, and a strict decoder threw the whole mapping
+        /// away over the one field nothing checks — every name in it, however
+        /// well quoted, lost to the type of a timestamp.
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            label = try container.decode(String.self, forKey: .label)
+            name = try? container.decodeIfPresent(String.self, forKey: .name)
+            confidence = try? container.decodeIfPresent(String.self, forKey: .confidence)
+            quote = try? container.decodeIfPresent(String.self, forKey: .quote)
+            // Bounded before converting: `Int(_:)` traps on a double out of
+            // range, and a model can write any number it likes.
+            func milliseconds(_ number: Double?) -> Int? {
+                guard let number, number.isFinite, number.magnitude < 1e12 else { return nil }
+                return Int(number)
+            }
+            at_ms = milliseconds(try? container.decodeIfPresent(Double.self, forKey: .at_ms))
+                ?? milliseconds((try? container.decodeIfPresent(String.self, forKey: .at_ms))
+                    .flatMap { Double($0.trimmingCharacters(in: .whitespaces)) })
+        }
     }
 
     /// Apply the two gates. Anything that doesn't clear both becomes an entry

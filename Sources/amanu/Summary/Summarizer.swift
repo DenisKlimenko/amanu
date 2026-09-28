@@ -44,11 +44,13 @@ enum Summarizer {
             ])
             return nil
         }
-        // Whether every failure so far was of a kind that passes. If they all
-        // are, the session is left marked for a later run rather than written
-        // off: a meeting summarized on a plane should still get its summary
-        // that evening.
-        var allTransient = true
+        // Whether any backend failed in a way that passes. If one did, the
+        // session is left marked for a later run rather than written off: a
+        // meeting summarized on a plane should still get its summary that
+        // evening, even if a backend that was reachable answered badly — the
+        // one that wasn't may well answer. Only when every backend failed for
+        // good is the summary given up on.
+        var anyTransient = false
         var lastReason = Analytics.Reason.unknown
 
         // Whatever we know about the meeting, above the transcript. Names in
@@ -67,7 +69,10 @@ enum Summarizer {
                     to: dir.appendingPathComponent("summary.md"), options: .atomic
                 )
                 log("summary written by \(backend.name)")
-                SessionState.update(dir, with: [SessionState.Key.summaryStatus: nil])
+                SessionState.update(dir, with: [
+                    SessionState.Key.summaryStatus: nil,
+                    SessionState.Key.summaryFailedFor: nil,
+                ])
                 Analytics.track(.summaryFinished, [
                     .backend: .text(backend.name),
                     .model: .text(AnalyticsCatalogue.summaryModel(
@@ -78,8 +83,7 @@ enum Summarizer {
                 // Falling through is the expected path when a subscription is
                 // spent, so say which kind of failure this was — otherwise a
                 // healthy hand-off reads like something broke.
-                let transient = LLMError.isTransient(error)
-                allTransient = allTransient && transient
+                anyTransient = anyTransient || LLMError.isTransient(error)
                 lastReason = Analytics.reason(for: error)
                 Analytics.track(.summaryBackendFailed, [
                     .backend: .text(backend.name),
@@ -97,15 +101,19 @@ enum Summarizer {
         // tell "come back to this" from "this will never work".
         SessionState.update(dir, with: [
             SessionState.Key.summaryStatus:
-                allTransient ? SessionState.deferred : "failed",
+                anyTransient ? SessionState.deferred : SessionState.failed,
+            SessionState.Key.summaryFailedFor:
+                anyTransient ? nil : MeetingEgress.fingerprint(for: .summary),
         ])
-        log(allTransient
-            ? "no backend could be reached — summary deferred, will be retried later"
-            : "every backend failed for good — giving up on the summary")
+        log(anyTransient
+            ? "no backend answered, and at least one could not be reached — summary deferred, "
+                + "will be retried later"
+            : "every backend failed for good — giving up on the summary until the "
+                + "summary settings, keys or backends change")
         Analytics.track(.summaryFailed, [
             .backend: .text(settings.backend),
             .reason: .text(lastReason.rawValue),
-            .outcome: .text((allTransient
+            .outcome: .text((anyTransient
                 ? Analytics.Outcome.deferred : .gaveUp).rawValue),
         ])
         return nil

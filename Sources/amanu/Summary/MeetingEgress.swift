@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Where the words of a meeting may be sent, decided in one place for every
@@ -74,5 +75,38 @@ enum MeetingEgress {
         guard let route = route(for: purpose) else { return [] }
         return LLMBackend.available(
             preference: route.preference, anthropicModel: route.anthropicModel)
+    }
+
+    /// A short digest of everything that decides how one pass would go if it
+    /// ran now: the route, the backends present and their models, the servers
+    /// they point at, which keys there are, and for the summary its template
+    /// and language. nil when the pass may not run at all.
+    ///
+    /// A pass that failed for good records this beside its `failed`, and is
+    /// offered again once it no longer matches — a new key, a backend
+    /// installed or chosen, a model changed. Nothing else brings a `failed`
+    /// back, so a model that answers nonsense is not asked again at every
+    /// sweep, and a failure is not final merely because of the configuration
+    /// it happened under. The keys go in only as hashes, and only this digest
+    /// of all of it is ever written down.
+    static func fingerprint(for purpose: Purpose) -> String? {
+        guard let route = route(for: purpose) else { return nil }
+        let summary = Config.summary()
+        var parts = [purpose.rawValue, route.preference, route.anthropicModel ?? "-"]
+        parts += LLMBackend.available(
+            preference: route.preference, anthropicModel: route.anthropicModel
+        ).map { "\($0.name)=\($0.model ?? "-")" }
+        parts += [summary.openAIBaseURL, summary.ollamaBaseURL]
+        parts += [Config.anthropicKey(), Config.openAIKey()].map { key in
+            key.map { digest($0) } ?? "-"
+        }
+        if purpose == .summary {
+            parts += [summary.template, summary.language ?? "-"]
+        }
+        return String(digest(parts.joined(separator: "\u{1F}")).prefix(16))
+    }
+
+    private static func digest(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }

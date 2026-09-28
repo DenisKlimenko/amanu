@@ -42,17 +42,26 @@ enum PostProcessor {
 
     /// What still needs doing, reading the session's own record of itself.
     ///
-    /// A step is outstanding when its artifact is missing and its state isn't
-    /// `failed` — a session that will never summarize must stop being offered,
-    /// or every sweep picks it up again for ever.
+    /// A step is outstanding when its artifact is missing and it has not
+    /// failed for good under the configuration in force now. A session that
+    /// will never summarize must stop being offered, or every sweep picks it
+    /// up again for ever — but "never" is only true of the settings, keys and
+    /// backends it failed with, so a `failed` step whose recorded fingerprint
+    /// no longer matches `MeetingEgress.fingerprint` is offered once more. A
+    /// `failed` with no fingerprint predates the rule and stays given up.
     static func outstanding(_ dir: URL, policy: Policy = .configured) -> Work {
         let fm = FileManager.default
         func exists(_ name: String) -> Bool {
             fm.fileExists(atPath: dir.appendingPathComponent(name).path)
         }
-        func gaveUp(_ key: String) -> Bool {
-            guard let status = SessionState.value(dir, key) as? String else { return false }
-            return status != SessionState.deferred
+        let meta = SessionState.read(dir) ?? [:]
+        func gaveUp(_ statusKey: String, _ fingerprintKey: String,
+                    _ purpose: MeetingEgress.Purpose) -> Bool {
+            guard let status = meta[statusKey] as? String,
+                  status != SessionState.deferred
+            else { return false }
+            guard let failedFor = meta[fingerprintKey] as? String else { return true }
+            return failedFor == MeetingEgress.fingerprint(for: purpose)
         }
 
         guard exists("transcript.json") else { return Work() }
@@ -60,10 +69,12 @@ enum PostProcessor {
         var work = Work()
         work.names = policy.names
             && !exists(SpeakerNames.file)
-            && !gaveUp(SessionState.Key.speakersStatus)
+            && !gaveUp(SessionState.Key.speakersStatus, SessionState.Key.speakersFailedFor,
+                       .speakerNames)
         work.summary = policy.summary
             && !exists("summary.md")
-            && !gaveUp(SessionState.Key.summaryStatus)
+            && !gaveUp(SessionState.Key.summaryStatus, SessionState.Key.summaryFailedFor,
+                       .summary)
         return work
     }
 
