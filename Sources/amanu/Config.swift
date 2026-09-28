@@ -293,13 +293,22 @@ enum Config {
     /// Putting real names to the transcript's mechanical speaker labels.
     struct SpeakerNamesSettings {
         var enabled = true
-        /// Which model to ask, in `LLMBackend`'s vocabulary.
-        var backend = "auto"
+        /// Which model to ask, in `LLMBackend`'s vocabulary, or `summary` to
+        /// go wherever the summary goes. Read it through `ownBackend`, and act
+        /// on it only through `MeetingEgress`.
+        var backend = Config.followsSummary
         /// Anthropic model for this pass specifically. nil uses the summary's,
         /// which is the strong one — fine, but naming is an easier job than
         /// summarizing and doesn't need to cost the same.
         var model: String?
+
+        /// The backend naming was given of its own, or nil when it follows
+        /// the summary.
+        var ownBackend: String? { backend == Config.followsSummary ? nil : backend }
     }
+
+    /// The word for "whatever the summary does", and the default.
+    static let followsSummary = "summary"
 
     static func speakerNames() -> SpeakerNamesSettings {
         var settings = SpeakerNamesSettings()
@@ -477,6 +486,11 @@ enum Config {
         /// whatever was spoken. nil means "same language as the meeting".
         var language: String?
         var model = "claude-opus-5"
+        /// `model` when the config file names one, nil when it is the
+        /// default. The API always needs a model; the `claude` CLI is only
+        /// told one when somebody chose it, and otherwise keeps whatever
+        /// Claude Code is set to — which a subscription may be limited to.
+        var configuredModel: String?
         var ollamaModel = "qwen3:8b"
         var ollamaBaseURL = "http://127.0.0.1:11434"
         var template = SummaryTemplate.default
@@ -497,7 +511,10 @@ enum Config {
         if let v = json["enabled"] as? Bool { settings.enabled = v }
         if let v = json["backend"] as? String, !v.isEmpty { settings.backend = v }
         if let v = json["language"] as? String, !v.isEmpty { settings.language = v }
-        if let v = json["model"] as? String, !v.isEmpty { settings.model = v }
+        if let v = json["model"] as? String, !v.isEmpty {
+            settings.model = v
+            settings.configuredModel = v
+        }
         if let v = json["ollama_model"] as? String, !v.isEmpty { settings.ollamaModel = v }
         if let v = json["openai_model"] as? String, !v.isEmpty { settings.openAIModel = v }
         if let v = json["openai_base_url"] as? String, !v.trimmed.isEmpty {

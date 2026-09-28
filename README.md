@@ -270,7 +270,9 @@ only values that differ from the defaults. A compact example:
 - `auto_record.*` covers `enabled`, `mic_activity`, `calendar`,
   `start_delay_seconds`, `stop_delay_seconds`, `min_duration_seconds`,
   `max_duration_minutes`, `silence_stop_minutes`, `apps`, and `ignore_apps`.
-- `speaker_names.*` covers `enabled`, `backend`, and `model`.
+- `speaker_names.*` covers `enabled`, `backend`, and `model`. Naming sends
+  the transcript wherever `summary.backend` does, and to no model when
+  summaries are off, unless `speaker_names.backend` names a backend of its own.
 - `summary.*` covers `enabled`, `backend`, `language`, `model`,
   `openai_model`, `openai_base_url`, `ollama_model`, `ollama_base_url`,
   `template`, `api_key_path`, and `openai_api_key_path`. The two Base URLs

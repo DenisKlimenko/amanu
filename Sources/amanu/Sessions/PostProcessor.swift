@@ -22,11 +22,14 @@ enum PostProcessor {
         var names: Bool
         var summary: Bool
 
+        /// Naming stays on whenever it is enabled, even with nowhere to send
+        /// the transcript: the person recording is named from the account,
+        /// which needs no model. The summary is on only when `MeetingEgress`
+        /// has somewhere it may go.
         static var configured: Policy {
-            let summary = Config.summary()
-            return Policy(
+            Policy(
                 names: Config.speakerNames().enabled,
-                summary: summary.enabled && summary.backend != "none")
+                summary: MeetingEgress.route(for: .summary) != nil)
         }
     }
 

@@ -3,7 +3,8 @@ import Foundation
 /// Turns a finished transcript into `summary.md`.
 ///
 /// The backend chain lives in LLMBackend: subscription CLIs first, then API
-/// keys, then ollama. Summarizing is just one caller of it.
+/// keys, then ollama. Which of them may read the meeting is `MeetingEgress`'s
+/// to say; summarizing is just one caller of it.
 ///
 /// Nothing here is allowed to fail loudly. A missing summary is an
 /// inconvenience; a transcript lost because summarizing threw is a lost
@@ -25,7 +26,7 @@ enum Summarizer {
         func log(_ message: String) { appendSessionLog(message, to: dir) }
 
         let settings = Config.summary()
-        guard settings.enabled, settings.backend != "none" else { return nil }
+        guard MeetingEgress.route(for: .summary) != nil else { return nil }
 
         let body = plainText(transcript)
         guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -33,7 +34,7 @@ enum Summarizer {
             return nil
         }
 
-        let backends = LLMBackend.available(preference: settings.backend)
+        let backends = MeetingEgress.backends(for: .summary)
         guard !backends.isEmpty else {
             log("summary skipped — no backend available")
             Analytics.track(.summaryFailed, [

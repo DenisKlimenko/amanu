@@ -23,6 +23,16 @@ final class FakeModel: @unchecked Sendable {
         self.init(name) { _, _, _ in answer }
     }
 
+    /// A model that does both jobs the way a real one would: a speaker
+    /// mapping when it is asked who spoke, a note when it is asked for one.
+    static func working(_ name: String) -> FakeModel {
+        FakeModel(name) { _, system, _ in
+            system.contains("identifying who spoke")
+                ? SessionFixture.namesThemA
+                : "## Summary\nWritten by \(name)."
+        }
+    }
+
     /// Always the same failure.
     convenience init(_ name: String, failing error: any Error) {
         self.init(name) { _, _, _ in throw error }
@@ -50,7 +60,7 @@ extension Home {
     static func withModels(_ models: [FakeModel]) -> Home {
         let backends = models.map(\.backend)
         return .sandbox(languageModels: { preference in
-            preference == "auto" ? backends : backends.filter { $0.name == preference }
+            LLMBackend.chain(preference: preference, from: backends)
         })
     }
 }

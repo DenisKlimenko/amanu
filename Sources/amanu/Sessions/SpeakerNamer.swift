@@ -78,13 +78,19 @@ enum SpeakerNamer {
             return finish(resolved, transcript: transcript, dir: dir, log: log)
         }
 
-        // The naming model is configurable separately because this is an
-        // easier job than summarizing; unset, it inherits the summary's.
+        // Where the transcript may go is not this pass's decision: naming
+        // follows the summary unless it was given a backend of its own, and
+        // with summaries off it asks nobody.
+        guard let route = MeetingEgress.route(for: .speakerNames) else {
+            log("naming — no model may read this meeting (summaries are off and "
+                + "speaker_names.backend is unset), so only your own name is applied")
+            return finish(resolved, transcript: transcript, dir: dir, log: log)
+        }
         let backends = LLMBackend.available(
-            preference: settings.backend, anthropicModel: settings.model
+            preference: route.preference, anthropicModel: route.anthropicModel
         )
         var allTransient = true
-        var lastBackend = settings.backend
+        var lastBackend = route.preference
         var lastModel: String?
         var lastReason = Analytics.Reason.unknown
 

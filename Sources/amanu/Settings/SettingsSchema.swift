@@ -323,8 +323,9 @@ enum SettingsSchema {
             Entry(["summary", "model"],
                   localised("Anthropic model", "Модель Anthropic"),
                   localised(
-                      "Used on the API path. The CLI uses whatever model Claude Code is set to.",
-                      "Для пути через API. CLI берёт ту модель, на которую настроен Claude Code."),
+                      "Used on the API path, and by the claude CLI once it is set here; left empty, the CLI uses whatever model Claude Code is set to.",
+                      "Для пути через API, а если задана здесь, то и для claude CLI; пусто — CLI берёт "
+                          + "ту модель, на которую настроен Claude Code."),
                   .text, default: "claude-opus-5"),
             Entry(["summary", "openai_model"],
                   localised("OpenAI model", "Модель OpenAI"),
@@ -402,10 +403,15 @@ enum SettingsSchema {
             Entry(["speaker_names", "backend"],
                   localised("Which model to ask", "У какой модели спрашивать"),
                   localised(
-                      "Same chain as summaries. auto walks it until one answers.",
-                      "Та же цепочка, что у саммари. auto идёт по ней, пока кто-нибудь не ответит."),
-                  .choice(["auto", "claude-cli", "anthropic-api", "codex-cli", "openai-api", "ollama"]),
-                  default: "auto"),
+                      "summary sends the transcript wherever summaries go, and nowhere when they are off — only your own name is filled in then. Anything else is a choice for naming alone; none asks no model.",
+                      "summary отправляет расшифровку туда же, куда и саммари, а если саммари выключены — "
+                          + "никуда, и подставляется только ваше имя. Любой другой вариант — выбор только "
+                          + "для имён; none — не спрашивать никакую модель."),
+                  .choice([
+                      "summary", "auto", "claude-cli", "anthropic-api", "codex-cli", "openai-api",
+                      "ollama", "none",
+                  ]),
+                  default: "summary"),
             Entry(["speaker_names", "model"],
                   localised("Anthropic model for naming", "Модель Anthropic для имён"),
                   localised(
