@@ -31,6 +31,9 @@ actor TranscriptionCoordinator {
     private var statusHandler: (@Sendable (Status) -> Void)?
 
     private let engines: EngineResolver
+    /// The engine the session in hand was given, for the failure report when
+    /// it throws: nil until one was prepared.
+    private var current: TranscriptionEngine?
     private let onStop: @Sendable () -> String?
 
     /// `engine` is one settled on in advance rather than chosen for the
@@ -39,6 +42,12 @@ actor TranscriptionCoordinator {
     init(engine: TranscriptionEngine? = nil,
          onStop: @escaping @Sendable () -> String? = { Config.onStop() }) {
         engines = EngineResolver(fixed: engine)
+        self.onStop = onStop
+    }
+
+    init(engines: EngineResolver,
+         onStop: @escaping @Sendable () -> String? = { Config.onStop() }) {
+        self.engines = engines
         self.onStop = onStop
     }
 
@@ -151,7 +160,7 @@ actor TranscriptionCoordinator {
             } catch {
                 log(dir, "transcription failed: \(error)")
                 lastFailure = dir.lastPathComponent
-                TranscriptionFailurePolicy.record(error, for: dir, engine: await engines.engine)
+                TranscriptionFailurePolicy.record(error, for: dir, engine: current)
             }
         }
         await releaseEngine()
@@ -186,7 +195,7 @@ actor TranscriptionCoordinator {
             throw held
         } catch {
             log(dir, "transcription failed: \(error)")
-            TranscriptionFailurePolicy.record(error, for: dir, engine: await engines.engine)
+            TranscriptionFailurePolicy.record(error, for: dir, engine: current)
             await releaseEngine()
             throw error
         }
@@ -199,30 +208,31 @@ actor TranscriptionCoordinator {
         // Before the claim and before the engine: nothing about this session
         // is decided while the answers are in a file that cannot be read.
         try Config.requireReadable()
+        current = nil
         var fallbackUsed = false
+        let engine: TranscriptionEngine
         do {
-            try await transcribe(dir)
+            engine = try await transcribe(dir)
         } catch {
             // The network can go away between the reachability probe and the
             // upload. One retry on the local engine, so a dropped connection
-            // costs minutes rather than the transcript.
-            let current = await engines.engine
+            // costs minutes rather than the transcript — this session's
+            // minutes only: the next one is resolved afresh, and gets the
+            // cloud again if the cloud is back.
             guard EngineResolver.configuredEngine(for: dir) == "auto",
-                  Platform.supportsLocalModels,
-                  current.map(EngineResolver.isCloud) == true,
+                  engines.canFallBackLocally,
+                  let failed = current, EngineResolver.isCloud(failed),
                   TranscriptionFailurePolicy.looksLikeNetworkTrouble(error)
             else { throw error }
-            let from = current?.name ?? EngineResolver.configuredEngine(for: dir)
             let local = Config.transcriptionLocalEngine()
             log(dir, "cloud transcription failed (\(error)) — retrying locally")
             Analytics.track(.transcriptFallback, [
-                .fromEngine: .text(from),
+                .fromEngine: .text(failed.name),
                 .toEngine: .text(local),
                 .reason: .text(Analytics.reason(for: error).rawValue),
             ])
             fallbackUsed = true
-            _ = try await engines.fallBackToLocal(local)
-            try await transcribe(dir)
+            engine = try await transcribe(dir, with: try await engines.localFallback())
         }
         // After the transcript, never instead of it: transcript.json is the
         // completion marker, so anything that runs before it risks retiring a
@@ -232,12 +242,10 @@ actor TranscriptionCoordinator {
         // Outside `transcribe` rather than at the end of it because both take
         // the session's claim, and a claim held while asking for a second one
         // would refuse itself.
-        let engine = await engines.engine
-        let engineName = engine?.name ?? Config.transcriptionEngine()
         Analytics.track(.transcriptFinished, [
-            .engine: .text(engineName),
+            .engine: .text(engine.name),
             .model: .text(AnalyticsCatalogue.transcriptionModel(
-                engine: engineName, provenance: engine?.model ?? "")),
+                engine: engine.name, provenance: engine.model)),
             .fallbackUsed: .flag(fallbackUsed),
         ])
         await PostProcessor.finish(dir)
@@ -257,7 +265,12 @@ actor TranscriptionCoordinator {
         var description: String { "No speech was recognized; audio kept for a manual retry." }
     }
 
-    private func transcribe(_ dir: URL) async throws {
+    /// Transcribe one session with the engine it asks for, or with `given`,
+    /// and return the engine that did it.
+    @discardableResult
+    private func transcribe(
+        _ dir: URL, with given: TranscriptionEngine? = nil
+    ) async throws -> TranscriptionEngine {
         // The one place both routes into transcription meet: the app draining
         // its queue and `amanu process` given a folder by hand. Claiming here,
         // before an engine is prepared and long before anything is uploaded,
@@ -268,7 +281,9 @@ actor TranscriptionCoordinator {
         defer { SessionClaim.release(dir) }
 
         var meta = try SessionMeta.read(from: dir)
-        let engine = try await engines.prepared(for: dir)
+        let engine: TranscriptionEngine
+        if let given { engine = given } else { engine = try await engines.engine(for: dir) }
+        current = engine
 
         var audioDirectory = dir
         var cleaned: OfflineEchoAudio.Result?
@@ -379,6 +394,7 @@ actor TranscriptionCoordinator {
         // the gigabyte wait for a model it isn't going to be shown to would be
         // paying twice for nothing.
         TrackCompressor.settle(sessionDir: dir)
+        return engine
     }
 
     /// Fires the configured on_stop shell command with the session directory
