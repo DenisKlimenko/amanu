@@ -50,7 +50,12 @@ struct TranscriptionScratchTests {
     func retranscriptionClearsEverything() throws {
         let recordings = try TestRecordings()
         defer { recordings.remove() }
-        let dir = try recordings.session("2026-09-28-a")
+        let dir = try recordings.session("2026-09-28-a", state: [
+            SessionState.Key.summaryStatus: SessionState.failed,
+            SessionState.Key.summaryFailedFor: "an earlier configuration",
+            SessionState.Key.speakersStatus: SessionState.failed,
+            SessionState.Key.speakersFailedFor: "an earlier configuration",
+        ])
         for file in ["transcript.json", "transcript.md", "summary.md", SpeakerNames.file] {
             try Data("{}".utf8).write(to: dir.appendingPathComponent(file))
         }
@@ -66,6 +71,13 @@ struct TranscriptionScratchTests {
             #expect(!FileManager.default.fileExists(atPath: url.path), "\(url.lastPathComponent) survived")
         }
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("mic.caf").path))
+        let meta = try #require(SessionState.read(dir))
+        for key in [
+            SessionState.Key.summaryStatus, SessionState.Key.summaryFailedFor,
+            SessionState.Key.speakersStatus, SessionState.Key.speakersFailedFor,
+        ] {
+            #expect(meta[key] == nil, "\(key) survived")
+        }
     }
 
     @Test("A second transcription asks the service again rather than reading back the first")
