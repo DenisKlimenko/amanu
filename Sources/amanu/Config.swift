@@ -542,28 +542,102 @@ enum Config {
         return secret(at: anthropicKeyPath) ?? secret(atAnyOf: anthropicSharedKeyPaths)
     }
 
+    // MARK: - the file itself
+
+    /// What is at `path`, told apart the three ways that matter.
+    ///
+    /// "No file" and "a file nobody can parse" used to be one answer, and every
+    /// getter fell back to its default for both. For no file that is right.
+    /// For a broken one it switched analytics back on for somebody who had
+    /// turned it off and sent meetings to the cloud for somebody who had
+    /// chosen a local engine — and the next write from any window replaced
+    /// the whole file with the one key it was changing, which is how a stray
+    /// comma would have cost somebody every setting they had.
+    enum File {
+        case absent
+        case parsed([String: Any])
+        /// There is a file and it is not a JSON object; the reason is the
+        /// parser's own, for the person who has to find the comma.
+        case unreadable(reason: String)
+    }
+
+    static func file() -> File {
+        let url = path
+        guard FileManager.default.fileExists(atPath: url.path) else { return .absent }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            return .unreadable(reason: error.localizedDescription)
+        }
+        // An empty file holds no decisions to lose, and refusing to write into
+        // one would make `touch config.json` a trap.
+        if String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return .parsed([:])
+        }
+        do {
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return .unreadable(reason: "it is not a JSON object")
+            }
+            return .parsed(json)
+        } catch {
+            let parser = (error as NSError).userInfo[NSDebugDescriptionErrorKey] as? String
+            return .unreadable(reason: parser ?? error.localizedDescription)
+        }
+    }
+
+    /// Why the file cannot be read, or nil when it can — or when there is no
+    /// file, which is a perfectly good config.
+    static var unreadableReason: String? {
+        if case .unreadable(let reason) = file() { return reason }
+        return nil
+    }
+
+    /// What anything that could send a meeting somewhere throws while the
+    /// file cannot be read.
+    ///
+    /// The whole pipeline after recording waits rather than only the cloud
+    /// half of it: which engine is local and whether a summary is wanted are
+    /// both answers in the file that cannot be read, and the defaults that
+    /// stand in for them are `auto` and on. Recording itself needs none of
+    /// that and goes on as normal; the sessions stay in the folder, which is
+    /// the queue, and are picked up when the file can be read again.
+    struct Unreadable: Error, CustomStringConvertible {
+        let reason: String
+
+        var description: String {
+            "config.json can't be read (\(reason)) — transcription and summaries wait until it can"
+        }
+    }
+
+    static func requireReadable() throws {
+        if let reason = unreadableReason { throw Unreadable(reason: reason) }
+    }
+
     /// Parse the config file. A malformed config is reported on stderr rather
     /// than silently ignored — recordings landing in an unexpected place is
     /// worse than a warning.
     private static func load() -> [String: Any]? {
-        guard FileManager.default.fileExists(atPath: path.path) else { return nil }
-        guard
-            let data = try? Data(contentsOf: path),
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
+        switch file() {
+        case .absent:
+            return nil
+        case .parsed(let json):
+            return json
+        case .unreadable(let reason):
             FileHandle.standardError.write(Data(
-                "warning: \(path.path) is not valid JSON — ignoring config\n".utf8
+                "warning: \(path.path) is not valid JSON (\(reason)) — using defaults\n".utf8
             ))
             return nil
         }
-        return json
     }
 
     // MARK: - writing
 
     /// The config file as it is on disk, or an empty object when there isn't
-    /// one yet. The settings window reads this to show what has been set,
-    /// as distinct from what merely defaults.
+    /// one yet — or when it cannot be read, which `file()` tells apart. The
+    /// settings window reads this to show what has been set, as distinct from
+    /// what merely defaults.
     static func raw() -> [String: Any] { load() ?? [:] }
 
     /// Set (or, with a nil value, clear) one setting, addressed by its path
@@ -589,7 +663,22 @@ enum Config {
     @discardableResult
     static func update(path: [String], value: Any?) -> Bool {
         guard let first = path.first else { return false }
-        var json = raw()
+        var json: [String: Any]
+        switch file() {
+        case .absent:
+            json = [:]
+        case .parsed(let parsed):
+            json = parsed
+        case .unreadable(let reason):
+            // Writing now would mean writing the defaults plus this one key
+            // over everything the person has in there. The file is theirs to
+            // fix; until then nothing changes it.
+            FileHandle.standardError.write(Data(
+                ("not changing \(Self.path.path): it can't be read (\(reason)), and "
+                    + "writing it now would replace everything in it\n").utf8
+            ))
+            return false
+        }
 
         if path.count == 1 {
             if let value { json[first] = value } else { json.removeValue(forKey: first) }

@@ -22,7 +22,19 @@ enum AnalyticsIdentity {
     /// On unless the config file says otherwise. Opt-out is the whole reason
     /// the numbers are worth anything, and the whole reason the disclosure in
     /// `docs/analytics.md` and the visible switch have to be real.
-    static func isEnabled(in json: [String: Any] = Config.raw()) -> Bool {
+    ///
+    /// Off while the file cannot be read. The default is only the right
+    /// answer for somebody who never wrote the switch down, and a file that
+    /// cannot be parsed may well be the one that says `"analytics": false`.
+    static func isEnabled() -> Bool {
+        switch Config.file() {
+        case .absent: return isEnabled(in: [:])
+        case .parsed(let json): return isEnabled(in: json)
+        case .unreadable: return false
+        }
+    }
+
+    static func isEnabled(in json: [String: Any]) -> Bool {
         json["analytics"] as? Bool ?? true
     }
 

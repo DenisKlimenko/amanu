@@ -29,6 +29,9 @@ final class StatusWindow {
     private let icon = NSImageView()
     private let stateLabel = NSTextField(labelWithString: localised("idle", "не записывает"))
     private let transcriptionLabel = NSTextField(labelWithString: "")
+    /// What is wrong with the config file, when something is — see
+    /// `Config.Problem`. Hidden, and so no row at all, the rest of the time.
+    private let configProblemLabel = NSTextField(labelWithString: "")
     private let toggleButton = NSButton(
         title: localised("Start recording", "Начать запись"), target: nil, action: nil)
     private let pauseButton = NSButton(
@@ -95,6 +98,10 @@ final class StatusWindow {
         // under the state and 22 points of window paying for it.
         transcriptionLabel.isHidden = true
         decisionLabel.isHidden = true
+        configProblemLabel.font = .systemFont(ofSize: 11)
+        configProblemLabel.textColor = .systemOrange
+        configProblemLabel.lineBreakMode = .byTruncatingTail
+        configProblemLabel.isHidden = true
 
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.translatesAutoresizingMaskIntoConstraints = false
@@ -196,7 +203,7 @@ final class StatusWindow {
 
         importStatus.onCancel = { [weak self] in self?.onCancelImport?() }
         rows.setViews([
-            header, transcriptionLabel, buttons, autoRecordCheckbox, decisionLabel,
+            header, configProblemLabel, transcriptionLabel, buttons, autoRecordCheckbox, decisionLabel,
             importStatus, importButton, openFolder, manage, liveSection,
         ], in: .top)
         rows.orientation = .vertical
@@ -235,6 +242,7 @@ final class StatusWindow {
             fill,
             buttons.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -32),
             transcriptionLabel.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -32),
+            configProblemLabel.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -32),
             decisionLabel.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -32),
             importStatus.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -32),
             importButton.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -32),
@@ -333,6 +341,14 @@ final class StatusWindow {
     func updateTranscription(_ text: String?) {
         transcriptionLabel.stringValue = text ?? ""
         transcriptionLabel.isHidden = text?.isEmpty != false
+        growToFitContent()
+    }
+
+    /// The config file's problem in one line, or nil when it has none.
+    func updateConfigProblem(_ headline: String?) {
+        configProblemLabel.stringValue = headline ?? ""
+        configProblemLabel.toolTip = headline
+        configProblemLabel.isHidden = headline == nil
         growToFitContent()
     }
 

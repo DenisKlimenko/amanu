@@ -185,6 +185,25 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     private let autoRecord = NSSwitch()
     private let analytics = NSSwitch()
 
+    /// What is wrong with the config file, above everything else in the form:
+    /// while it stands, the switches below show defaults rather than the
+    /// file, and none of them can be saved. See `Config.Problem`.
+    private let configProblems: NSTextField = {
+        let label = SetupLayout.status()
+        label.textColor = .systemOrange
+        label.lineBreakMode = .byWordWrapping
+        label.maximumNumberOfLines = 0
+        label.preferredMaxLayoutWidth = 520
+        label.isHidden = true
+        return label
+    }()
+
+    /// False where the host says the same thing itself — the settings window,
+    /// whose footer sits under this form and under the Advanced tab alike.
+    var showsConfigProblems = true {
+        didSet { refresh() }
+    }
+
     /// What the last look for `claude`, `codex` and ollama found, by card.
     /// Empty until that look finishes, and a missing answer is not "absent":
     /// the window says nothing about a tool it has not been to see yet.
@@ -201,6 +220,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         form.edgeInsets = NSEdgeInsets(
             top: 22, left: SetupLayout.gutter, bottom: 22, right: SetupLayout.gutter)
 
+        form.addArrangedSubview(configProblems)
         form.addArrangedSubview(SetupLayout.section(
             localised("Access", "Доступ"),
             content: SetupLayout.box([launchRow, micRow, audioRow, calendarRow])))
@@ -1689,7 +1709,11 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
 
         let autoRecordOn = (config["auto_record"] as? [String: Any])?["enabled"] as? Bool ?? true
         autoRecord.state = autoRecordOn ? .on : .off
-        analytics.state = AnalyticsIdentity.isEnabled(in: config) ? .on : .off
+        analytics.state = AnalyticsIdentity.isEnabled() ? .on : .off
+
+        let problems = showsConfigProblems ? Config.problems() : []
+        configProblems.stringValue = problems.map(\.explanation).joined(separator: "\n")
+        configProblems.isHidden = problems.isEmpty
 
         highlightNextGrant()
         onStateChange?()

@@ -82,6 +82,13 @@ enum PostProcessor {
     /// machine owner has turned on this week.
     @discardableResult
     static func finish(_ dir: URL, policy: Policy = .configured) async -> Work {
+        // Both steps hand the transcript to a model chosen by the config, so
+        // they wait while it cannot be read — see `Config.Unreadable`.
+        if let reason = Config.unreadableReason {
+            appendSessionLog(
+                "post-processing waits — config.json can't be read (\(reason))", to: dir)
+            return Work()
+        }
         let work = outstanding(dir, policy: policy)
         guard !work.isEmpty else { return work }
 
@@ -139,6 +146,7 @@ enum PostProcessor {
     /// backlog is never urgent.
     @discardableResult
     static func sweep(root: URL) async -> Int {
+        guard Config.unreadableReason == nil else { return 0 }
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: root, includingPropertiesForKeys: nil
         ) else { return 0 }

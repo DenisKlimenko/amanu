@@ -81,7 +81,9 @@ actor TranscriptionCoordinator {
     /// but were never transcribed. Folder names sort chronologically, so
     /// oldest-first is a name sort.
     func resumePending(root: URL) {
-        guard Config.transcriptionEnabled() else { return }
+        // A config that cannot be read holds the queue — see `Config.Unreadable`.
+        // The app offers the folder again once the file is fixed.
+        guard Config.unreadableReason == nil, Config.transcriptionEnabled() else { return }
         let pending = Self.pendingSessions(in: root)
         for dir in pending where !queue.contains(dir) {
             queue.append(dir)
@@ -142,6 +144,13 @@ actor TranscriptionCoordinator {
                 // simply left where it is: the filesystem is the queue, and the
                 // next `resumePending` offers it again once the owner is done.
                 log(dir, "\(busy)")
+            } catch let held as Config.Unreadable {
+                // Not this session's failure either, and not only this one's:
+                // everything behind it would be held for the same reason. The
+                // folders stay where they are and are offered again when the
+                // file can be read.
+                log(dir, "\(held)")
+                queue.removeAll()
             } catch {
                 log(dir, "transcription failed: \(error)")
                 lastFailure = dir.lastPathComponent
@@ -174,6 +183,10 @@ actor TranscriptionCoordinator {
             log(dir, "\(busy)")
             await releaseEngine()
             throw busy
+        } catch let held as Config.Unreadable {
+            log(dir, "\(held)")
+            await releaseEngine()
+            throw held
         } catch {
             log(dir, "transcription failed: \(error)")
             recordFailure(error, for: dir)
@@ -186,6 +199,9 @@ actor TranscriptionCoordinator {
     /// One session from end to end: the transcript, then the banner and the
     /// hook that say it happened.
     private func transcribeAndAnnounce(_ dir: URL) async throws {
+        // Before the claim and before the engine: nothing about this session
+        // is decided while the answers are in a file that cannot be read.
+        try Config.requireReadable()
         var fallbackUsed = false
         do {
             try await transcribe(dir)

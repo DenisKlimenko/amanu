@@ -342,6 +342,11 @@ struct InterfaceLanguageTests {
             window.update(state: state, elapsed: "1:23")
             read()
         }
+        // The reason is the parser's own and stays in English; the sentence
+        // around it is what has to change.
+        window.updateConfigProblem(Config.Problem.unreadable(reason: "1").headline)
+        read()
+        window.updateConfigProblem(nil)
         window.updateTranscription(nil)
         window.updateAutoRecord(enabled: true, decision: nil)
 
@@ -422,6 +427,7 @@ struct InterfaceLanguageTests {
         menuBar.updatesAvailable(true)
         menuBar.setupAvailable(true)
         menuBar.updateAutoRecord(enabled: true, decision: "amanu")
+        menuBar.updateConfigProblem(Config.Problem.unreadable(reason: "1").headline)
 
         var found: [String] = []
         for state in [MenuBarController.State.idle, .recording, .paused] {
