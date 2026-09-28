@@ -26,6 +26,11 @@ jobs:
         # Keep unrelated suites from starving bounded async transport tests;
         # concurrency exercised inside each test remains unchanged.
         run: swift test --no-parallel
+        env:
+          # The assets were built in the step above, so the tests that use
+          # them run here whether or not they are found: a missing asset is
+          # a failure on CI rather than the skip it is on a fresh checkout.
+          AMANU_REQUIRE_LOCALVQE: "1"
       - name: Universal release build
         run: make build
       - name: Landing checks

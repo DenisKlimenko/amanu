@@ -108,7 +108,7 @@ struct OfflineEchoTests {
 
     @Test(
         "LocalVQE suppresses delayed playback while retaining simultaneous local speech",
-        .enabled(if: LocalVQEAssets.areAvailable)
+        .enabled(if: LocalVQEGate.runs)
     )
     func separatesDoubleTalk() throws {
         let n = 20 * 16_000

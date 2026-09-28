@@ -13,6 +13,13 @@ import Testing
 /// at a time. The rest is about refusing clearly — a folder whose audio was
 /// discarded on purpose cannot be transcribed again, and saying so is the
 /// entire feature there.
+///
+/// The suite runs with offline echo cancellation off, because it is not about
+/// echo: that is on by default, needs the LocalVQE assets a fresh checkout has
+/// not built, and used to fail three of these tests for that reason alone.
+/// The one test that does check the echo canceller's record turns it back on
+/// and is gated on the assets.
+@Suite(.freshHome(config: #"{"offline_echo_cancellation": false}"#))
 struct RetranscriptionTests {
     @Test("Recording-only processing keeps an archive without creating a transcript")
     func recordingOnlyKeepsAudio() async throws {
@@ -203,7 +210,9 @@ struct RetranscriptionTests {
 
     // MARK: - the route from the command line
 
-    @Test("A raw session reaches a multichannel engine with sides intact")
+    @Test(
+        "A raw session reaches a multichannel engine with sides intact",
+        .enabled(if: LocalVQEGate.runs), .freshHome)
     func rawSessionTranscribesAsMultichannel() async throws {
         let dir = try Self.rawSession()
         defer { try? FileManager.default.removeItem(at: dir) }
