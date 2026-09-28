@@ -67,7 +67,9 @@ struct LLMBackend: Sendable {
         if let codex = cliPath("codex") {
             candidates.append(codexCLI(path: codex, model: openAIModelID))
         }
-        if let key = Config.openAIKey() {
+        // Not simply the OpenAI key: an OpenAI-compatible endpoint has a key
+        // of its own — see `Credentials.summaryOpenAIKey`.
+        if let key = Credentials.summaryOpenAIKey() {
             candidates.append(openAI(key: key, model: openAIModelID, baseURL: settings.openAIBaseURL))
         }
         candidates.append(ollama(model: settings.ollamaModel, baseURL: settings.ollamaBaseURL))

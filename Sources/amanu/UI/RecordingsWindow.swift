@@ -27,7 +27,7 @@ final class RecordingsWindow: NSObject {
     var onImportFiles: (([URL]) -> Void)?
     var onCancelImport: (() -> Void)?
     var onChooseImport: (() -> Void)?
-    private let root: URL
+    private var root: URL
     private let panel: NSWindow
     private let table = NSTableView()
     private let scroll = NSScrollView()
@@ -73,7 +73,11 @@ final class RecordingsWindow: NSObject {
         buildTable()
         panel.contentView = buildLayout()
         if panel.frame.origin == .zero { panel.center() }
-        reload()
+        // The first list is read here, on the spot: the window is built once,
+        // the first time somebody asks for it, and a window that opened empty
+        // and filled in a moment later would be a first picture of it that
+        // is wrong. Every later look is `reload`, off the main thread.
+        show(SessionInventory.scan(root: root))
     }
 
     func show() {
@@ -231,6 +235,13 @@ final class RecordingsWindow: NSObject {
         return container
     }
 
+    /// Show another recordings folder: the one Setup has just moved amanu to.
+    func setRoot(_ folder: URL) {
+        root = folder
+        table.deselectAll(nil)
+        reload()
+    }
+
     func updateImport(_ update: MediaImportCoordinator.Update) {
         importStatus.update(update)
     }
@@ -242,9 +253,52 @@ final class RecordingsWindow: NSObject {
 
     // MARK: - data
 
+    /// The scan in flight, if one is, and a count that says which scan is
+    /// the latest: an older one finishing late must not overwrite a newer
+    /// one's answer.
+    private var scan: Task<Void, Never>?
+    private var scans = 0
+
+    /// Read the folder again, off the main thread.
+    ///
+    /// `SessionInventory.scan` reads every session's meta.json and parses its
+    /// transcript, and on the main thread that was a window that stopped
+    /// answering for as long as the archive took to read — on every opening,
+    /// every rename and every delete, and growing with every meeting kept.
     private func reload() {
+        scans += 1
+        let generation = scans
+        let root = self.root
+        // Carried across by hand: a detached task does not inherit the home
+        // a test scoped, and the scan reads the config for what is owed.
+        let home = Home.current
+        scan = Task { [weak self] in
+            let found = await Task.detached(priority: .userInitiated) {
+                Home.$scoped.withValue(home) { SessionInventory.scan(root: root) }
+            }.value
+            guard let self, generation == self.scans else { return }
+            self.show(found)
+            self.scan = nil
+        }
+    }
+
+    /// Wait for the latest scan to be on screen. For tests, which would
+    /// otherwise have to guess how long reading a folder takes.
+    func settled() async {
+        while let scan { await scan.value }
+    }
+
+    /// Something changed in the recordings folder that this window did not
+    /// do itself — a transcript or a summary finished. Read again if anybody
+    /// is looking; a closed window reads when it opens.
+    func sessionsChanged() {
+        guard panel.isVisible else { return }
+        reload()
+    }
+
+    private func show(_ found: [SessionInventory.Item]) {
         let previous = selected?.dir
-        items = SessionInventory.scan(root: root)
+        items = found
         table.reloadData()
         if let previous, let row = items.firstIndex(where: { $0.dir == previous }) {
             table.selectRowIndexes([row], byExtendingSelection: false)
@@ -573,6 +627,10 @@ final class RecordingsWindow: NSObject {
     /// what makes that recoverable.
     @objc private func deleteClicked() {
         guard let item = selected else { return }
+        if let why = Self.deleteRefusal(for: item.dir) {
+            say(why, about: item)
+            return
+        }
         let alert = NSAlert()
         alert.messageText = localised(
             "Move \(item.title ?? item.name) to the Trash?",
@@ -583,6 +641,12 @@ final class RecordingsWindow: NSObject {
         alert.addButton(withTitle: localised("Move to Trash", "В корзину"))
         alert.addButton(withTitle: localised("Cancel", "Отмена"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        // Asked again: the alert waited for as long as the person did, and a
+        // queued transcription may have taken the session meanwhile.
+        if let why = Self.deleteRefusal(for: item.dir) {
+            say(why, about: item)
+            return
+        }
 
         NSWorkspace.shared.recycle([item.dir]) { [weak self] _, error in
             MainActor.assumeIsolated {
@@ -593,6 +657,23 @@ final class RecordingsWindow: NSObject {
                 self?.reload()
             }
         }
+    }
+
+    /// Why a session cannot go to the Trash now, or nil when it can.
+    ///
+    /// A session being transcribed or summarised is a folder something is
+    /// still writing into. Moved out from under it, the work fails against a
+    /// path that is gone, and whatever it was about to write lands nowhere —
+    /// or, for a recording-only archive, the audio is half-compressed in the
+    /// Trash. The claim file is what says somebody has it, this process or
+    /// the command line.
+    static func deleteRefusal(for dir: URL) -> String? {
+        guard SessionClaim.isHeld(dir) else { return nil }
+        return localised(
+            "amanu is working on this recording right now — transcribing or summarising it. "
+                + "Delete it once that has finished.",
+            "amanu сейчас работает с этой записью — расшифровывает её или пишет саммари. "
+                + "Удалите её, когда это закончится.")
     }
 
     /// Called when a session is queued for transcription again, so the daemon

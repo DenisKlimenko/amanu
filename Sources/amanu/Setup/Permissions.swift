@@ -80,7 +80,7 @@ enum SetupPermissions {
     /// used to have to hand itself over to launchd before any grant was worth
     /// asking for; an application is already its own responsible process, so
     /// the only question left is the ordinary one macOS asks of every app.
-    static func needsStartAtLogin(loginItem: LoginItem.State) -> Bool {
+    nonisolated static func needsStartAtLogin(loginItem: LoginItem.State) -> Bool {
         switch loginItem {
         case .enabled: return false
         // A bare build can't register anything, and nagging about it in a
@@ -112,7 +112,7 @@ enum SetupPermissions {
     /// The setup action stays useful until a deliberate tone has actually
     /// made the round trip. A refused tap is retryable after the user changes
     /// System Settings, just like a tap that captured silence.
-    static func needsSystemAudioTest(_ result: SystemAudioResult?) -> Bool {
+    nonisolated static func needsSystemAudioTest(_ result: SystemAudioResult?) -> Bool {
         result != .heard
     }
 

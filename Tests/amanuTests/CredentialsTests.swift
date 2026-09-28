@@ -1,0 +1,268 @@
+import AppKit
+import Foundation
+import Testing
+
+@testable import amanu
+
+/// Where keys go, and what a key check is allowed to conclude.
+@Suite(.serialized)
+struct CredentialsTests {
+    // MARK: - what a check concludes
+
+    @Test("A status is works, refused, or neither — and no answer is not a refusal")
+    func verdictFromStatus() {
+        #expect(Credentials.verdict(status: 200) == .works)
+        #expect(Credentials.verdict(status: 401) == .refused)
+        #expect(Credentials.verdict(status: 403) == .refused)
+        #expect(Credentials.verdict(status: 500) == .unexpected(status: 500))
+        #expect(Credentials.verdict(status: 429) == .unexpected(status: 429))
+        #expect(Credentials.verdict(status: nil) == .unreachable)
+        // ElevenLabs' working key is the one that gets a validation error.
+        #expect(Credentials.verdict(status: 422, accepted: [422]) == .works)
+        #expect(Credentials.verdict(status: 200, accepted: [422]) == .unexpected(status: 200))
+    }
+
+    /// The defect: offline, every key check came back "that key was refused",
+    /// and a person with a perfectly good key was told to go and get another.
+    @Test("A Mac with no network is told it could not ask, not that the key was refused")
+    func offlineIsUnreachable() async {
+        let session = StubbedService.session { _ in .failure(URLError(.notConnectedToInternet)) }
+        #expect(await Credentials.assemblyAI("key", session: session) == .unreachable)
+        #expect(await Credentials.elevenLabs("key", session: session) == .unreachable)
+        #expect(await SummaryKeyProbe.check(
+            provider: .anthropic, key: "key", session: session) == .unreachable)
+
+        let refused = StubbedService.session { _ in .success(401) }
+        #expect(await Credentials.assemblyAI("key", session: refused) == .refused)
+        let elevenLabsWorks = StubbedService.session { _ in .success(422) }
+        #expect(await Credentials.elevenLabs("key", session: elevenLabsWorks) == .works)
+    }
+
+    @Test("Only a refusal says refused")
+    func verdictSentences() {
+        let verdicts: [Credentials.Verdict] = [.works, .unreachable, .unexpected(status: 503)]
+        for verdict in verdicts {
+            #expect(!verdict.sentence(keepingSaved: true).isEmpty)
+            #expect(!verdict.sentence(keepingSaved: true).contains("refused"))
+        }
+        #expect(Credentials.Verdict.refused.sentence(keepingSaved: true).contains("refused"))
+    }
+
+    // MARK: - where a key goes
+
+    @Test("The summary key for OpenAI itself shares the transcription key's file")
+    func officialOpenAISharesTheSlot() throws {
+        try withFreshHome { _ in
+            let slot = Credentials.summarySlot(for: "openai-api", in: [:])
+            #expect(slot.path == Config.openAIKeyPath)
+            #expect(slot.isAmanus)
+            #expect(Credentials.transcriptionSlot(for: "openai", in: [:]).path
+                == Config.openAIKeyPath)
+        }
+    }
+
+    @Test("An OpenAI-compatible endpoint's key has a file of its own")
+    func compatibleEndpointHasItsOwnSlot() throws {
+        let config: [String: Any] = [
+            "summary": ["openai_base_url": "https://openrouter.ai/api/v1"],
+        ]
+        try withFreshHome(config: config) { _ in
+            let slot = Credentials.summarySlot(for: "openai-api", in: config)
+            #expect(slot.path == Credentials.openAICompatibleKeyPath)
+            #expect(slot.path != Config.openAIKeyPath)
+            #expect(slot.isAmanus)
+        }
+    }
+
+    @Test("A key file named in the config is where the key is read, and written only if it is amanu's")
+    func namedKeyPathIsRespected() throws {
+        try withFreshHome { home in
+            let inside: [String: Any] = [
+                "summary": ["openai_api_key_path": "~/.config/amanu/keys/router"],
+            ]
+            let slot = Credentials.summarySlot(for: "openai-api", in: inside)
+            #expect(slot.isNamedInConfig)
+            #expect(slot.path.path == home.url.appendingPathComponent(".config/amanu/keys/router").path)
+            #expect(slot.isAmanus)
+
+            let shared: [String: Any] = [
+                "summary": ["api_key_path": "~/.config/anthropic/token"],
+            ]
+            let sharedSlot = Credentials.summarySlot(for: "anthropic-api", in: shared)
+            #expect(sharedSlot.isNamedInConfig)
+            #expect(!sharedSlot.isAmanus, "a file other tools share is not amanu's to write")
+
+            let assembly: [String: Any] = [
+                "transcription": ["assemblyai": ["api_key_path": "~/elsewhere/key"]],
+            ]
+            #expect(!Credentials.transcriptionSlot(for: "assemblyai", in: assembly).isAmanus)
+        }
+    }
+
+    @Test("The summary reads a compatible endpoint's key, and transcription goes on reading OpenAI's")
+    func readersAgreeWithTheSlots() throws {
+        let config: [String: Any] = [
+            "summary": ["backend": "openai-api", "openai_base_url": "https://api.groq.com/openai/v1"],
+        ]
+        try withFreshHome(config: config) { _ in
+            try Credentials.writeSecret("openai-key", to: Config.openAIKeyPath)
+            #expect(Credentials.summaryOpenAIKey() == nil,
+                    "a third-party endpoint is never handed the OpenAI key")
+
+            try Credentials.writeSecret("groq-key", to: Credentials.openAICompatibleKeyPath)
+            #expect(Credentials.summaryOpenAIKey() == "groq-key")
+            #expect(Config.openAIKey() == "openai-key")
+        }
+    }
+
+    @Test("A server on this Mac may still be offered the OpenAI key when nothing else was pasted")
+    func loopbackEndpointFallsBackToTheOpenAIKey() throws {
+        let config: [String: Any] = [
+            "summary": ["backend": "openai-api", "openai_base_url": "http://127.0.0.1:1234/v1"],
+        ]
+        try withFreshHome(config: config) { _ in
+            try Credentials.writeSecret("openai-key", to: Config.openAIKeyPath)
+            #expect(Credentials.summaryOpenAIKey() == "openai-key")
+        }
+    }
+
+    // MARK: - the form, end to end
+
+    /// The defect itself: a key pasted for OpenRouter was checked against
+    /// OpenRouter and then written over the OpenAI key, which the OpenAI
+    /// transcription engine reads. Every meeting after it came back 401.
+    @Test("Saving a summary key for a compatible endpoint leaves the OpenAI key alone")
+    @MainActor
+    func summaryKeyForAnEndpointKeepsTheOpenAIKey() async throws {
+        let config: [String: Any] = [
+            "summary": ["backend": "openai-api", "openai_base_url": "https://openrouter.ai/api/v1"],
+        ]
+        try await withFreshHome(config: config) { _ in
+            try Credentials.writeSecret("openai-key", to: Config.openAIKeyPath)
+            let form = SetupForm()
+            defer { form.stop() }
+            var asked: [Credentials.Check] = []
+            form.checkKey = { asked.append($0); return .works }
+
+            try Self.field("summary.key", in: form).stringValue = "router-key"
+            await form.saveSummaryKey()
+
+            #expect(asked == [Credentials.Check(
+                service: .openAI(baseURL: "https://openrouter.ai/api/v1"), key: "router-key")])
+            #expect(Config.secret(at: Config.openAIKeyPath) == "openai-key")
+            #expect(Config.secret(at: Credentials.openAICompatibleKeyPath) == "router-key")
+            #expect(Credentials.summaryOpenAIKey() == "router-key")
+            #expect(try Self.field("summary.key.status", in: form).stringValue == "key works")
+        }
+    }
+
+    @Test("A key file the config names outside amanu's drawer is not written, and the form says where")
+    @MainActor
+    func summaryKeyIntoANamedSharedFileIsRefused() async throws {
+        let config: [String: Any] = [
+            "summary": ["backend": "anthropic-api", "api_key_path": "~/.config/anthropic/token"],
+        ]
+        try await withFreshHome(config: config) { home in
+            let form = SetupForm()
+            defer { form.stop() }
+            var asked = 0
+            form.checkKey = { _ in asked += 1; return .works }
+
+            try Self.field("summary.key", in: form).stringValue = "sk-ant-new"
+            await form.saveSummaryKey()
+
+            #expect(asked == 0, "a key that cannot be saved is not worth checking")
+            #expect(Config.secret(at: Config.anthropicKeyPath) == nil)
+            #expect(!FileManager.default.fileExists(
+                atPath: home.url.appendingPathComponent(".config/anthropic/token").path))
+            let status = try Self.field("summary.key.status", in: form).stringValue
+            #expect(status.contains("~/.config/anthropic/token"))
+        }
+    }
+
+    @Test("Offline, a pasted cloud key is neither saved nor called refused")
+    @MainActor
+    func cloudKeyOffline() async throws {
+        try await withFreshHome { _ in
+            try Credentials.writeSecret("good-key", to: Config.assemblyAIKeyPath)
+            let form = SetupForm()
+            defer { form.stop() }
+            form.checkKey = { _ in .unreachable }
+
+            try Self.field("transcription.key", in: form).stringValue = "new-key"
+            await form.saveCloudKey()
+
+            #expect(Config.secret(at: Config.assemblyAIKeyPath) == "good-key")
+            let status = try Self.field("transcription.key.status", in: form).stringValue
+            #expect(status == Credentials.Verdict.unreachable.sentence(keepingSaved: true))
+            #expect(!status.contains("refused"))
+        }
+    }
+
+    @MainActor
+    private static func field(_ id: String, in form: SetupForm) throws -> NSTextField {
+        var pending: [NSView] = [form.view]
+        while let view = pending.popLast() {
+            if let field = view as? NSTextField, field.identifier?.rawValue == id { return field }
+            pending.append(contentsOf: view.subviews)
+        }
+        throw FieldMissing(id: id)
+    }
+
+    private struct FieldMissing: Error { let id: String }
+}
+
+/// A URL loading system that answers every request itself — with a status,
+/// or with the error a Mac with no network gets.
+final class StubbedService: URLProtocol, @unchecked Sendable {
+    typealias Answer = @Sendable (URLRequest) -> Result<Int, URLError>
+
+    /// One answer per session, found by the header this adds to every request
+    /// it makes, so suites running at once cannot answer for each other.
+    private static let answers = Answers()
+
+    static func session(_ answer: @escaping Answer) -> URLSession {
+        let id = UUID().uuidString
+        answers.set(id, answer)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubbedService.self]
+        configuration.httpAdditionalHeaders = ["x-stub": id]
+        return URLSession(configuration: configuration)
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let id = request.value(forHTTPHeaderField: "x-stub") ?? ""
+        guard let answer = Self.answers.get(id) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+            return
+        }
+        switch answer(request) {
+        case .success(let status):
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data())
+            client?.urlProtocolDidFinishLoading(self)
+        case .failure(let error):
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private final class Answers: @unchecked Sendable {
+    private let lock = NSLock()
+    private var byID: [String: StubbedService.Answer] = [:]
+
+    func set(_ id: String, _ answer: @escaping StubbedService.Answer) {
+        lock.withLock { byID[id] = answer }
+    }
+
+    func get(_ id: String) -> StubbedService.Answer? {
+        lock.withLock { byID[id] }
+    }
+}

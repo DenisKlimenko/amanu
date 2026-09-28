@@ -112,11 +112,8 @@ struct Run: ParsableCommand {
             // so a denied grant can never make the repair UI unreachable.
             if startupAction == .refuse {
                 let alert = NSAlert()
-                alert.messageText = localised("Amanu could not start", "Amanu не удалось запуститься")
-                alert.informativeText = checks.compactMap { check in
-                    guard case .fail(let why) = check.status else { return nil }
-                    return "\(check.name): \(why)" + (check.remediation.map { "\n" + $0 } ?? "")
-                }.joined(separator: "\n\n")
+                alert.messageText = StartupAlert.title
+                alert.informativeText = StartupAlert.body(for: checks)
                 alert.runModal()
                 throw ExitCode(1)
             }
@@ -134,7 +131,7 @@ struct Run: ParsableCommand {
         // menu bar is not a dependable place for the only control surface of a
         // recorder — when it fills up macOS parks the status item off-screen
         // and it stays clickable but invisible. The Dock can't be crowded out.
-        let controller = AppController(root: root)
+        let controller = AppController(root: root, followsConfiguredRoot: out == nil)
 
         // NSApp holds its delegate weakly, and a Dock icon is useless if
         // clicking it does nothing.
@@ -201,221 +198,6 @@ struct Run: ParsableCommand {
         // weak, and a deallocated one silently stops handling Dock clicks.
         withExtendedLifetime(delegate) {}
     }
-
-    /// A .regular app owns the menu bar while it's focused, and without a main
-    /// menu that bar is empty — no ⌘Q, no window menu. This is the minimum
-    /// that makes the app behave like an app.
-    @MainActor
-    static func mainMenu(settingsTarget: AppDelegate) -> NSMenu {
-        let main = NSMenu()
-
-        let appItem = NSMenuItem()
-        let appMenu = NSMenu()
-        // First in the menu, where every Mac puts it.
-        let about = NSMenuItem(
-            title: localised("About Amanu", "О программе amanu"),
-            action: #selector(AppDelegate.showAboutClicked(_:)),
-            keyEquivalent: ""
-        )
-        about.target = settingsTarget
-        appMenu.addItem(about)
-        appMenu.addItem(.separator())
-        // ⌘, is where every Mac user looks for settings, and it only works
-        // from the main menu — the status item's copy of it is live just
-        // while that menu is open.
-        let settings = NSMenuItem(
-            title: localised("Settings…", "Настройки…"),
-            action: #selector(AppDelegate.showSettingsClicked(_:)),
-            keyEquivalent: ","
-        )
-        settings.target = settingsTarget
-        appMenu.addItem(settings)
-        // Present only while there is a first run to finish; the delegate
-        // keeps it so it can be taken away again. See `setupAvailable`.
-        let setup = NSMenuItem(
-            title: localised("Setup…", "Первая настройка…"),
-            action: #selector(AppDelegate.showSetupClicked(_:)),
-            keyEquivalent: ""
-        )
-        setup.target = settingsTarget
-        settingsTarget.setupItem = setup
-        // Answered here as well as by the controller, because the menu is
-        // built after the controller has already asked once: an item that is
-        // born visible on a machine that finished setup last month is visible
-        // until something else happens to change it.
-        setup.isHidden = !SetupState.isPending
-        appMenu.addItem(setup)
-        let updates = NSMenuItem(
-            title: localised("Check for updates…", "Проверить обновления…"),
-            action: #selector(AppDelegate.checkForUpdatesClicked(_:)),
-            keyEquivalent: ""
-        )
-        updates.target = settingsTarget
-        appMenu.addItem(updates)
-        appMenu.addItem(.separator())
-        // Quit routes through terminate so the delegate is asked first — it
-        // stops to ask when a meeting is being recorded — and so
-        // applicationWillTerminate closes a live recording properly rather
-        // than truncating it.
-        appMenu.addItem(withTitle: localised("Quit Amanu", "Завершить amanu"),
-                        action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appItem.submenu = appMenu
-        main.addItem(appItem)
-
-        let fileItem = NSMenuItem()
-        let fileMenu = NSMenu(title: localised("File", "Файл"))
-        let importItem = NSMenuItem(
-            title: localised("Import…", "Импортировать…"),
-            action: #selector(AppDelegate.importClicked(_:)),
-            keyEquivalent: "i"
-        )
-        importItem.target = settingsTarget
-        fileMenu.addItem(importItem)
-        fileItem.submenu = fileMenu
-        main.addItem(fileItem)
-
-        let windowItem = NSMenuItem()
-        let windowMenu = NSMenu(title: localised("Window", "Окно"))
-        windowMenu.addItem(withTitle: localised("Close", "Закрыть"),
-                           action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-        windowMenu.addItem(withTitle: localised("Minimise", "Убрать в Dock"),
-                           action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
-        windowItem.submenu = windowMenu
-        main.addItem(windowItem)
-
-        return main
-    }
-}
-
-/// Whether ⌘Q may go straight through, asked without AppKit in the room.
-///
-/// The rule is the same one `UpdateGate` holds for Sparkle — a meeting outranks
-/// whatever else the program was asked to do — and it lives in its own type for
-/// the same reason: a modal panel cannot be tested, and the question it asks
-/// can be.
-struct QuitGate {
-    enum Decision: Equatable {
-        case quitNow
-        /// Ask first, and say how long the recording has been running: the
-        /// number is what makes the choice an informed one.
-        case ask(elapsed: TimeInterval)
-    }
-
-    private let recordingElapsed: () -> TimeInterval?
-
-    init(recordingElapsed: @escaping () -> TimeInterval? = { nil }) {
-        self.recordingElapsed = recordingElapsed
-    }
-
-    func decide() -> Decision {
-        guard let elapsed = recordingElapsed() else { return .quitNow }
-        return .ask(elapsed: elapsed)
-    }
-}
-
-/// Dock behaviour. Clicking the icon of a running app sends a reopen, which is
-/// how the window comes back after you close it; and amanu must not quit just
-/// because its only window was closed — it's a recorder, the window is a view
-/// onto it.
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    /// Called on a Dock click, with `alreadyActive` false when that click was
-    /// the one that brought amanu forward.
-    var onReopen: ((_ alreadyActive: Bool) -> Void)?
-    var onTerminate: (() -> Void)?
-    /// Gives asynchronous filesystem work a chance to cancel and remove its
-    /// unpublished staging folder before the process exits. Returning true
-    /// means the callback will answer AppKit's deferred termination request.
-    var onPrepareTermination: ((_ completion: @escaping () -> Void) -> Bool)?
-    /// The app menu's Settings item hangs off the delegate because it is the
-    /// only NSObject in the picture — AppController is a plain class, and a
-    /// menu item needs a target it can send a selector to.
-    var onShowSettings: (() -> Void)?
-    var onShowSetup: (() -> Void)?
-    var onImport: (() -> Void)?
-    var onCheckForUpdates: (() -> Void)?
-    var onShowAbout: (() -> Void)?
-    /// Answers whether ⌘Q needs to ask first. The default gate knows of no
-    /// recording, which is the right answer for a delegate nobody wired up.
-    var quitGate = QuitGate()
-
-    private var becameActiveAt = Date.distantPast
-
-    func applicationDidBecomeActive(_ notification: Notification) {
-        becameActiveAt = Date()
-    }
-
-    /// Clicking the Dock icon of an app that's already in front should put the
-    /// window away again — show, hide, show. The catch is that AppKit
-    /// activates the app *before* asking us, so `NSApp.isActive` is true
-    /// either way; the only thing that separates "already working in amanu"
-    /// from "just switched to it" is how long ago activation happened.
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        let justActivated = Date().timeIntervalSince(becameActiveAt) < 0.3
-        onReopen?(!justActivated)
-        return true
-    }
-
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
-    }
-
-    /// Quitting a recorder mid-meeting is not an ordinary quit. What survives
-    /// is the part people assume is at risk — `applicationWillTerminate` closes
-    /// the session properly and it is transcribed like any other — and what is
-    /// lost is the part nobody thinks about: everything said between this quit
-    /// and the next launch, which cannot be recovered from anywhere. So the
-    /// alert leads with the elapsed time and then says exactly that (.issues/005,
-    /// where a quit during a call cost three minutes of it).
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if case .ask(let elapsed) = quitGate.decide() {
-            let running = AppController.format(elapsed)
-            let alert = NSAlert()
-            alert.messageText = localised(
-                "Quit while a recording is running? It has been going for \(running).",
-                "Выйти во время записи? Она идёт уже \(running).")
-            alert.informativeText = localised(
-                """
-                Quitting stops the recording and saves it — nothing recorded so far is lost, \
-                and it will be transcribed like any other session. But nothing is recorded \
-                after this until amanu runs again.
-                """,
-                """
-                При выходе запись остановится и сохранится — записанное не пропадёт \
-                и будет расшифровано, как любая другая сессия. Но дальше, до следующего \
-                запуска amanu, ничего записываться не будет.
-                """)
-            alert.addButton(withTitle: localised(
-                "Quit and save the recording", "Выйти и сохранить запись"))
-            alert.addButton(withTitle: localised("Keep recording", "Продолжить запись"))
-            guard alert.runModal() == .alertFirstButtonReturn else {
-                return .terminateCancel
-            }
-        }
-
-        let deferred = onPrepareTermination? {
-            sender.reply(toApplicationShouldTerminate: true)
-        } ?? false
-        return deferred ? .terminateLater : .terminateNow
-    }
-
-    func applicationWillTerminate(_ notification: Notification) {
-        onTerminate?()
-        Analytics.flushOnExit()
-    }
-
-    /// The app menu's **Setup…**, kept so that it can be taken away once the
-    /// first run is over and put back when `amanu setup` asks for it again.
-    var setupItem: NSMenuItem?
-
-    func setupAvailable(_ available: Bool) {
-        setupItem?.isHidden = !available
-    }
-
-    @objc func showSettingsClicked(_ sender: Any?) { onShowSettings?() }
-    @objc func showSetupClicked(_ sender: Any?) { onShowSetup?() }
-    @objc func importClicked(_ sender: Any?) { onImport?() }
-    @objc func checkForUpdatesClicked(_ sender: Any?) { onCheckForUpdates?() }
-    @objc func showAboutClicked(_ sender: Any?) { onShowAbout?() }
 }
 
 struct Doctor: ParsableCommand {
@@ -436,7 +218,13 @@ struct Doctor: ParsableCommand {
 /// ticker. All state transitions happen on the main actor.
 @MainActor
 final class AppController {
-    private let root: URL
+    /// Where recordings go. It follows `recordings_dir` while amanu runs —
+    /// see `adoptPendingRoot` — unless `--out` named a folder for this run.
+    private var root: URL
+    private let followsConfiguredRoot: Bool
+    /// A folder chosen while something was still being written into the old
+    /// one, waiting for that to finish.
+    private var pendingRoot: URL?
     private let menuBar = MenuBarController(visible: Config.menuBarIcon())
     private let window = StatusWindow()
     /// Built on first use. It is thirty-odd controls, and amanu spends nearly
@@ -458,14 +246,15 @@ final class AppController {
         }
         return setup
     }()
-    /// Sparkle, and amanu's rule that a meeting outranks an update. Lazy for
-    /// the same reason the windows are: most of amanu's life is spent
-    /// recording, and the updater is only ever touched from a menu or a timer.
+    /// Sparkle, and amanu's rule that a meeting outranks an update. Lazy only
+    /// so that its gate can ask `self` whether a recording is running; it is
+    /// built in `init` all the same, where the menu asks whether updates are
+    /// available at all.
     private lazy var updates = AppUpdates(
         gate: UpdateGate(isRecording: { [weak self] in self?.isRecording == true })
     )
     private let transcription = TranscriptionCoordinator()
-    private let mediaImport: MediaImportCoordinator
+    private var mediaImport: MediaImportCoordinator
     private let liveTranscription = LiveTranscriptionCoordinator()
     private let calendar: CalendarWatcher?
     private let autoRecord: AutoRecordController
@@ -482,7 +271,9 @@ final class AppController {
         session.map { Date().timeIntervalSince($0.startedAt) }
     }
     private var ticker: Timer?
+    private var recordingsBuilt = false
     private lazy var recordings: RecordingsWindow = {
+        recordingsBuilt = true
         let window = RecordingsWindow(root: root)
         window.onImportFiles = { [weak self] files in self?.importFiles(files) }
         window.onCancelImport = { [weak self] in self?.cancelImport() }
@@ -494,10 +285,9 @@ final class AppController {
     /// How the app menu is told whether to offer **Setup…**; the status
     /// item's own menu is reached directly.
     var onSetupAvailable: ((Bool) -> Void)?
-    /// The live-transcript switch is on the status window and in the setup
-    /// form, which is in two windows; whichever one is used, the others have
-    /// to agree.
-    private var configWatch: ConfigWatch.Token?
+    /// Takes up every setting that can change while amanu runs, whichever
+    /// window wrote it — see `SettingsApplier`.
+    private var settingsApplier: SettingsApplier?
     /// Hears edits made to the config file from outside — above all the one
     /// that fixes a file amanu could not read.
     private var configDiskWatch: ConfigWatch.DiskWatch?
@@ -519,10 +309,14 @@ final class AppController {
     private var recordingActivity: NSObjectProtocol?
     private var automaticFeaturesStarted = false
     private var mediaImportTask: Task<Void, Never>?
-    private var pendingImports = MediaImportPendingQueue()
+    private var imports = ImportQueue()
+    /// The request to stop the importer mid-file, kept so that a run started
+    /// after it can wait for it: arriving late, it would stop the new run.
+    private var importStop: Task<Void, Never>?
 
-    init(root: URL) {
+    init(root: URL, followsConfiguredRoot: Bool = true) {
         self.root = root
+        self.followsConfiguredRoot = followsConfiguredRoot
         mediaImport = MediaImportCoordinator(root: root)
 
         let settings = Config.autoRecord()
@@ -597,15 +391,15 @@ final class AppController {
             reason: "amanu watches for meetings and answers its command line")
 
         offerSetup()
-        configWatch = ConfigWatch.observe { [weak self] in
-            self?.window.updateLivePreference(enabled: Config.liveTranscriptionEnabled())
-            self?.applyIconPreferences()
-            self?.showConfigProblems()
-            // auto_record.enabled is written by Settings, the setup form, the
-            // menu and the status window alike, and obeyed from here.
-            self?.autoRecord.reloadSettings()
-            self?.showAutoRecord()
-        }
+        settingsApplier = SettingsApplier(
+            apply: { [weak self] change in self?.take(change) },
+            always: { [weak self] in
+                self?.showConfigProblems()
+                // auto_record.enabled is written by Settings, the setup form,
+                // the menu and the status window alike, and obeyed from here.
+                self?.autoRecord.reloadSettings()
+                self?.showAutoRecord()
+            })
         configDiskWatch = ConfigWatch.DiskWatch()
         showConfigProblems()
         setupRequestObserver = SetupRequest.observe { [weak self] in self?.showSetup() }
@@ -674,13 +468,18 @@ final class AppController {
             // pass gets named and summarized by the coordinator itself, and
             // the sweep is only for what was left over from earlier runs.
             await PostProcessor.sweep(root: root)
+            sessionsChanged()
         }
 
         // A backlog deferred for want of a model is only half-solved by
         // recording the fact — something has to come back for it when the
         // network does.
-        let monitor = NetworkMonitor { [root] in
-            Task { await PostProcessor.sweep(root: root) }
+        let monitor = NetworkMonitor { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let root = self?.root else { return }
+                await PostProcessor.sweep(root: root)
+                self?.sessionsChanged()
+            }
         }
         monitor.start()
         network = monitor
@@ -715,14 +514,18 @@ final class AppController {
     /// publishes complete filesystem sessions; only then are they handed to
     /// the ordinary transcription queue, exactly like a recording just ended.
     func importFiles(_ files: [URL]) {
-        guard !files.isEmpty else { return }
-        pendingImports.enqueue(files)
-        guard mediaImportTask == nil else { return }
+        if imports.add(files) { startImportRun() }
+    }
+
+    /// One run of the importer: batch after batch until nothing is waiting
+    /// or somebody cancels, then one summary for the whole run.
+    private func startImportRun() {
+        let stop = importStop
         mediaImportTask = Task { [weak self, mediaImport, transcription] in
+            await stop?.value
             guard let self else { return }
             var combined = MediaImportCoordinator.Result()
-            while !pendingImports.isEmpty, !Task.isCancelled {
-                let batch = pendingImports.takeAll()
+            while let batch = imports.nextBatch() {
                 let result = await mediaImport.importFiles(batch) { [weak self] update in
                     Task { @MainActor [weak self] in self?.showImport(update) }
                 }
@@ -736,16 +539,26 @@ final class AppController {
                 if result.cancelled { break }
             }
             if Task.isCancelled { combined.cancelled = true }
-            pendingImports.removeAll()
             finishImport(combined)
             mediaImportTask = nil
+            // Files dropped while this run was stopping are a new request,
+            // not part of the one that was cancelled.
+            if imports.runEnded() {
+                startImportRun()
+            } else {
+                adoptPendingRoot()
+            }
         }
     }
 
     func cancelImport() {
-        pendingImports.removeAll()
+        imports.cancel()
         mediaImportTask?.cancel()
-        Task { [mediaImport] in await mediaImport.cancel() }
+        let previous = importStop
+        importStop = Task { [mediaImport] in
+            await previous?.value
+            await mediaImport.cancel()
+        }
     }
 
     /// AppKit can defer quit, so use that time to wait for the import actor's
@@ -753,7 +566,7 @@ final class AppController {
     /// half-written `.import-*` folder behind.
     func prepareForTermination(completion: @escaping () -> Void) -> Bool {
         guard let running = mediaImportTask else { return false }
-        pendingImports.removeAll()
+        imports.close()
         running.cancel()
         Task { [mediaImport] in
             await mediaImport.cancel()
@@ -836,9 +649,63 @@ final class AppController {
         window.updateAutoRecord(enabled: autoRecord.enabled, decision: decision)
     }
 
+    /// The status window's live-transcript switch. It only writes, as the
+    /// setup form's switch does; the recording is rewired by `take`, which
+    /// hears both.
     private func toggleLive(_ enabled: Bool) {
         Config.update(
             path: ["live_transcription", "enabled"], value: enabled ? true : nil)
+    }
+
+    /// One setting that changed while amanu was running.
+    private func take(_ change: SettingsApplier.Change) {
+        switch change {
+        case .liveTranscription(let enabled):
+            window.updateLivePreference(enabled: enabled)
+            rewireLive(enabled)
+        case .icons:
+            applyIconPreferences()
+        case .recordingsRoot(let folder):
+            guard followsConfiguredRoot else { return }
+            pendingRoot = folder
+            adoptPendingRoot()
+        }
+    }
+
+    /// Move to the recordings folder the config now names, if nothing is
+    /// being written into the old one.
+    ///
+    /// Choosing a folder in Setup used to change nothing until the next
+    /// launch, and said nothing about it: the next meeting went on landing
+    /// in the old folder while the window showed the new one. Now the next
+    /// recording or import goes to the new folder, and the recordings window
+    /// shows what is in it. A recording or an import under way finishes where
+    /// it started — a session is one folder — and the move waits for it.
+    private func adoptPendingRoot() {
+        guard let folder = pendingRoot, session == nil, mediaImportTask == nil else { return }
+        pendingRoot = nil
+        guard folder != root.standardizedFileURL else { return }
+        root = folder
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        // For the same reason `Run` sits in the recordings folder at launch:
+        // an agent CLI started anywhere else goes looking around it.
+        FileManager.default.changeCurrentDirectoryPath(folder.path)
+        mediaImport = MediaImportCoordinator(root: folder)
+        FileHandle.standardError.write(Data("recordings → \(folder.path)\n".utf8))
+        // The new folder may be an old one, with its own leftovers: a crash
+        // to adopt, sessions nobody transcribed.
+        RecordingSession.recoverInterrupted(root: folder)
+        if automaticFeaturesStarted {
+            Task { [transcription] in
+                await transcription.resumePending(root: folder)
+                await PostProcessor.sweep(root: folder)
+            }
+        }
+        if recordingsBuilt { recordings.setRoot(folder) }
+    }
+
+    /// Start or stop the live transcript under a recording already running.
+    private func rewireLive(_ enabled: Bool) {
         guard let session else { return }
 
         // Close the old epoch synchronously. Any partial result already in
@@ -948,6 +815,7 @@ final class AppController {
         ))
         self.session = nil
         present(.idle, elapsed: nil)
+        adoptPendingRoot()
         // If Sparkle was told to wait for this recording, it has waited.
         updates.recordingDidFinish()
 
@@ -1022,6 +890,16 @@ final class AppController {
         let text = Self.transcriptionLine(for: status)
         menuBar.updateTranscription(text)
         window.updateTranscription(text)
+        // Each change of status follows the end of a session's work — its
+        // transcript, names and summary — or the start of the next, so the
+        // recordings window reads again rather than going on offering
+        // Finish processing for work that has been done.
+        sessionsChanged()
+    }
+
+    /// The recordings folder changed behind the recordings window's back.
+    private func sessionsChanged() {
+        if recordingsBuilt { recordings.sessionsChanged() }
     }
 
     private func showLive(_ snapshot: LiveTranscriptionCoordinator.Snapshot) {
@@ -1126,7 +1004,8 @@ final class AppController {
     private func showRecordings() {
         // A session put back in the queue should start transcribing now, not
         // at the next launch — the person asking for it is watching.
-        recordings.onRetranscribe = { [transcription, root] _ in
+        recordings.onRetranscribe = { [weak self, transcription] _ in
+            guard let root = self?.root else { return }
             Task { await transcription.resumePending(root: root) }
         }
         NSApp.activate(ignoringOtherApps: true)

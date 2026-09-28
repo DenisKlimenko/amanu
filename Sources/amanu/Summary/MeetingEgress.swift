@@ -97,7 +97,7 @@ enum MeetingEgress {
             preference: route.preference, anthropicModel: route.anthropicModel
         ).map { "\($0.name)=\($0.model ?? "-")" }
         parts += [summary.openAIBaseURL, summary.ollamaBaseURL]
-        parts += [Config.anthropicKey(), Config.openAIKey()].map { key in
+        parts += [Config.anthropicKey(), Credentials.summaryOpenAIKey()].map { key in
             key.map { digest($0) } ?? "-"
         }
         if purpose == .summary {

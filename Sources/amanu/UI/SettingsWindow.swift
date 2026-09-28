@@ -97,6 +97,10 @@ final class SettingsWindow: NSObject, NSTextFieldDelegate {
         // window — the program outlives its windows.
         panel.isReleasedWhenClosed = false
         panel.minSize = NSSize(width: 640, height: 460)
+        // Rows and cards come and go as the form redraws; the Tab order has
+        // to follow them, or a choice card that appeared after the window
+        // opened could never be reached from the keyboard.
+        panel.autorecalculatesKeyViewLoop = true
 
         let tabs = NSTabView()
         tabs.translatesAutoresizingMaskIntoConstraints = false
@@ -518,6 +522,11 @@ final class SettingsWindow: NSObject, NSTextFieldDelegate {
 
     private func makeRow(for entry: SettingsSchema.Entry) -> NSView {
         let control = makeControl(for: entry)
+        // The label beside it is a separate text field, which a screen reader
+        // does not connect to the control: every switch on this tab used to
+        // be announced as "switch" and nothing else.
+        control.setAccessibilityLabel(entry.label)
+        control.identifier = NSUserInterfaceItemIdentifier(entry.path.joined(separator: "."))
         control.tag = rows.count
 
         let label = NSTextField(labelWithString: entry.label)

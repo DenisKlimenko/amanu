@@ -292,7 +292,7 @@ enum SettingsSchema {
                   .toggle, default: false, askedInSetup: true),
             Entry(["recordings_dir"], localised("Recordings folder", "Папка записей"),
                   localised("Where sessions land.", "Куда складываются встречи."),
-                  .text, describedAs: "~/Recordings", needsRestart: true, askedInSetup: true),
+                  .text, describedAs: "~/Recordings", askedInSetup: true),
         ]),
 
         Section(title: localised("Transcription", "Расшифровка"), entries: [

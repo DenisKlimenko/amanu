@@ -1,28 +1,6 @@
 import CryptoKit
 import Foundation
 
-/// Main-actor buffer for files offered while the current batch is suspended
-/// in AVFoundation. It deliberately coalesces them into the next sequential
-/// batch instead of starting a second normalizer beside the first.
-struct MediaImportPendingQueue {
-    private var files: [URL] = []
-
-    var isEmpty: Bool { files.isEmpty }
-
-    mutating func enqueue(_ additions: [URL]) {
-        files.append(contentsOf: additions)
-    }
-
-    mutating func takeAll() -> [URL] {
-        defer { files.removeAll(keepingCapacity: true) }
-        return files
-    }
-
-    mutating func removeAll() {
-        files.removeAll(keepingCapacity: true)
-    }
-}
-
 /// Turns files chosen in Finder into ordinary filesystem-backed sessions.
 /// Importing is serial: normalization can be expensive, and running several
 /// AVFoundation readers beside transcription only makes every item finish

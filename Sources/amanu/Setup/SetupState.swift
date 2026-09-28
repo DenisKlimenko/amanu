@@ -39,9 +39,18 @@ enum SetupState {
 
     /// Record that the window has been through. Failure is not worth
     /// escalating: the cost is the window opening again, not a lost recording.
-    static func markCompleted(at stateURL: URL = path) {
+    ///
+    /// True when this is what finished it — the setup
+    /// window marks it on every way out, Later and the close button
+    /// included, and `setup_completed` is one event per completed setup, not
+    /// one per closing of a window that was already done with.
+    @discardableResult
+    static func markCompleted(at stateURL: URL = path) -> Bool {
+        let wasPending = isPending(at: stateURL)
         write(["version": current, "completed_at": ISO8601DateFormatter().string(from: Date())], at: stateURL)
+        guard wasPending else { return false }
         Analytics.track(.setupCompleted, [.setupVersion: .number(Double(current))])
+        return true
     }
 
     /// Remember that a deliberate tone made the round trip through the

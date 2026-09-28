@@ -68,6 +68,22 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         _ = try await AsrModels.downloadAndLoad(version: ParakeetEngine.configuredVersion())
     }
 
+    /// How a pasted key is put to the service it is for. A seam because the
+    /// answer decides what is written where, and a test has to be able to
+    /// say "that key works" without a network or a real key — which is the
+    /// only way to check that a key for one purpose lands in that purpose's
+    /// file and no other.
+    var checkKey: @MainActor (Credentials.Check) async -> Credentials.Verdict = { check in
+        await check.ask()
+    }
+
+    /// The system-audio test: a tone out of the speakers and a tap listening
+    /// for it. A seam so a test can prove when it is *not* played without
+    /// playing it.
+    var playTestTone: @MainActor () async -> SetupPermissions.SystemAudioResult = {
+        await SetupPermissions.testSystemAudio()
+    }
+
     /// The form itself, for a host to put in a scroll view.
     let view = FlippedStackView()
 
@@ -75,7 +91,12 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// window showing the same form, the Advanced tab beside it, or the
     /// status window's live-transcript switch.
     private var configWatch: ConfigWatch.Token?
-
+    /// Redraws this copy when amanu comes back to the front. Every grant the
+    /// Access rows ask for is given somewhere else — System Settings, a
+    /// Login Items switch — and the person comes back from there to a window
+    /// that went on saying the microphone was denied until something else
+    /// happened to redraw it. Coming back is the moment to look again.
+    private var activation: ConfigWatch.Token?
 
     private let launchRow = AccessRow(
         title: localised("Start at login", "Запуск при входе"),
@@ -148,7 +169,15 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
 
     private let parakeetStatus = NSTextField(labelWithString: "")
     private let parakeetBar = NSProgressIndicator()
+    /// The bar's clock, which is only worth running while somebody can see
+    /// the bar.
     private var parakeetProgress: Timer?
+    /// The download itself, which is not the same thing as its bar. It used
+    /// not to be kept at all: closing the window stopped the timer, the form
+    /// took that to mean nothing was downloading, and opening it again
+    /// offered a second fetch of the same 460 megabytes into the same cache
+    /// while the first was still running.
+    private var parakeetDownload: Task<Void, Never>?
 
     private let summariesOn = NSSwitch()
     private let summaryCards = ChoiceGroup()
@@ -220,6 +249,10 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         form.edgeInsets = NSEdgeInsets(
             top: 22, left: SetupLayout.gutter, bottom: 22, right: SetupLayout.gutter)
 
+        launchRow.identifier = NSUserInterfaceItemIdentifier("access.login")
+        micRow.identifier = NSUserInterfaceItemIdentifier("access.microphone")
+        audioRow.identifier = NSUserInterfaceItemIdentifier("access.system-audio")
+        calendarRow.identifier = NSUserInterfaceItemIdentifier("access.calendar")
         form.addArrangedSubview(configProblems)
         form.addArrangedSubview(SetupLayout.section(
             localised("Access", "Доступ"),
@@ -265,9 +298,35 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
                 equalTo: form.widthAnchor, constant: -2 * SetupLayout.gutter).isActive = true
         }
 
+        // Names for the switches that do not depend on the words beside
+        // them, so a test can find a switch without walking up from its
+        // label through however many stacks the layout has this week.
+        for (toggle, name) in [
+            (cloudSwitch, "transcription.cloud"), (localSwitch, "transcription.local"),
+            (liveTranscription, "transcription.live"), (keepAudio, "files.keep-audio"),
+            (summariesOn, "summary.enabled"), (menuBarIcon, "icons.menu-bar"),
+            (dockIcon, "icons.dock"), (autoRecord, "auto-record"), (analytics, "analytics"),
+        ] {
+            toggle.identifier = NSUserInterfaceItemIdentifier(name)
+        }
         wireActions()
         refresh()
         configWatch = ConfigWatch.observe { [weak self] in self?.refresh() }
+        // A token of the same kind as the config watch's: it ends the
+        // observation when the form goes.
+        activation = ConfigWatch.Token(NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.cameBack() }
+        })
+    }
+
+    /// Only a form somebody can see: asking whether a login item is
+    /// registered is a round trip to another daemon, and a window that is
+    /// closed will be redrawn by `reload` when it opens anyway.
+    func cameBack() {
+        guard view.window?.isVisible == true else { return }
+        refresh()
     }
 
     /// Re-read the machine and the config file. A host calls this when the
@@ -275,6 +334,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// `auto_record.enabled`, and a form showing yesterday's answer is worse
     /// than no form at all.
     func reload() {
+        if parakeetDownload != nil, parakeetProgress == nil { watchParakeetSize() }
         refresh()
         // Detection runs off the main thread: finding `claude` can mean
         // starting the login shell, and a form that freezes while it asks
@@ -285,6 +345,10 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// Put down what outlives a keystroke. The setup window calls it on the
     /// way out: a timer polling a download directory has no reason to keep
     /// running behind a closed window.
+    ///
+    /// The parakeet download itself is left running: FluidAudio offers no way
+    /// to stop one partway, and a bar put away is not a download abandoned.
+    /// `reload` puts the bar back.
     func stop() {
         parakeetProgress?.invalidate()
         parakeetProgress = nil
@@ -434,6 +498,8 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         providerCards.onChange = { [weak self] id in self?.providerPicked(id) }
 
         cloudKey.placeholderString = localised("paste key", "вставьте ключ")
+        cloudKey.identifier = NSUserInterfaceItemIdentifier("transcription.key")
+        cloudKeyStatus.identifier = NSUserInterfaceItemIdentifier("transcription.key.status")
         cloudKey.font = SetupLayout.detailFont
         cloudKey.delegate = self
         cloudKey.widthAnchor.constraint(equalToConstant: 220).isActive = true
@@ -473,6 +539,8 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
 
         language.target = self
         language.action = #selector(languageChanged)
+        language.identifier = NSUserInterfaceItemIdentifier("transcription.language")
+        language.setAccessibilityLabel(label.stringValue)
         buildLanguageMenu()
 
         let picker = NSStackView(views: [label, language, NSView()])
@@ -545,18 +613,25 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         recordingsPath.font = SetupLayout.monoFont
         recordingsPath.lineBreakMode = .byTruncatingMiddle
 
+        folderDetail.stringValue = Self.folderAdvice
         return SetupLayout.row(
             symbol: "folder",
             title: recordingsPath,
-            detail: SetupLayout.detail(
-                localised(
-                    "Outside Documents and Desktop, so macOS never has to ask.",
-                    "Вне Документов и Рабочего стола — macOS не будет спрашивать."),
-                lines: 1),
+            detail: folderDetail,
             trailing: [SetupLayout.actionButton(
                 localised("Choose…", "Выбрать…"),
                 target: self, action: #selector(chooseFolder))])
     }
+
+    /// What the line under the folder says, until a folder is chosen during
+    /// a recording and it has something more pressing to say.
+    private static var folderAdvice: String {
+        localised(
+            "Outside Documents and Desktop, so macOS never has to ask.",
+            "Вне Документов и Рабочего стола — macOS не будет спрашивать.")
+    }
+
+    private let folderDetail = SetupLayout.detail("", lines: 2)
 
     @objc private func chooseFolder() {
         let panel = NSOpenPanel()
@@ -571,6 +646,14 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         // Store it the way a person would write it: a path under the home
         // directory stays readable, and stays right if the account is renamed.
         Config.update(path: ["recordings_dir"], value: Home.current.abbreviating(chosen.path))
+        // Taken up at once when nothing is recording; a recording running now
+        // finishes in the folder it started in, and that is worth saying
+        // before somebody goes looking for it in the new one.
+        folderDetail.stringValue = isRecording?() == true
+            ? localised(
+                "The recording in progress stays in the old folder; the next one goes here.",
+                "Идущая запись останется в старой папке, следующая ляжет сюда.")
+            : Self.folderAdvice
         refresh()
     }
 
@@ -621,6 +704,8 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         keyProvider.target = self
         keyProvider.action = #selector(keyProviderChanged)
         summaryKey.placeholderString = "sk-ant-…"
+        summaryKey.identifier = NSUserInterfaceItemIdentifier("summary.key")
+        summaryKeyStatus.identifier = NSUserInterfaceItemIdentifier("summary.key.status")
         summaryKey.font = SetupLayout.detailFont
         summaryKey.delegate = self
         summaryKeyStatus.font = SetupLayout.statusFont
@@ -830,7 +915,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// it was, because a switch that says "on" while every transcript fails
     /// with HTTP 401 is a lie the person only finds out about after a meeting.
     @objc private func cloudToggled() {
-        if cloudSwitch.state == .on, !hasKey(for: provider) {
+        if cloudSwitch.state == .on, !Credentials.hasTranscriptionKey(for: provider) {
             pendingProvider = provider
             cloudSwitch.state = .off
             refresh()
@@ -845,7 +930,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// key also switches the cloud on. A card without one only opens the key
     /// field: what is in force stays in force until the new key is accepted.
     private func providerPicked(_ id: String) {
-        guard hasKey(for: id) else {
+        guard Credentials.hasTranscriptionKey(for: id) else {
             pendingProvider = id
             refresh()
             focusKeyField()
@@ -910,14 +995,6 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
             write(update.path, update.value)
         }
         refresh()
-    }
-
-    private func hasKey(for provider: String) -> Bool {
-        switch provider {
-        case "openai": return Config.openAIKey() != nil
-        case "elevenlabs": return Config.elevenLabsKey() != nil
-        default: return Config.assemblyAIKey() != nil
-        }
     }
 
     /// Whichever window is showing the form — the setup wizard or the
@@ -1005,6 +1082,10 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     }
 
     @objc private func keyProviderChanged() {
+        // Only here, not in every redraw: a redraw follows the very write
+        // that says a key was saved, and used to wipe "key works" off the
+        // screen the moment it appeared.
+        summaryKeyStatus.stringValue = ""
         showKeyProvider()
         if summaryCards.selected == "api-key" {
             Config.update(path: ["summary", "backend"], value: selectedKeyBackend)
@@ -1022,7 +1103,6 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     private func showKeyProvider() {
         summaryKey.placeholderString = selectedKeyBackend == "anthropic-api" ? "sk-ant-…" : "sk-…"
         summaryOpenAIOptions.isHidden = selectedKeyBackend != "openai-api"
-        summaryKeyStatus.stringValue = ""
         summaryKeyLink.identifier = NSUserInterfaceItemIdentifier(
             selectedKeyBackend == "anthropic-api"
                 ? "https://console.anthropic.com/settings/keys"
@@ -1045,7 +1125,11 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         let label = NSTextField(labelWithString: title)
         label.font = SetupLayout.detailFont
         label.textColor = .secondaryLabelColor
-        label.widthAnchor.constraint(equalToConstant: 62).isActive = true
+        // Wide enough for "URL сервера": at 62 the Russian label was cut to
+        // "URL сервер" in the Ollama card, the width having been measured
+        // against "Base URL" alone.
+        label.widthAnchor.constraint(equalToConstant: 76).isActive = true
+        field.setAccessibilityLabel(title)
         let row = NSStackView(views: [label, field])
         row.orientation = .horizontal
         row.alignment = .firstBaseline
@@ -1092,9 +1176,22 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// person has just said yes is the button looking broken all over again.
     private var calendarGrant: SetupPermissions.State?
 
+    /// Play a tone and listen for it through a tap of our own.
+    ///
+    /// Never during a recording, which the comment on `isRecording` promised
+    /// and only the login item kept: the test opens a second tap beside the
+    /// one recording the meeting and plays 440 Hz out of the speakers, into
+    /// the call — the far end hears it, and it lands in the recording too.
+    /// The wizard's button reaches this as well as the row's, so the refusal
+    /// is here rather than on either button.
     private func testSystemAudio() async {
+        if isRecording?() == true {
+            toneRefused = true
+            refresh()
+            return
+        }
         audioRow.working(localised("playing a tone…", "играет тон…"))
-        let result = await SetupPermissions.testSystemAudio()
+        let result = await playTestTone()
         systemAudio = result
         if result == .heard { SetupState.rememberSystemAudioHeard() }
         switch result {
@@ -1105,6 +1202,12 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         }
         refresh()
     }
+
+    /// The test was asked for during a recording and refused. Kept rather
+    /// than written once into the row, because the next redraw — any write
+    /// to the config, from anywhere — would put the row back as if nothing
+    /// had been asked, while the recording that is the reason goes on.
+    private var toneRefused = false
 
     /// Seeded from the last tone that was heard, because macOS will not tell
     /// us and a working Mac should not be asked to prove itself every time.
@@ -1232,30 +1335,34 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
 
     private func downloadParakeetIfNeeded() {
         guard !parakeetIsHere() else { return }
-        guard parakeetProgress == nil else { return }
+        guard parakeetDownload == nil else { return }
         let asset = Config.transcriptionModel() == "v2" ? "parakeet-v2" : "parakeet-v3"
         Analytics.track(.modelDownloadStarted, [.asset: .text(asset)])
         watchParakeetSize()
-        // So the footer button says what is happening from the first second,
-        // rather than at the end of it.
-        refresh()
-        Task {
+        let fetch = fetchParakeet
+        parakeetDownload = Task { [weak self] in
+            var failure: String?
             do {
-                try await fetchParakeet()
+                try await fetch()
                 Analytics.track(.modelDownloadFinished, [.asset: .text(asset)])
             } catch {
                 Analytics.track(.modelDownloadFailed, [
                     .asset: .text(asset),
                     .reason: .text(Analytics.reason(for: error).rawValue),
                 ])
-                localDownloadErrors["parakeet"] =
-                    localised("download failed: ", "не удалось скачать: ") + "\(error)"
+                failure = localised("download failed: ", "не удалось скачать: ") + "\(error)"
             }
+            guard let self else { return }
+            if let failure { localDownloadErrors["parakeet"] = failure }
+            parakeetDownload = nil
             parakeetProgress?.invalidate()
             parakeetProgress = nil
             parakeetBar.isHidden = true
             refresh()
         }
+        // So the footer button says what is happening from the first second,
+        // rather than at the end of it.
+        refresh()
     }
 
     /// FluidAudio hands back no progress, so the progress is the cache
@@ -1378,41 +1485,40 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// into the field by accident used to replace a good key on disk, and the
     /// only sign was every later meeting failing to transcribe with HTTP 401.
     /// A key that isn't accepted never reaches the file.
-    private func saveCloudKey() async {
+    func saveCloudKey() async {
         let target = pendingProvider ?? provider
         let key = cloudKey.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return }
-        cloudKeyStatus.stringValue = Self.checkingKey
-
-        let accepted: Bool
-        switch target {
-        case "openai": accepted = await SummaryKeyProbe.works(provider: .openAI, key: key)
-        case "elevenlabs": accepted = await Self.elevenLabsKeyWorks(key)
-        default: accepted = await Self.assemblyKeyWorks(key)
-        }
-        guard accepted else {
-            cloudKeyStatus.stringValue = hasKey(for: target)
-                ? localised(
-                    "that key was refused — the saved one is untouched",
-                    "этот ключ не приняли — сохранённый не тронут")
-                : localised("that key was refused", "этот ключ не приняли")
+        let slot = Credentials.transcriptionSlot(for: target, in: Config.raw())
+        guard slot.isAmanus else {
+            cloudKeyStatus.stringValue = Credentials.notOursToWrite(slot)
             return
         }
-        let path: URL
+        cloudKeyStatus.stringValue = Self.checkingKey
+
+        let service: Credentials.Check.Service
         switch target {
-        case "openai": path = Config.openAIKeyPath
-        case "elevenlabs": path = Config.elevenLabsKeyPath
-        default: path = Config.assemblyAIKeyPath
+        // Transcription only ever talks to OpenAI itself, whatever endpoint
+        // the summaries are pointed at.
+        case "openai": service = .openAI(baseURL: "https://api.openai.com/v1")
+        case "elevenlabs": service = .elevenLabs
+        default: service = .assemblyAI
+        }
+        let verdict = await checkKey(Credentials.Check(service: service, key: key))
+        guard verdict == .works else {
+            cloudKeyStatus.stringValue = verdict.sentence(
+                keepingSaved: Credentials.hasTranscriptionKey(for: target))
+            return
         }
         do {
-            try Self.writeSecret(key, to: path)
+            try Credentials.writeSecret(key, to: slot.path)
         } catch {
             cloudKeyStatus.stringValue =
                 localised("couldn't save the key: ", "не удалось сохранить ключ: ") + "\(error)"
             return
         }
         cloudKey.stringValue = ""
-        cloudKeyStatus.stringValue = localised("key works", "ключ работает")
+        cloudKeyStatus.stringValue = verdict.sentence(keepingSaved: true)
         // A key that works is the answer to the question the switch asked, so
         // it turns the cloud on rather than making the person click twice.
         provider = target
@@ -1421,86 +1527,39 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         commitTranscription()
     }
 
-    private func saveSummaryKey() async {
+    /// The same order as the cloud key, into the slot the summary actually
+    /// reads — which for an OpenAI-compatible endpoint is not OpenAI's.
+    func saveSummaryKey() async {
         let key = summaryKey.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return }
         let backend = selectedKeyBackend
-        let provider: SummaryKeyProbe.Provider = backend == "anthropic-api" ? .anthropic : .openAI
-        let path = backend == "anthropic-api"
-            ? Config.anthropicKeyPath
-            : Config.openAIKeyPath
-        summaryKeyStatus.stringValue = Self.checkingKey
-        let openAIBaseURL: String
-        switch provider {
-        case .openAI: openAIBaseURL = Config.summary().openAIBaseURL
-        case .anthropic: openAIBaseURL = "https://api.openai.com/v1"
+        let config = Config.raw()
+        let slot = Credentials.summarySlot(for: backend, in: config)
+        guard slot.isAmanus else {
+            summaryKeyStatus.stringValue = Credentials.notOursToWrite(slot)
+            return
         }
-        guard await SummaryKeyProbe.works(
-            provider: provider, key: key, openAIBaseURL: openAIBaseURL) else {
-            summaryKeyStatus.stringValue = localised(
-                "that key was refused — nothing was overwritten",
-                "этот ключ не приняли — ничего не перезаписано")
+        summaryKeyStatus.stringValue = Self.checkingKey
+        let service: Credentials.Check.Service = backend == "anthropic-api"
+            ? .anthropic
+            : .openAI(baseURL: Config.summary(in: config).openAIBaseURL)
+        let verdict = await checkKey(Credentials.Check(service: service, key: key))
+        guard verdict == .works else {
+            summaryKeyStatus.stringValue = verdict.sentence(
+                keepingSaved: Config.secret(at: slot.path) != nil)
             return
         }
         do {
-            try Self.writeSecret(key, to: path)
+            try Credentials.writeSecret(key, to: slot.path)
         } catch {
             summaryKeyStatus.stringValue =
                 localised("couldn't save the key: ", "не удалось сохранить ключ: ") + "\(error)"
             return
         }
         summaryKey.stringValue = ""
-        summaryKeyStatus.stringValue = localised("key works", "ключ работает")
+        summaryKeyStatus.stringValue = verdict.sentence(keepingSaved: true)
         Config.update(path: ["summary", "backend"], value: backend)
         refresh()
-    }
-
-    /// A key is a secret: it goes to a file only its owner can read, never
-    /// into the config file — which the settings window shows on screen. The
-    /// directory is amanu's own and mode 0700, so a key pasted here can't be
-    /// overwritten by some other tool that keeps its secrets in the same place.
-    private static func writeSecret(_ value: String, to path: URL) throws {
-        try FileManager.default.createDirectory(
-            at: path.deletingLastPathComponent(),
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        try Data(value.utf8).write(to: path, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
-    }
-
-    /// Ask AssemblyAI whether it knows this key, now, rather than finding out
-    /// after a meeting. The cheapest authenticated call it has.
-    private static func assemblyKeyWorks(_ key: String) async -> Bool {
-        var request = URLRequest(
-            url: URL(string: "https://api.assemblyai.com/v2/transcript?limit=1")!)
-        request.timeoutInterval = 15
-        request.setValue(key, forHTTPHeaderField: "authorization")
-        guard let (_, response) = try? await URLSession.shared.data(for: request) else {
-            return false
-        }
-        return (response as? HTTPURLResponse)?.statusCode == 200
-    }
-
-    private static func elevenLabsKeyWorks(_ key: String) async -> Bool {
-        // Restricted keys can transcribe without permission to read /v1/user.
-        // Submit no file to the STT endpoint: a permitted key gets validation
-        // error 422, an invalid key gets 401, and nothing is transcribed.
-        let boundary = "amanu-key-check"
-        var request = URLRequest(url: URL(string: "https://api.elevenlabs.io/v1/speech-to-text")!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 15
-        request.setValue(key, forHTTPHeaderField: "xi-api-key")
-        request.setValue(
-            "multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "content-type")
-        request.httpBody = Data(("--\(boundary)\r\n"
-            + "Content-Disposition: form-data; name=\"model_id\"\r\n\r\n"
-            + "scribe_v2\r\n--\(boundary)--\r\n").utf8)
-        guard let (_, response) = try? await URLSession.shared.data(for: request) else {
-            return false
-        }
-        guard let status = (response as? HTTPURLResponse)?.statusCode else { return false }
-        return status == 422
     }
 
     // MARK: - reading the machine
@@ -1604,7 +1663,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
             return summaryToolRuns[looked] == false
         case "api-key":
             return summary.backend == "openai-api"
-                ? Config.openAIKey() == nil
+                ? Credentials.summaryOpenAIKey() == nil
                 : Config.anthropicKey() == nil
         default:
             return false
@@ -1642,7 +1701,12 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         micRow.update(SetupPermissions.microphone())
         calendarRow.update(calendarGrant ?? SetupPermissions.calendar())
 
+        if toneRefused, isRecording?() != true { toneRefused = false }
         switch systemAudio {
+        case _ where toneRefused:
+            audioRow.update(.denied, detail: localised(
+                "not while a recording is running — the test tone would play into the call",
+                "не во время записи — тестовый тон прозвучит в звонке"))
         case .heard:
             audioRow.update(
                 .granted,
@@ -1725,7 +1789,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         let choice = transcriptionChoice
         provider = choice.provider
         pendingProvider = TranscriptionChoice.stillPending(pendingProvider) { [weak self] in
-            self?.hasKey(for: $0) ?? false
+            Credentials.hasTranscriptionKey(for: $0)
         }
 
         cloudSwitch.state = choice.cloud ? .on : .off
@@ -1734,7 +1798,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         providerCards.select(pendingProvider ?? provider)
 
         for card in providerCards.cards {
-            let known = hasKey(for: card.id)
+            let known = Credentials.hasTranscriptionKey(for: card.id)
             card.report(
                 known
                     ? localised("key works", "ключ работает")
@@ -1757,7 +1821,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         cloudStatus.stringValue = TranscriptionChoice.rowNeedsKey(
             pending: pendingProvider, cloudOn: choice.cloud)
             ? localised("needs a key", "нужен ключ") : ""
-        keyLine.isHidden = pendingProvider == nil && hasKey(for: provider)
+        keyLine.isHidden = pendingProvider == nil && Credentials.hasTranscriptionKey(for: provider)
 
         localSwitch.isEnabled = Platform.supportsLocalModels
         localSwitch.state = choice.local ? .on : .off
@@ -1820,7 +1884,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         switch id {
         case "whisper": return whisperDownloadTask != nil
         case "gigaam": return gigaAMDownloadTask != nil
-        default: return parakeetProgress != nil
+        default: return parakeetDownload != nil
         }
     }
 
@@ -1859,538 +1923,60 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         for row in rows { row.setAttention(row === pending) }
     }
 
-    /// What the setup window's primary button will do, or nil when there is
-    /// nothing left to offer. The order is the order things must happen in:
-    /// the agent first, because a grant given to the wrong process is worse
-    /// than none.
-    var nextAction: (() -> Void)? {
-        if SetupPermissions.needsStartAtLogin {
-            return { [weak self] in self?.startAtLogin() }
-        }
-        if SetupPermissions.microphone() == .notAsked {
-            return { [weak self] in Task { await self?.askMicrophone() } }
-        }
-        if SetupPermissions.needsSystemAudioTest(systemAudio) {
-            return { [weak self] in Task { await self?.testSystemAudio() } }
-        }
-        if localModelIsWantedAndMissing,
-           parakeetProgress == nil,
-           whisperDownloadTask == nil,
-           gigaAMDownloadTask == nil {
-            return { [weak self] in self?.downloadLocalIfNeeded() }
-        }
-        if Config.liveTranscriptionEnabled() {
-            let prompt = LiveTranscriptionLanguage.prompt(for: Config.transcriptionLanguage())
-            if !liveModelStore.isReady(language: prompt), !liveDownloading {
-                return { [weak self] in self?.downloadLiveModel() }
-            }
-        }
-        return nil
+    /// The machine as it stands, for the three answers the wizard around the
+    /// form needs — see `SetupProgress`. Read on every ask: the permission
+    /// reads cost a round trip each, and `ThisTurn` is what keeps a redraw
+    /// from paying for them more than once.
+    var progress: SetupProgress {
+        let prompt = LiveTranscriptionLanguage.prompt(for: Config.transcriptionLanguage())
+        let live = Config.liveTranscriptionEnabled()
+        return SetupProgress(SetupProgress.Machine(
+            loginItem: LoginItem.status(),
+            microphone: SetupPermissions.microphone(),
+            systemAudio: systemAudio,
+            missingLocalModel: localModelIsWantedAndMissing
+                ? transcriptionChoice.localEngine : nil,
+            localModelDownloading: parakeetDownload != nil || whisperDownloadTask != nil
+                || gigaAMDownloadTask != nil,
+            liveModelWanted: live,
+            liveModelReady: live && liveModelStore.isReady(language: prompt),
+            liveModelDownloading: liveDownloading,
+            summaryToolMissing: chosenSummaryIsMissing))
     }
 
+    /// What the setup window's primary button will do, or nil when there is
+    /// nothing left to offer.
+    var nextAction: (() -> Void)? {
+        switch progress.next {
+        case .startAtLogin: return { [weak self] in self?.startAtLogin() }
+        case .askMicrophone: return { [weak self] in Task { await self?.askMicrophone() } }
+        case .testSystemAudio: return { [weak self] in Task { await self?.testSystemAudio() } }
+        case .downloadLocalModel: return { [weak self] in self?.downloadLocalIfNeeded() }
+        case .downloadLiveModel: return { [weak self] in self?.downloadLiveModel() }
+        case nil: return nil
+        }
+    }
+
+    typealias Missing = SetupProgress.Missing
 
     /// What the machine still owes, in the order it has to be dealt with.
-    /// The setup window's footer is this list in a sentence and its button is
-    /// `nextAction`; all three are here so they cannot disagree.
-    var outstanding: [Missing] {
-        var left: [Missing] = []
-        if SetupPermissions.needsStartAtLogin { left.append(.startAtLogin) }
-        if SetupPermissions.microphone() != .granted { left.append(.microphone) }
-        if systemAudio != .heard { left.append(.systemAudio) }
-        if localModelIsWantedAndMissing { left.append(.parakeet) }
-        if Config.liveTranscriptionEnabled() {
-            let prompt = LiveTranscriptionLanguage.prompt(for: Config.transcriptionLanguage())
-            if !liveModelStore.isReady(language: prompt) { left.append(.liveModel) }
-        }
-        // The window used to say everything was granted while the card it had
-        // chosen to write the summaries said "not here" three inches above.
-        if chosenSummaryIsMissing { left.append(.summaryTool) }
-        return left
-    }
+    var outstanding: [Missing] { progress.outstanding }
 
-    /// One thing the machine still owes.
-    ///
-    /// A case rather than the words for it, because the words are read by a
-    /// person and the case is read by the program: the footer button asks
-    /// whether parakeet is on this list, and it asked by comparing against the
-    /// string the window was showing. That worked while there was one language
-    /// to show it in.
-    enum Missing: Sendable, Equatable {
-        case startAtLogin
-        case microphone
-        case systemAudio
-        case parakeet
-        case liveModel
-        /// Summaries are on, and whatever was chosen to write them isn't here.
-        case summaryTool
+    /// The same list in a sentence, for the footer of either window.
+    var outstandingSentence: String { progress.sentence }
 
-        var described: String {
-            switch self {
-            case .startAtLogin: return localised("start at login", "запуск при входе")
-            case .microphone: return localised("microphone", "микрофон")
-            case .systemAudio: return localised("system audio", "звук системы")
-            // A name, and names are not translated.
-            case .parakeet: return "parakeet"
-            case .liveModel:
-                return localised("live model", "модель для расшифровки на ходу")
-            case .summaryTool:
-                return localised("something to summarise with", "чем писать саммари")
-            }
-        }
-    }
-
-    /// The same list in a sentence, for whatever is showing it.
-    ///
-    /// Both windows say this, so both say it the same way: the setup window
-    /// in its footer, the settings window under the Setup tab. It says the
-    /// good news as well as the bad, because most of the time somebody opens
-    /// that tab to be reassured rather than to repair anything, and a line
-    /// that only ever appears when something is wrong leaves them counting
-    /// green ticks to find out whether it is.
-    var outstandingSentence: String { Self.sentence(for: outstanding) }
-
-    /// Separate from the machine, and `nonisolated` to say so: it reads no
-    /// permission and no file, which is what lets the three shapes of it be
-    /// tested without granting or revoking anything.
     nonisolated static func sentence(for outstanding: [Missing]) -> String {
-        let named = outstanding.map(\.described)
-        switch named.count {
-        case 0:
-            return localised(
-                "Everything amanu needs is granted.", "Всё, что нужно amanu, разрешено.")
-        case 1:
-            return localised("One thing left: ", "Осталось одно: ") + named[0]
-        default:
-            return localised("Left: ", "Осталось: ") + named.joined(separator: ", ")
-        }
+        SetupProgress.sentence(for: outstanding)
     }
 
     /// Whether a model is coming down right now — the work a host must not
     /// offer to start a second time.
-    var isDownloading: Bool {
-        liveDownloading || parakeetProgress != nil || whisperDownloadTask != nil
-            || gigaAMDownloadTask != nil
-    }
+    var isDownloading: Bool { progress.isDownloading }
 
     /// What the setup window's primary button says, given where things stand.
-    var nextActionTitle: String {
-        if SetupPermissions.needsStartAtLogin {
-            return LoginItem.status() == .needsApproval
-                ? localised("Open Login Items", "Открыть объекты входа")
-                : localised("Start at login", "Запускать при входе")
-        }
-        if SetupPermissions.microphone() == .notAsked {
-            return localised("Allow microphone", "Разрешить микрофон")
-        }
-        if SetupPermissions.needsSystemAudioTest(systemAudio) {
-            return localised("Allow and test", "Разрешить и проверить")
-        }
-        // Named separately from the live model because the two downloads
-        // can be outstanding at once, and a button that says "Download
-        // parakeet" while parakeet is downloading has nothing left to do
-        // but close the window under the person reading it.
-        if parakeetProgress != nil || whisperDownloadTask != nil || gigaAMDownloadTask != nil {
-            return localised("Downloading local model…", "Скачивается локальная модель…")
-        }
-        if outstanding.contains(.parakeet) {
-            return localised("Download local model", "Скачать локальную модель")
-        }
-        if liveDownloading {
-            return localised("Downloading live model…", "Скачивается модель…")
-        }
-        if outstanding.contains(.liveModel) {
-            return localised("Download live model", "Скачать модель")
-        }
-        return localised("Done", "Готово")
-    }
+    var nextActionTitle: String { progress.nextTitle }
+
     private func report(_ row: AccessRow, _ message: String) {
         row.update(.denied, detail: message)
-    }
-}
-
-// MARK: - one permission
-
-/// A row in the Access list: where it stands, what it's for, and the one
-/// button that changes it.
-@MainActor
-final class AccessRow: NSView, LayerTinted {
-    var onAct: (() -> Void)?
-
-    /// Whether this is the row being asked for right now; see `setAttention`.
-    private var wantsAttention = false
-
-    private let mark = NSImageView()
-    private let title: NSTextField
-    private let note = NSTextField(labelWithString: "")
-    private let detail: NSTextField
-    private let button: NSButton
-    private let stack: NSStackView
-    private let defaultDetail: String
-    private let defaultAction: String
-    private let grantedNote: String
-    private let isOptional: Bool
-
-    init(title: String, detail: String, action: String,
-         grantedNote: String = localised("granted", "разрешено"), optional: Bool = false) {
-        self.title = NSTextField(labelWithString: title)
-        self.detail = NSTextField(labelWithString: detail)
-        self.defaultDetail = detail
-        self.defaultAction = action
-        self.grantedNote = grantedNote
-        self.isOptional = optional
-        button = NSButton(title: action, target: nil, action: nil)
-        stack = NSStackView()
-        super.init(frame: .zero)
-
-        self.title.font = SetupLayout.titleFont
-        note.font = SetupLayout.detailFont
-        note.textColor = .tertiaryLabelColor
-        wantsLayer = true
-
-        self.detail.font = SetupLayout.detailFont
-        self.detail.textColor = .secondaryLabelColor
-        self.detail.lineBreakMode = .byWordWrapping
-        self.detail.maximumNumberOfLines = 3
-        self.detail.preferredMaxLayoutWidth = 460
-
-        button.bezelStyle = .rounded
-        button.controlSize = .small
-        button.target = self
-        button.action = #selector(act)
-
-        mark.widthAnchor.constraint(equalToConstant: 18).isActive = true
-
-        let heading = NSStackView(views: [self.title, note])
-        heading.orientation = .horizontal
-        heading.alignment = .firstBaseline
-        heading.spacing = 6
-
-        let text = NSStackView(views: [heading, self.detail])
-        text.orientation = .vertical
-        text.alignment = .leading
-        text.spacing = 2
-
-        for view in [mark, text, SetupLayout.spacer(), button] {
-            stack.addArrangedSubview(view)
-        }
-        stack.orientation = .horizontal
-        stack.alignment = .top
-        stack.spacing = 10
-        stack.edgeInsets = SetupLayout.rowInsets
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-        ])
-        // Every granted row carries one line and they have to look it; a row
-        // still explaining itself has to keep the inset under its last line.
-        // Both are the same arithmetic every other row gets.
-        SetupLayout.fitRowHeight(stack)
-    }
-
-    required init?(coder: NSCoder) { fatalError("not used") }
-
-    func tintLayer() {
-        layer?.backgroundColor = wantsAttention
-            ? NSColor.systemOrange.withAlphaComponent(0.12).cgColor
-            : NSColor.clear.cgColor
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        retint()
-    }
-
-    @objc private func act() { onAct?() }
-
-    /// Say that something is happening, so a button that takes a second
-    /// doesn't look like a button that did nothing.
-    func working(_ message: String) {
-        button.isEnabled = false
-        detail.stringValue = message
-    }
-
-    /// The one row the person is being asked to act on right now is tinted.
-    /// macOS shows one TCC dialog at a time, so more than one highlighted row
-    /// would be pointing at work that cannot be done yet.
-    func setAttention(_ on: Bool) {
-        wantsAttention = on
-        retint()
-        title.textColor = on ? .systemOrange : .labelColor
-        detail.textColor = on ? .systemOrange : .secondaryLabelColor
-        if on {
-            mark.image = NSImage(
-                systemSymbolName: "exclamationmark.circle",
-                accessibilityDescription: localised(
-                    "needs your attention", "требует внимания"))
-            mark.contentTintColor = .systemOrange
-        }
-    }
-
-    /// `action` keeps a button on a granted row — for the one permission
-    /// macOS will not report, where "granted" is a measurement someone may
-    /// reasonably want to take again.
-    func update(
-        _ state: SetupPermissions.State,
-        detail override: String? = nil,
-        note noteOverride: String? = nil,
-        action actionTitle: String? = nil
-    ) {
-        button.isEnabled = true
-        button.title = actionTitle ?? defaultAction
-        detail.stringValue = override ?? defaultDetail
-
-        // A granted permission is one line: the title and how it stands. The
-        // reasoning underneath is there to talk someone into granting it, and
-        // it has nothing left to say once they have.
-        let settled = state == .granted && override == nil
-        detail.isHidden = settled || detail.stringValue.isEmpty
-        // A row that is down to its title is one line, and sits in the middle
-        // of the row like one; a row still explaining itself starts at the
-        // top, beside its first line.
-        stack.alignment = detail.isHidden ? .centerY : .top
-        note.stringValue = noteOverride ?? {
-            switch state {
-            case .granted: return grantedNote
-            case .notAsked, .unknown:
-                return isOptional ? localised("optional", "не обязательно") : ""
-            case .denied: return ""
-            }
-        }()
-        note.isHidden = note.stringValue.isEmpty
-
-        switch state {
-        case .granted:
-            mark.image = NSImage(
-                systemSymbolName: "checkmark.circle",
-                accessibilityDescription: localised("granted", "разрешено"))
-            mark.contentTintColor = .systemGreen
-            button.isHidden = actionTitle == nil
-        case .denied:
-            mark.image = NSImage(
-                systemSymbolName: "exclamationmark.circle",
-                accessibilityDescription: localised("denied", "запрещено"))
-            mark.contentTintColor = .systemOrange
-            button.isHidden = false
-            button.title = localised("Open Settings", "Открыть настройки")
-        case .notAsked, .unknown:
-            mark.image = NSImage(
-                systemSymbolName: "circle.dashed",
-                accessibilityDescription: localised("not asked", "не спрашивали"))
-            mark.contentTintColor = .tertiaryLabelColor
-            button.isHidden = false
-        }
-    }
-}
-
-// MARK: - one of several
-
-/// A card in a row of mutually exclusive choices.
-@MainActor
-final class ChoiceCard: NSView, LayerTinted {
-    let id: String
-    var onSelect: ((String) -> Void)?
-
-    private let radio = NSImageView()
-    private let titleLabel: NSTextField
-    private let statusLabel = NSTextField(labelWithString: "")
-    private var linkButton: NSButton?
-    private var selected = false
-
-    /// What the machine last said about this card. Set through `report`,
-    /// which is also told whether that was good news.
-    private(set) var status: String = "" {
-        didSet {
-            statusLabel.stringValue = status
-            statusLabel.isHidden = status.isEmpty
-            colourStatus()
-        }
-    }
-
-    /// Say what the machine answered, and whether it was the answer somebody
-    /// wanted.
-    ///
-    /// Good news used to be recognised by matching the words — anything
-    /// starting with "answers", "downloaded", "key works" or "running" was
-    /// green. That is a rule that only reads one language: translate the
-    /// statuses and every card in the window goes grey, which is a defect
-    /// nothing would have failed on. The caller knows the answer it just got;
-    /// it says so.
-    func report(_ text: String, good: Bool = false) {
-        works = good
-        status = text
-    }
-
-    /// Whether the last thing the machine said about this card was good news.
-    private var works = false
-
-    /// An unchosen card may report "not here" in passing — it is one of the
-    /// options, and that is what there is to say about it. The chosen one may
-    /// not: that is the meeting that will come back without a summary, so it
-    /// is said in the colour of something to attend to.
-    private func colourStatus() {
-        statusLabel.textColor = works
-            ? .systemGreen
-            : (selected ? .systemOrange : .secondaryLabelColor)
-    }
-
-    var isEnabled: Bool = true {
-        didSet { alphaValue = isEnabled ? 1 : 0.45 }
-    }
-
-    var isSelected: Bool {
-        get { selected }
-        set {
-            selected = newValue
-            radio.image = NSImage(
-                systemSymbolName: newValue ? "largecircle.fill.circle" : "circle",
-                accessibilityDescription: newValue
-                    ? localised("chosen", "выбрано")
-                    : localised("not chosen", "не выбрано"))
-            radio.contentTintColor = newValue ? .controlAccentColor : .tertiaryLabelColor
-            layer?.borderWidth = newValue ? 1.5 : 1
-            retint()
-            colourStatus()
-        }
-    }
-
-    init(id: String, title: String, detail: String, accessories: [NSView] = [],
-         compact: Bool = false) {
-        self.id = id
-        titleLabel = NSTextField(labelWithString: title)
-        super.init(frame: .zero)
-
-        titleLabel.font = SetupLayout.titleFont
-        radio.symbolConfiguration = .init(pointSize: 15, weight: .regular)
-        radio.widthAnchor.constraint(equalToConstant: 17).isActive = true
-        isSelected = false
-
-        let heading = NSStackView(views: [radio, titleLabel])
-        heading.orientation = .horizontal
-        heading.alignment = .firstBaseline
-        heading.spacing = 7
-
-        let detailLabel = NSTextField(labelWithString: detail)
-        detailLabel.font = SetupLayout.detailFont
-        detailLabel.textColor = .secondaryLabelColor
-        detailLabel.lineBreakMode = compact ? .byTruncatingTail : .byWordWrapping
-        detailLabel.maximumNumberOfLines = compact ? 1 : 4
-        detailLabel.preferredMaxLayoutWidth = 190
-
-        statusLabel.font = SetupLayout.statusFont
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.lineBreakMode = .byTruncatingMiddle
-        statusLabel.isHidden = true
-
-        linkButton = accessories.compactMap { $0 as? NSButton }.last { $0.bezelStyle == .inline }
-
-        wantsLayer = true
-        layer?.cornerRadius = SetupLayout.corner
-        layer?.borderWidth = 1
-        retint()
-
-        let stack = compact
-            ? NSStackView(
-                views: [heading, detailLabel, SetupLayout.spacer(), statusLabel] + accessories)
-            : NSStackView(views: [heading, detailLabel, statusLabel] + accessories)
-        stack.orientation = compact ? .horizontal : .vertical
-        stack.alignment = compact ? .centerY : .leading
-        stack.spacing = compact ? 8 : 7
-        stack.edgeInsets = compact ? SetupLayout.rowInsets : SetupLayout.cardInsets
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-        ])
-        guard !compact else {
-            // A compact card is a row, and rows state their own height here
-            // rather than inheriting whatever the stack settles on — the same
-            // arithmetic `SetupLayout.row` gets, so there is one answer to
-            // this question in the window and not two.
-            SetupLayout.fitRowHeight(stack)
-            return
-        }
-        for accessory in accessories where !(accessory is NSButton) {
-            accessory.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20).isActive = true
-        }
-    }
-
-    required init?(coder: NSCoder) { fatalError("not used") }
-
-    func tintLayer() {
-        layer?.borderColor = selected
-            ? NSColor.controlAccentColor.cgColor
-            : NSColor.separatorColor.withAlphaComponent(0.6).cgColor
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        retint()
-    }
-
-    /// The install link only belongs on a card for something that isn't here.
-    func showLink(_ show: Bool) { linkButton?.isHidden = !show }
-
-    /// `hitTest` is asked in the *superview's* coordinates, so the test has to
-    /// be against `frame`. Against `bounds` it silently answers "not mine" for
-    /// every card that isn't at the origin of its row — which is how a row of
-    /// three cards ends up with only the leftmost one responding to a click.
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        guard !isHidden, frame.contains(point) else { return nil }
-        guard let hit = super.hitTest(point) else { return self }
-        if hit === self || containsInteractiveControl(hit) { return hit }
-        return self
-    }
-
-    private func containsInteractiveControl(_ hit: NSView) -> Bool {
-        var view: NSView? = hit
-        while let current = view, current !== self {
-            if current is NSButton || current is NSSegmentedControl {
-                return true
-            }
-            if let field = current as? NSTextField, field.isEditable {
-                return true
-            }
-            view = current.superview
-        }
-        return false
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        guard isEnabled else { return }
-        onSelect?(id)
-    }
-}
-
-/// A set of cards where exactly one is chosen. AppKit only groups radio
-/// buttons that share a superview, and these deliberately don't — so the
-/// grouping is done here, in the open.
-@MainActor
-private final class ChoiceGroup {
-    private(set) var cards: [ChoiceCard] = []
-    var onChange: ((String) -> Void)?
-
-    var selected: String? { cards.first { $0.isSelected }?.id }
-
-    func adopt(_ cards: [ChoiceCard]) {
-        self.cards = cards
-        for card in cards {
-            card.onSelect = { [weak self] id in
-                self?.select(id)
-                self?.onChange?(id)
-            }
-        }
-    }
-
-    func card(_ id: String) -> ChoiceCard? { cards.first { $0.id == id } }
-
-    func select(_ id: String?) {
-        for card in cards { card.isSelected = card.id == id }
     }
 }
