@@ -104,6 +104,23 @@ struct OpenAIEngineTests {
             for: MeetingLanguages.expected(primary: "en")) == "en")
     }
 
+    /// A response is only reused for the audio it came from: every piece of a
+    /// sliced meeting has its own, and none of them is the whole meeting's —
+    /// a first piece answered from the whole meeting's cache would carry an
+    /// hour of text for three minutes of audio.
+    @Test("Every piece of a sliced meeting has its own cached response")
+    func cacheNames() async throws {
+        let engine = try OpenAITranscriptionEngine(apiKey: "test-key")
+        let folder = URL(fileURLWithPath: "/tmp/meeting")
+        let audio = folder.appendingPathComponent("mixed.m4a")
+        var pieces: [URL] = []
+        for index in 0..<3 {
+            pieces.append(await engine.cacheURL(in: folder, audio: audio, piece: index, of: 3))
+        }
+        #expect(Set(pieces).count == 3)
+        #expect(!pieces.contains(await engine.cacheURL(in: folder, audio: audio, piece: 0, of: 1)))
+    }
+
     /// 25 MB is the API's ceiling; the pieces have to come in under it with
     /// room for a bitrate that isn't perfectly constant.
     @Test("Slice length keeps every piece under the request limit")

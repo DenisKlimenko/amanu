@@ -69,6 +69,9 @@ final class SettingsWindow: NSObject, NSTextFieldDelegate {
     private let outstanding = NSTextField(labelWithString: "")
     private let restartNotice = NSTextField(labelWithString: "")
     private let strayKeys = NSTextField(labelWithString: "")
+    /// What is wrong with the file, said once for both tabs — which is why
+    /// the form on the Setup tab is told not to say it too.
+    private let configProblems = NSTextField(labelWithString: "")
 
     /// One rendered setting: the entry it came from and the control showing
     /// it. The control's `tag` is this row's index, which is how an action
@@ -103,7 +106,7 @@ final class SettingsWindow: NSObject, NSTextFieldDelegate {
             "Advanced", localised("Advanced", "Дополнительно"),
             holding: SetupLayout.scroller(around: advancedForm())))
 
-        for label in [restartNotice, strayKeys] {
+        for label in [configProblems, restartNotice, strayKeys] {
             label.font = .systemFont(ofSize: 11)
             label.textColor = .secondaryLabelColor
             label.lineBreakMode = .byWordWrapping
@@ -111,6 +114,7 @@ final class SettingsWindow: NSObject, NSTextFieldDelegate {
             label.isHidden = true
         }
         strayKeys.textColor = .systemOrange
+        configProblems.textColor = .systemOrange
 
         let path = NSTextField(labelWithString: Config.path.path)
         path.font = .systemFont(ofSize: 11)
@@ -128,7 +132,7 @@ final class SettingsWindow: NSObject, NSTextFieldDelegate {
 
         // Under both tabs, because both write the same file: whichever tab
         // someone is on, this is where what they changed ended up.
-        let footer = NSStackView(views: [restartNotice, strayKeys, pathLine])
+        let footer = NSStackView(views: [configProblems, restartNotice, strayKeys, pathLine])
         footer.orientation = .vertical
         footer.alignment = .leading
         footer.spacing = 6
@@ -154,6 +158,7 @@ final class SettingsWindow: NSObject, NSTextFieldDelegate {
         // finished downloading. The line is only true if it follows all of
         // them, and this is the seam the form already had.
         setup.onStateChange = { [weak self] in self?.showOutstanding() }
+        setup.showsConfigProblems = false
         showOutstanding()
 
         panel.setFrameAutosaveName("amanu.settings")
@@ -627,6 +632,9 @@ final class SettingsWindow: NSObject, NSTextFieldDelegate {
             }
         }
         showStrayKeys(in: config)
+        let problems = Config.problems()
+        configProblems.stringValue = problems.map(\.explanation).joined(separator: "\n")
+        configProblems.isHidden = problems.isEmpty
         // Last, because it reads the disk rather than the file, and because
         // what it lists depends on `transcription.model` just above it.
         refreshModels()

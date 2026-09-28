@@ -4,8 +4,9 @@ import Foundation
 /// what it does, what it defaults to, and whether changing it takes effect now
 /// or at the next launch.
 ///
-/// One list, two readers — the settings window renders it, and the README's
-/// config reference is written against it. The point is that nothing is
+/// One list, three readers — the settings window renders it, `Config` takes
+/// its defaults from it and reads only the keys it names (`Config.Key`), and
+/// the README's config reference is written against it. The point is that nothing is
 /// secret: a setting that exists but appears in no window and no README is a
 /// setting nobody will ever find. The window follows automatically; the README
 /// is prose, so `SettingsDocumentationTests` is what keeps it honest.
@@ -38,6 +39,11 @@ enum SettingsSchema {
         /// without having to set it — which is what lets an untouched config
         /// file stay empty and still be readable.
         let defaultValue: Any
+        /// Whether `defaultValue` is the value amanu uses when the key is
+        /// absent — which `Config` then reads from here rather than writing
+        /// it a second time — or only words saying what happens instead:
+        /// "the language of the meeting", "the account's full name".
+        let hasValueDefault: Bool
         /// True when the value is only read at startup. Saying so beats a
         /// user changing a switch and quietly getting nothing.
         let needsRestart: Bool
@@ -70,6 +76,28 @@ enum SettingsSchema {
             self.help = help
             self.kind = kind
             self.defaultValue = defaultValue
+            self.hasValueDefault = true
+            self.needsRestart = needsRestart
+            self.askedInSetup = askedInSetup
+        }
+
+        /// A setting whose absence is not a value but a behaviour, shown in
+        /// the window as a sentence about it.
+        init(
+            _ path: [String],
+            _ label: String,
+            _ help: String,
+            _ kind: Kind,
+            describedAs description: String,
+            needsRestart: Bool = false,
+            askedInSetup: Bool = false
+        ) {
+            self.path = path
+            self.label = label
+            self.help = help
+            self.kind = kind
+            self.defaultValue = description
+            self.hasValueDefault = false
             self.needsRestart = needsRestart
             self.askedInSetup = askedInSetup
         }
@@ -85,7 +113,11 @@ enum SettingsSchema {
     /// and a choice of engines with only one real option in it — settings that
     /// lie are worse than settings that are missing.
     private static var localModelEntries: [Entry] {
-        guard Platform.supportsLocalModels else {
+        localModelEntries(supported: Platform.supportsLocalModels)
+    }
+
+    private static func localModelEntries(supported: Bool) -> [Entry] {
+        guard supported else {
             return [
                 Entry(["transcription", "engine"], localised("Engine", "Движок"),
                       localised(
@@ -111,7 +143,7 @@ enum SettingsSchema {
                           "Двухбуквенный код языка, на котором в основном идут встречи. Вместе с ним "
                               + "ожидается английский, а какой язык прозвучал, решает сам движок."),
                       .text,
-                      default: localised(
+                      describedAs: localised(
                           "detected from any language", "определяется, язык любой")),
             ]
         }
@@ -146,7 +178,7 @@ enum SettingsSchema {
                       "Двухбуквенный код языка, на котором в основном идут встречи. Вместе с ним "
                           + "ожидается английский, а какой язык прозвучал, решают сами движки."),
                   .text,
-                  default: localised(
+                  describedAs: localised(
                       "detected from any language", "определяется, язык любой")),
             Entry(["transcription", "model"], localised("Parakeet model", "Модель parakeet"),
                   localised(
@@ -219,7 +251,7 @@ enum SettingsSchema {
                       "Префиксы bundle id, которые считаются звонком. Пусто — любое приложение, "
                           + "открывшее микрофон."),
                   .list,
-                  default: localised(
+                  describedAs: localised(
                       "known call apps and browsers", "известные звонилки и браузеры")),
             Entry(["auto_record", "ignore_apps"],
                   localised("Never count these", "Никогда не считать звонком"),
@@ -227,7 +259,7 @@ enum SettingsSchema {
                       "Bundle ids or app names that never start a recording, whatever they do with the mic.",
                       "Bundle id или имена приложений, которые не начинают запись, что бы они ни "
                           + "делали с микрофоном."),
-                  .list, default: localised("empty", "пусто")),
+                  .list, describedAs: localised("empty", "пусто")),
         ]),
 
         Section(title: localised("Audio", "Звук"), entries: [
@@ -260,7 +292,7 @@ enum SettingsSchema {
                   .toggle, default: false, askedInSetup: true),
             Entry(["recordings_dir"], localised("Recordings folder", "Папка записей"),
                   localised("Where sessions land.", "Куда складываются встречи."),
-                  .text, default: "~/Recordings", needsRestart: true, askedInSetup: true),
+                  .text, describedAs: "~/Recordings", needsRestart: true, askedInSetup: true),
         ]),
 
         Section(title: localised("Transcription", "Расшифровка"), entries: [
@@ -283,13 +315,13 @@ enum SettingsSchema {
                   localised(
                       "Where the cloud engine's key is read from. ASSEMBLYAI_API_KEY wins over it.",
                       "Откуда читается ключ облачного движка. ASSEMBLYAI_API_KEY важнее."),
-                  .text, default: "~/.config/amanu/keys/assemblyai"),
+                  .text, describedAs: "~/.config/amanu/keys/assemblyai"),
             Entry(["transcription", "assemblyai", "speech_model"],
                   localised("AssemblyAI speech model", "Модель речи AssemblyAI"),
                   localised(
                       "Empty sends nothing and lets the API pick its own default.",
                       "Пусто — ничего не отправляется, и API выбирает сам."),
-                  .text, default: localised("the API's own default", "выбор самого API")),
+                  .text, describedAs: localised("the API's own default", "выбор самого API")),
             Entry(["transcription", "openai", "model"], localised("OpenAI model", "Модель OpenAI"),
                   localised(
                       "The default is the only OpenAI model that returns both timings and speakers.",
@@ -301,7 +333,7 @@ enum SettingsSchema {
                   localised(
                       "Where the ElevenLabs key is read from. ELEVENLABS_API_KEY wins over it.",
                       "Откуда читается ключ ElevenLabs. ELEVENLABS_API_KEY важнее."),
-                  .text, default: "~/.config/amanu/keys/elevenlabs"),
+                  .text, describedAs: "~/.config/amanu/keys/elevenlabs"),
         ]),
 
         Section(title: localised("Summaries", "Саммари"), entries: [
@@ -353,7 +385,7 @@ enum SettingsSchema {
                   localised(
                       "Leave empty to write in whichever language the meeting was held in.",
                       "Пусто — саммари пишется на языке самой встречи."),
-                  .text, default: localised("the language of the meeting", "язык встречи")),
+                  .text, describedAs: localised("the language of the meeting", "язык встречи")),
             Entry(["summary", "template"],
                   localised("Summary template", "Шаблон саммари"),
                   localised(
@@ -365,13 +397,13 @@ enum SettingsSchema {
                   localised(
                       "Where the Anthropic key is read from. ANTHROPIC_API_KEY wins over it.",
                       "Откуда читается ключ Anthropic. ANTHROPIC_API_KEY важнее."),
-                  .text, default: "~/.config/amanu/keys/anthropic"),
+                  .text, describedAs: "~/.config/amanu/keys/anthropic"),
             Entry(["summary", "openai_api_key_path"],
                   localised("OpenAI key file", "Файл ключа OpenAI"),
                   localised(
                       "Where the OpenAI key is read from. OPENAI_API_KEY wins over it.",
                       "Откуда читается ключ OpenAI. OPENAI_API_KEY важнее."),
-                  .text, default: "~/.config/amanu/keys/openai"),
+                  .text, describedAs: "~/.config/amanu/keys/openai"),
         ]),
 
         Section(title: localised("Calendar and naming", "Календарь и имена"), entries: [
@@ -397,7 +429,7 @@ enum SettingsSchema {
                       "Ставится вместо «me». Пусто — берётся полное имя учётной записи, а если оно не "
                           + "похоже на имя человека, остаётся «me»."),
                   .text,
-                  default: localised(
+                  describedAs: localised(
                       "the account's full name", "полное имя учётной записи")),
             Entry(["speaker_names", "backend"],
                   localised("Which model to ask", "У какой модели спрашивать"),
@@ -411,7 +443,7 @@ enum SettingsSchema {
                   localised(
                       "Naming is an easier job than summarizing; empty uses the summary's model.",
                       "Имена — работа проще саммари; пусто — та же модель, что у саммари."),
-                  .text, default: localised("the summary's model", "модель саммари")),
+                  .text, describedAs: localised("the summary's model", "модель саммари")),
         ]),
 
         Section(title: localised("Interface", "Интерфейс"), entries: [
@@ -455,7 +487,7 @@ enum SettingsSchema {
                       "A shell command, given the session folder as its argument, after the transcript and summary are written.",
                       "Команда оболочки; получает папку встречи аргументом после того, как записаны "
                           + "расшифровка и саммари."),
-                  .text, default: localised("nothing", "ничего")),
+                  .text, describedAs: localised("nothing", "ничего")),
         ]),
         Section(title: localised("Statistics", "Статистика"), entries: [
             Entry(["analytics"],
@@ -468,6 +500,49 @@ enum SettingsSchema {
                   .toggle, default: true, askedInSetup: true),
         ]),
     ] }
+
+    /// Every entry, including the Apple Silicon ones on a Mac that does not
+    /// show them: those settings are still read there — see
+    /// `unrenderedLocalModelKeys` — and a read needs its default and its kind.
+    static var everyEntry: [Entry] {
+        let shown = sections.flatMap(\.entries)
+        let paths = Set(shown.map(\.path))
+        return shown + localModelEntries(supported: true).filter { !paths.contains($0.path) }
+    }
+
+    // MARK: - defaults as values
+
+    /// A default as `Config` uses it.
+    enum ValueDefault: Sendable, Equatable {
+        case flag(Bool)
+        case number(Double)
+        case string(String)
+    }
+
+    /// What a setting is when the file does not say, for the entries whose
+    /// default is a value — nil for the ones described in words, and for a
+    /// key the schema does not have.
+    static func valueDefault(for key: Config.Key) -> ValueDefault? {
+        valueDefaults[key.rawValue]
+    }
+
+    /// Built once. Only the defaults that are values go in, and none of those
+    /// is ever translated — a switch is on in every language — so the
+    /// language in force when this is first asked for makes no difference.
+    private static let valueDefaults: [String: ValueDefault] = {
+        var defaults: [String: ValueDefault] = [:]
+        for entry in everyEntry where entry.hasValueDefault {
+            let key = entry.path.joined(separator: ".")
+            switch (entry.kind, entry.defaultValue) {
+            case (.toggle, let value as Bool): defaults[key] = .flag(value)
+            case (.number, let value as Int): defaults[key] = .number(Double(value))
+            case (.number, let value as Double): defaults[key] = .number(value)
+            case (_, let value as String): defaults[key] = .string(value)
+            default: assertionFailure("\(key) has a default of the wrong type")
+            }
+        }
+        return defaults
+    }()
 
     /// `sections` minus what setup already asks, which is what the Advanced
     /// tab draws. A section emptied by the filter is dropped with it rather

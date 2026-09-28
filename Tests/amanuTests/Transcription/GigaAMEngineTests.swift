@@ -59,21 +59,7 @@ struct GigaAMEngineTests {
     private func makeAudio(seconds: Double) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("amanu-gigaam-audio-\(UUID().uuidString).caf")
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: 16_000,
-            channels: 1,
-            interleaved: false)!
-        let file = try AVAudioFile(
-            forWriting: url,
-            settings: AudioFormats.pcmSettings(sampleRate: 16_000, channels: 1),
-            commonFormat: format.commonFormat,
-            interleaved: false)
-        let frames = AVAudioFrameCount((seconds * 16_000).rounded())
-        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
-        buffer.frameLength = frames
-        for frame in 0..<Int(frames) { buffer.floatChannelData![0][frame] = 0.2 }
-        try file.write(from: buffer)
+        try TestAudio.write(to: url, seconds: seconds, sampleRate: 16_000) { _, _ in 0.2 }
         return url
     }
 }

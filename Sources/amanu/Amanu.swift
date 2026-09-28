@@ -498,6 +498,14 @@ final class AppController {
     /// form, which is in two windows; whichever one is used, the others have
     /// to agree.
     private var configWatch: ConfigWatch.Token?
+    /// Hears edits made to the config file from outside — above all the one
+    /// that fixes a file amanu could not read.
+    private var configDiskWatch: ConfigWatch.DiskWatch?
+    /// Whether the config file was unreadable the last time anybody looked,
+    /// so that its becoming readable again is acted on once: the sessions
+    /// held while it was broken are still in the folder and need offering to
+    /// the queue again.
+    private var configWasUnreadable = false
     private var recordRequestObserver: NSObjectProtocol?
     private var activateObserver: NSObjectProtocol?
     private var sleepObserver: NSObjectProtocol?
@@ -592,11 +600,14 @@ final class AppController {
         configWatch = ConfigWatch.observe { [weak self] in
             self?.window.updateLivePreference(enabled: Config.liveTranscriptionEnabled())
             self?.applyIconPreferences()
+            self?.showConfigProblems()
             // auto_record.enabled is written by Settings, the setup form, the
             // menu and the status window alike, and obeyed from here.
             self?.autoRecord.reloadSettings()
             self?.showAutoRecord()
         }
+        configDiskWatch = ConfigWatch.DiskWatch()
+        showConfigProblems()
         setupRequestObserver = SetupRequest.observe { [weak self] in self?.showSetup() }
         activateObserver = SingleInstance.observe { [weak self] in self?.showWindow() }
         // A recording does not go on across a sleep. The Mac only sleeps
@@ -988,6 +999,22 @@ final class AppController {
         case .failed(let name):
             return localised("transcription failed · \(name)",
                              "не удалось расшифровать · \(name)")
+        }
+    }
+
+    /// Say what is wrong with the config file, and pick up the work held
+    /// while it could not be read once it can.
+    private func showConfigProblems() {
+        let problems = Config.problems()
+        menuBar.updateConfigProblem(problems.first?.headline)
+        window.updateConfigProblem(problems.first?.headline)
+
+        let unreadable = Config.unreadableReason != nil
+        defer { configWasUnreadable = unreadable }
+        guard configWasUnreadable, !unreadable, automaticFeaturesStarted else { return }
+        Task { [transcription, root] in
+            await transcription.resumePending(root: root)
+            await PostProcessor.sweep(root: root)
         }
     }
 

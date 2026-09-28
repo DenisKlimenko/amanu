@@ -25,7 +25,8 @@ application and its command line; `make app` wraps the binary in `Amanu.app`.
 ```sh
 make app                                 # build + sign .build/Amanu.app
 cp -R .build/Amanu.app /Applications/    # replace the installed copy
-swift test                               # full suite; screenshot tests are opt-in
+swift test                               # full suite; screenshot tests are opt-in,
+                                         # LocalVQE tests skip until `make localvqe`
 ```
 
 Quit the running app before replacing `/Applications/Amanu.app` — deleting a

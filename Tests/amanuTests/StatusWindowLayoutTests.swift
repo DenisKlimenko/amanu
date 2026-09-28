@@ -18,18 +18,13 @@ import Testing
 /// which is only one of the ways it has gone wrong.
 @Suite(.serialized)
 struct StatusWindowLayoutTests {
-    @Test("Live speaker labels use the adaptive label colour")
+    @Test("Live speaker labels use the adaptive label colour", .speaking(.english))
     @MainActor
     func liveSpeakerLabelsFollowTheAppearance() throws {
         _ = NSApplication.shared
         let previousAppearance = NSApp.appearance
-        let previousLanguage = InterfaceLanguage.current
         NSApp.appearance = NSAppearance(named: .darkAqua)
-        InterfaceLanguage.current = .english
-        defer {
-            NSApp.appearance = previousAppearance
-            InterfaceLanguage.current = previousLanguage
-        }
+        defer { NSApp.appearance = previousAppearance }
 
         let window = StatusWindow()
         let panel = try #require(window.view?.window)

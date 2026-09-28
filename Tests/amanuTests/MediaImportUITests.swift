@@ -15,7 +15,7 @@ struct MediaImportUITests {
         let recordings = RecordingsWindow(root: root)
 
         for view in [status.view, recordings.view] {
-            let button = try #require(descendants(of: view).compactMap { $0 as? NSButton }
+            let button = try #require((view?.allDescendants ?? []).compactMap { $0 as? NSButton }
                 .first { $0.identifier?.rawValue == "choose-media-import" })
             #expect(button.title == "Import…")
             #expect(button.target != nil)
@@ -72,9 +72,4 @@ struct MediaImportUITests {
     }
 
 
-    @MainActor
-    private func descendants(of view: NSView?) -> [NSView] {
-        guard let view else { return [] }
-        return view.subviews + view.subviews.flatMap { descendants(of: $0) }
-    }
 }

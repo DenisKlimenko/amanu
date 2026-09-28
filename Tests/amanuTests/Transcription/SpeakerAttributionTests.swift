@@ -17,50 +17,22 @@ struct SpeakerAttributionTests {
         gain: Float,
         rate: Double = 48000.0
     ) throws {
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false)!
-        let file = try AVAudioFile(
-            forWriting: url,
-            settings: [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: rate,
-                AVNumberOfChannelsKey: 1,
-            ],
-            commonFormat: .pcmFormatFloat32,
-            interleaved: false)
-
-        let chunk = AVAudioFrameCount(4800)
-        var frame = 0
-        let total = Int(seconds * rate)
-        while frame < total {
-            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunk)!
-            let n = min(Int(chunk), total - frame)
-            buffer.frameLength = AVAudioFrameCount(n)
-            let data = buffer.floatChannelData![0]
-            for i in 0..<n {
-                let t = Double(frame + i) / rate
-                let live = bursts.contains { t >= $0.0 && t < $0.1 }
-                data[i] = live ? gain * Float(sin(2 * .pi * 220 * t)) : 0
-            }
-            try file.write(from: buffer)
-            frame += n
+        let aac: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: rate,
+            AVNumberOfChannelsKey: 1,
+        ]
+        try TestAudio.write(to: url, seconds: seconds, sampleRate: rate, settings: aac) { _, frame in
+            let t = Double(frame) / rate
+            let live = bursts.contains { t >= $0.0 && t < $0.1 }
+            return live ? gain * Float(sin(2 * .pi * 220 * t)) : 0
         }
     }
 
     /// A 16 kHz PCM track shaped exactly like OfflineEchoAudio's output.
     private static func writeEchoCancelledTrack(to url: URL, seconds: Double) throws {
-        let rate = 16_000.0
-        let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1)!
-        let file = try AVAudioFile(
-            forWriting: url, settings: AudioFormats.pcmSettings(sampleRate: rate, channels: 1))
-        let frames = AVAudioFrameCount(seconds * rate)
-        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
-        buffer.frameLength = frames
-        let data = buffer.floatChannelData![0]
-        for i in 0..<Int(frames) {
-            data[i] = 0.1 * Float(sin(2 * .pi * 220 * Double(i) / rate))
-        }
-        try file.write(from: buffer)
+        try TestAudio.writeTone(
+            to: url, seconds: seconds, frequency: 220, amplitude: 0.1, sampleRate: 16_000)
     }
 
     /// mic speaks 0–2s and 6–8s; system speaks 2.5–4.5s in its own timeline

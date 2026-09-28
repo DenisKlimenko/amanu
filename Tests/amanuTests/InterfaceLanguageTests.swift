@@ -7,10 +7,10 @@ import Testing
 /// How the windows decide what language to be in, and whether anything in
 /// them was left behind in the other one.
 ///
-/// The suite is serialised and puts the language back where it found it: the
-/// language is one value for the whole program, and a test that changed it
-/// underneath another would fail the other one for reasons that have nothing
-/// to do with it.
+/// Each test builds its Russian windows inside `InterfaceLanguage.$scoped`,
+/// which is one task's language rather than the program's: the suite used to
+/// switch the whole process and put it back, and a test elsewhere running in
+/// that moment read Russian where it expected English.
 @Suite(.serialized)
 struct InterfaceLanguageTests {
     /// Every branch of the decision, without a config file or a Mac set to
@@ -50,6 +50,30 @@ struct InterfaceLanguageTests {
     @Test("A test process is in English, whatever the Mac it runs on is in")
     func testsAreEnglish() {
         #expect(InterfaceLanguage.current == .english)
+    }
+
+    /// Why that stays true while this suite builds Russian windows in
+    /// parallel with every other suite: the Russian is this task's, and
+    /// nobody else's.
+    @Test("A test's Russian stays in the test")
+    func scopedLanguageStaysScoped() async {
+        await InterfaceLanguage.$scoped.withValue(.russian) {
+            #expect(localised("idle", "не записывает") == "не записывает")
+            await Task.detached {
+                #expect(localised("idle", "не записывает") == "idle")
+            }.value
+        }
+        #expect(InterfaceLanguage.current == .english)
+    }
+
+    /// And the old way of doing it — setting the process's language and
+    /// putting it back — is refused where it is written, rather than showing
+    /// up as a flake in whichever test happened to be running beside it.
+    @Test("A test cannot switch the whole process's language")
+    func settingTheProcessLanguageStops() async {
+        await #expect(processExitsWith: .failure) {
+            InterfaceLanguage.current = .russian
+        }
     }
 
     /// The one that would actually catch a sentence left untranslated.
@@ -318,6 +342,11 @@ struct InterfaceLanguageTests {
             window.update(state: state, elapsed: "1:23")
             read()
         }
+        // The reason is the parser's own and stays in English; the sentence
+        // around it is what has to change.
+        window.updateConfigProblem(Config.Problem.unreadable(reason: "1").headline)
+        read()
+        window.updateConfigProblem(nil)
         window.updateTranscription(nil)
         window.updateAutoRecord(enabled: true, decision: nil)
 
@@ -398,6 +427,7 @@ struct InterfaceLanguageTests {
         menuBar.updatesAvailable(true)
         menuBar.setupAvailable(true)
         menuBar.updateAutoRecord(enabled: true, decision: "amanu")
+        menuBar.updateConfigProblem(Config.Problem.unreadable(reason: "1").headline)
 
         var found: [String] = []
         for state in [MenuBarController.State.idle, .recording, .paused] {
@@ -494,11 +524,10 @@ struct InterfaceLanguageTests {
         return found
     }
 
+    /// Scoped to this test's own task, so a Russian window here cannot put a
+    /// Russian sentence in front of a test on another thread.
     private static func inLanguage<T>(_ language: InterfaceLanguage, _ body: () -> T) -> T {
-        let previous = InterfaceLanguage.current
-        InterfaceLanguage.current = language
-        defer { InterfaceLanguage.current = previous }
-        return body()
+        InterfaceLanguage.$scoped.withValue(language) { body() }
     }
 
     /// Everything in the form a person can read, in the order the views are
@@ -576,11 +605,5 @@ struct InterfaceLanguageTests {
         // slash between them — says the same thing in every language.
         if !text.contains(where: \.isLetter) { return true }
         return false
-    }
-}
-
-private extension NSView {
-    var allDescendants: [NSView] {
-        subviews + subviews.flatMap(\.allDescendants)
     }
 }

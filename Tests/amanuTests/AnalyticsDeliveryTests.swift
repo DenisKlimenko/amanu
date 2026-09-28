@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import amanu
 
-@Suite("Analytics wire delivery", .serialized)
+@Suite("Analytics wire delivery")
 struct AnalyticsDeliveryTests {
     private let now = Date(timeIntervalSince1970: 1_800_000_000.875)
 
@@ -21,7 +21,7 @@ struct AnalyticsDeliveryTests {
     }
 
     @Test("Both new and queued events send whole Unix seconds, including identify entries")
-    func integerTimestamps() throws {
+    func integerTimestamps() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -30,10 +30,10 @@ struct AnalyticsDeliveryTests {
         let capture = Capture()
         let sink = AnalyticsSink(store: store, transport: { body in capture.keep(body); return .retry },
                                  clock: { now }, switchIsOn: { true }, identity: { ("test-installation", false) },
-                                 appVersion: { nil })
+                                 appVersion: { nil }, schedulesSends: false)
         sink.start(surface: .app)
         sink.record(.recordingFinished, [:])
-        sink.flush(waitingUpTo: 2)
+        await sink.flush()
         let request = try #require(capture.requests.first)
         let entries = try #require(JSONSerialization.jsonObject(with: request) as? [[String: Any]])
         #expect(entries.count == 4)
@@ -46,7 +46,7 @@ struct AnalyticsDeliveryTests {
     }
 
     @Test("A full persistent queue never exceeds Umami's 500-entry batch limit")
-    func boundedBatch() throws {
+    func boundedBatch() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -55,9 +55,9 @@ struct AnalyticsDeliveryTests {
         let capture = Capture()
         let sink = AnalyticsSink(store: store, transport: { body in capture.keep(body); return .retry },
                                  clock: { now }, switchIsOn: { true }, identity: { ("test-installation", false) },
-                                 appVersion: { nil })
+                                 appVersion: { nil }, schedulesSends: false)
         sink.start(surface: .app)
-        sink.flush(waitingUpTo: 2)
+        await sink.flush()
         let request = try #require(capture.requests.first)
         let entries = try #require(JSONSerialization.jsonObject(with: request) as? [[String: Any]])
         #expect(entries.count <= 500)
@@ -96,7 +96,7 @@ struct AnalyticsDeliveryTests {
     }
 
     @Test("Partial receipts survive restart and retry neither accepted events nor accepted identities")
-    func partialReceiptSurvivesRestart() throws {
+    func partialReceiptSurvivesRestart() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -105,17 +105,17 @@ struct AnalyticsDeliveryTests {
         let partial = Data(#"{"size":4,"processed":2,"errors":2,"details":[{"index":0,"response":{"error":{"status":500}}},{"index":3,"response":{"error":{"status":400}}}],"cache":"test-receipt"}"#.utf8)
         var first: AnalyticsSink? = AnalyticsSink(store: store, transport: { _ in
             AnalyticsSink.deliveryResponse(status: 200, data: partial, sentCount: 4)
-        }, clock: { now }, switchIsOn: { true }, identity: { ("test-installation", false) }, appVersion: { nil })
+        }, clock: { now }, switchIsOn: { true }, identity: { ("test-installation", false) }, appVersion: { nil }, schedulesSends: false)
         first?.start(surface: .app)
-        first?.flush(waitingUpTo: 2)
+        await first?.flush()
         #expect(first?.bufferedCount == 2)
         first = nil
         let capture = Capture()
         let next = AnalyticsSink(store: store, transport: { body in capture.keep(body); return .all },
                                  clock: { now }, switchIsOn: { true }, identity: { ("test-installation", false) },
-                                 appVersion: { nil })
+                                 appVersion: { nil }, schedulesSends: false)
         next.start(surface: .app)
-        next.flush(waitingUpTo: 2)
+        await next.flush()
         #expect(next.bufferedCount == 0)
         let request = try #require(capture.requests.first)
         let entries = try #require(JSONSerialization.jsonObject(with: request) as? [[String: Any]])
@@ -128,7 +128,7 @@ struct AnalyticsDeliveryTests {
     }
 
     @Test("A full queue drains as two accepted requests and persists no remaining events")
-    func fullQueueDrains() throws {
+    func fullQueueDrains() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -136,26 +136,26 @@ struct AnalyticsDeliveryTests {
         try JSONSerialization.data(withJSONObject: ["pending": (0..<500).map(event)]).write(to: store)
         let capture = Capture()
         let sink = AnalyticsSink(store: store, transport: { body in capture.keep(body); return .all },
-                                 clock: { now }, switchIsOn: { true }, identity: { ("test-installation", false) }, appVersion: { nil })
+                                 clock: { now }, switchIsOn: { true }, identity: { ("test-installation", false) }, appVersion: { nil }, schedulesSends: false)
         sink.start(surface: .app)
-        sink.flush(waitingUpTo: 5)
+        await sink.flush()
         #expect(sink.bufferedCount == 0)
         let sizes = try capture.requests.map { try #require(JSONSerialization.jsonObject(with: $0) as? [Any]).count }
         #expect(sizes == [500, 500])
     }
 
     @Test("Rejected HTTP-200 batches remain on disk for a later retry")
-    func rejectedBatchPersists() throws {
+    func rejectedBatchPersists() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = root.appendingPathComponent("queue.json")
         let response = Data(#"{"size":2,"processed":0,"errors":2,"details":[{"index":0,"response":{"error":{"status":400}}},{"index":1,"response":{"error":{"status":400}}}],"cache":"test-receipt"}"#.utf8)
         let sink = AnalyticsSink(store: store, transport: { _ in
             AnalyticsSink.deliveryResponse(status: 200, data: response, sentCount: 2)
-        }, clock: { now }, switchIsOn: { true }, identity: { ("test-installation", false) }, appVersion: { nil })
+        }, clock: { now }, switchIsOn: { true }, identity: { ("test-installation", false) }, appVersion: { nil }, schedulesSends: false)
         sink.start(surface: .app)
         sink.record(.recordingStarted, [:])
-        sink.flush(waitingUpTo: 2)
+        await sink.flush()
         #expect(sink.bufferedCount == 1)
         let saved = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: store)) as? [String: Any])
         #expect((saved["pending"] as? [Any])?.count == 1)
@@ -163,7 +163,7 @@ struct AnalyticsDeliveryTests {
 
     @Test("The real Umami endpoint acknowledges a fractional legacy event after wire normalization",
           .enabled(if: ProcessInfo.processInfo.environment["AMANU_ANALYTICS_TEST_WEBSITE"] != nil))
-    func liveUmamiContract() throws {
+    func liveUmamiContract() async throws {
         let website = try #require(ProcessInfo.processInfo.environment["AMANU_ANALYTICS_TEST_WEBSITE"])
         try #require(UUID(uuidString: website) != nil && website != AnalyticsSink.Endpoint.websiteID)
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -178,9 +178,9 @@ struct AnalyticsDeliveryTests {
         try JSONSerialization.data(withJSONObject: ["pending": [fixture]]).write(to: store)
         // Default transport: production URLSession, HTTP headers, encoder and
         // receipt parser. A dedicated website keeps user metrics untouched.
-        let sink = AnalyticsSink(store: store, switchIsOn: { true }, identity: { (id, false) }, appVersion: { nil })
+        let sink = AnalyticsSink(store: store, switchIsOn: { true }, identity: { (id, false) }, appVersion: { nil }, schedulesSends: false)
         sink.start(surface: .cli)
-        sink.flush(waitingUpTo: 15)
+        await sink.flush()
         #expect(sink.bufferedCount == 0)
     }
 

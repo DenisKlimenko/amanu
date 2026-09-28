@@ -273,6 +273,29 @@ configuration. There is no environment variable to remember; the test in
 `NativeAppTests` — *"A bare build has no bundle to post banners under"* — is
 what keeps that true.
 
+## Tests have a home of their own
+
+Everything under `~` that amanu reads or writes — the config file, setup and
+analytics state, the key drawer, the shared key files, the API keys in the
+environment, the tools a login shell finds and the models they reach — goes
+through `Home.current`. In a test process that is a sandbox, decided by the
+code being linked into an `.xctest` bundle, so no test reads the developer's
+config or reaches their `claude`. `SandboxTests` is the pin, in the same
+spirit as the banner test.
+
+A path built from `FileManager.default.homeDirectoryForCurrentUser`, or a key
+read from `ProcessInfo.processInfo.environment`, walks straight past it and is
+the bug coming back. So does `expandingTildeInPath`, which always means the
+real home; `Home.current.expanding` means the current one.
+
+A test that wants a particular config says so with `.freshHome(config:)` or
+`withFreshHome`, which scope a directory of its own through a task-local.
+Task-locals do not reach `Task.detached` or a dispatch queue: work that hops
+onto one reads the shared sandbox instead — never the real home, but not the
+test's config either. The interface language works the same way:
+`InterfaceLanguage.$scoped`, or `.speaking(_:)`, and setting the process-wide
+value from a test stops the run.
+
 ## A `CGColor` is a number, not a colour
 
 `NSColor.separatorColor` is a rule that answers differently in light and dark;

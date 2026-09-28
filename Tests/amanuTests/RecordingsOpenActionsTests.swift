@@ -17,8 +17,9 @@ struct RecordingsOpenActionsTests {
         try Data("{}".utf8).write(to: session.appendingPathComponent("meta.json"))
 
         let window = RecordingsWindow(root: root)
-        let table = try #require(descendants(of: window.view).compactMap { $0 as? NSTableView }.first)
-        let button = try #require(descendants(of: window.view).compactMap { $0 as? NSButton }
+        let views = window.view?.allDescendants ?? []
+        let table = try #require(views.compactMap { $0 as? NSTableView }.first)
+        let button = try #require(views.compactMap { $0 as? NSButton }
             .first { $0.identifier?.rawValue == "open-transcript" })
         table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         #expect(!button.isEnabled)
@@ -90,9 +91,4 @@ struct RecordingsOpenActionsTests {
         #expect(try String(contentsOf: file, encoding: .utf8).contains("Hello, team."))
     }
 
-    @MainActor
-    private func descendants(of view: NSView?) -> [NSView] {
-        guard let view else { return [] }
-        return view.subviews + view.subviews.flatMap { descendants(of: $0) }
-    }
 }

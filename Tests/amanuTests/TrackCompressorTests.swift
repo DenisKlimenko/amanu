@@ -181,31 +181,10 @@ struct TrackCompressorTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         let rate = 48000.0
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32, sampleRate: rate,
-            channels: channels, interleaved: false)!
-        let file = try AVAudioFile(
-            forWriting: dir.appendingPathComponent("mic.caf"),
-            settings: AudioFormats.pcmSettings(sampleRate: rate, channels: channels),
-            commonFormat: format.commonFormat,
-            interleaved: format.isInterleaved)
-
-        let chunk = AVAudioFrameCount(4800)
-        var written = 0
-        let total = Int(seconds * rate)
-        while written < total {
-            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunk)!
-            let n = min(Int(chunk), total - written)
-            buffer.frameLength = AVAudioFrameCount(n)
-            for channel in 0..<Int(channels) {
-                let data = buffer.floatChannelData![channel]
-                for i in 0..<n {
-                    data[i] = 0.4 * Float(sin(2 * .pi * 220 * Double(written + i) / rate))
-                }
-            }
-            try file.write(from: buffer)
-            written += n
-        }
+        try TestAudio.write(
+            to: dir.appendingPathComponent("mic.caf"), seconds: seconds, sampleRate: rate,
+            channels: channels
+        ) { _, frame in 0.4 * Float(sin(2 * .pi * 220 * Double(frame) / rate)) }
 
         try JSONSerialization
             .data(withJSONObject: [

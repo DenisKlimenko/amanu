@@ -20,6 +20,12 @@ logs to a public issue. Follow [SECURITY.md](SECURITY.md) for vulnerabilities.
 - A failed transcription keeps its audio. Check the session's `transcribe.log`
   locally, correct the backend/key problem, then use Re-transcribe. Avoid
   posting the log publicly without removing personal information.
+- If `~/.config/amanu/config.json` stops being valid JSON — a hand edit with
+  a stray comma — Amanu keeps recording but holds transcription and
+  summaries, sends no statistics, and refuses to save settings over the file.
+  The menu, the windows and `amanu doctor` say so. Fix the file, or move it
+  aside to start from the defaults; the held recordings are picked up as soon
+  as it can be read.
 - Intel Macs require a cloud transcription key; local Parakeet transcription
   requires Apple Silicon. A universal binary is available, but physical Intel
   hardware has not been validated.

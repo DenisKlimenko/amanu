@@ -234,26 +234,12 @@ struct MediaImportTests {
         channels: AVAudioChannelCount = 1
     ) throws {
         let rate = 16_000.0
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32, sampleRate: rate,
-            channels: channels, interleaved: false)!
-        let file = try AVAudioFile(
-            forWriting: url,
-            settings: AudioFormats.pcmSettings(sampleRate: rate, channels: channels),
-            commonFormat: format.commonFormat,
-            interleaved: format.isInterleaved)
-        let total = Int(seconds * rate)
-        let buffer = AVAudioPCMBuffer(
-            pcmFormat: format, frameCapacity: AVAudioFrameCount(total))!
-        buffer.frameLength = AVAudioFrameCount(total)
-        for channel in 0..<Int(channels) {
-            let samples = buffer.floatChannelData![channel]
-            for index in 0..<total {
-                let frequency = channel == 0 ? 440.0 : 660.0
-                samples[index] = 0.3 * Float(sin(2 * .pi * frequency * Double(index) / rate))
-            }
+        try TestAudio.write(
+            to: url, seconds: seconds, sampleRate: rate, channels: channels
+        ) { channel, frame in
+            let frequency = channel == 0 ? 440.0 : 660.0
+            return 0.3 * Float(sin(2 * .pi * frequency * Double(frame) / rate))
         }
-        try file.write(from: buffer)
     }
 
     /// 200 ms of a generated black H.264 frame plus an AAC sine tone. Keeping

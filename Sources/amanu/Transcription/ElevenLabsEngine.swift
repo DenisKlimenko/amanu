@@ -64,11 +64,7 @@ actor ElevenLabsEngine: TranscriptionEngine {
         var all: [TranscriptSegment] = []
         for index in 0..<channels {
             let channel: Int? = channels > 1 ? index : nil
-            let cache = ProviderCache.url(
-                in: audio.deletingLastPathComponent(), provider: .elevenLabs,
-                parts: [audio.lastPathComponent, model]
-                    + Self.requestFields().map { "\($0.0)=\($0.1)" },
-                suffix: channel.map { "channel\($0 + 1)" })
+            let cache = cacheURL(for: audio, channel: channel)
             let response: Response
             if let cached = try? Data(contentsOf: cache),
                let decoded = try? JSONDecoder().decode(Response.self, from: cached) {
@@ -103,6 +99,16 @@ actor ElevenLabsEngine: TranscriptionEngine {
         }
         guard !all.isEmpty else { throw EngineError.empty }
         return all.sorted { $0.start < $1.start }
+    }
+
+    /// Where one channel's response is cached: named for the audio, the
+    /// model and every field sent with it.
+    func cacheURL(for audio: URL, channel: Int?) -> URL {
+        ProviderCache.url(
+            in: audio.deletingLastPathComponent(), provider: .elevenLabs,
+            parts: [audio.lastPathComponent, model]
+                + Self.requestFields().map { "\($0.0)=\($0.1)" },
+            suffix: channel.map { "channel\($0 + 1)" })
     }
 
     static func requestFields() -> [(String, String)] {

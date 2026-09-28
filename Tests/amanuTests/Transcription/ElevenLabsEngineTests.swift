@@ -71,6 +71,20 @@ struct ElevenLabsEngineTests {
         #expect(ElevenLabsEngine.EngineError.empty.isPermanent)
     }
 
+    @Test("Each channel has a separate response cache")
+    func channelCachesAreDistinct() async throws {
+        let engine = try ElevenLabsEngine(apiKey: "test-key")
+        let folder = URL(fileURLWithPath: "/tmp/meeting")
+        let multichannel = folder.appendingPathComponent("multichannel.m4a")
+        let names = [
+            await engine.cacheURL(for: multichannel, channel: 0),
+            await engine.cacheURL(for: multichannel, channel: 1),
+            await engine.cacheURL(for: multichannel, channel: nil),
+            await engine.cacheURL(for: folder.appendingPathComponent("mixed.m4a"), channel: nil),
+        ]
+        #expect(Set(names).count == names.count, "two requests would share a cache: \(names)")
+    }
+
     @Test("The upload is multipart audio with Scribe's fields")
     func uploadBodyContainsAudioAndFields() throws {
         let dir = FileManager.default.temporaryDirectory

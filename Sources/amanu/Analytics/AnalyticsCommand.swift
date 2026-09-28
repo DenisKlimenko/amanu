@@ -16,6 +16,14 @@ struct AnalyticsCommand: ParsableCommand {
     var state: String?
 
     func run() throws {
+        // Said before anything else, because a switch that cannot be saved is
+        // a switch that did nothing. Off is what a broken file already means,
+        // so there is nothing to refuse there beyond the saving.
+        if state != nil, let reason = Config.unreadableReason {
+            throw ValidationError(
+                "\(Config.path.path) can't be read (\(reason)), so nothing can be saved in it. "
+                    + "Fix it or move it aside, then run this again. Until then analytics is off.")
+        }
         if let state {
             switch state.lowercased() {
             case "on":

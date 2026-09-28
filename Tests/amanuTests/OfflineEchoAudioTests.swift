@@ -66,14 +66,7 @@ struct OfflineEchoAudioTests {
     }
 
     private func write(_ url: URL, rate: Double = 16000, channels: [[Float]]) throws {
-        let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: AVAudioChannelCount(channels.count))!
-        let file = try AVAudioFile(forWriting: url, settings: AudioFormats.pcmSettings(sampleRate: rate, channels: AVAudioChannelCount(channels.count)))
-        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(channels[0].count))!
-        buffer.frameLength = buffer.frameCapacity
-        for (c, samples) in channels.enumerated() {
-            buffer.floatChannelData![c].update(from: samples, count: samples.count)
-        }
-        try file.write(from: buffer)
+        try TestAudio.write(to: url, sampleRate: rate, samples: channels)
     }
 
     private func read(_ url: URL) throws -> [Float] {

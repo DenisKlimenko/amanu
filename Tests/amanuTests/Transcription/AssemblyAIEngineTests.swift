@@ -63,6 +63,21 @@ struct AssemblyAIEngineTests {
         #expect(detection["fallback_language"] as? String == "ru")
     }
 
+    @Test("Multichannel responses never reuse a cache made from a mono mix")
+    func multichannelCacheHasItsOwnName() async throws {
+        let folder = URL(fileURLWithPath: "/tmp/meeting")
+        let audio = folder.appendingPathComponent("multichannel.m4a")
+        let engine = try AssemblyAIEngine(apiKey: "test-key")
+        let cache = await engine.cacheURL(for: audio, multichannel: true)
+        // What a session transcribed from a mono mix, before multichannel,
+        // left behind — and what must never be read back as this one's answer.
+        let legacy = folder.appendingPathComponent("transcript.assemblyai.json")
+        #expect(cache.path != legacy.path)
+        #expect(cache != (await engine.cacheURL(for: audio, multichannel: false)))
+        // Beside the audio it was made from, so it goes wherever the session goes.
+        #expect(cache.deletingLastPathComponent().path == folder.path)
+    }
+
     /// The server's verdict on a silent recording, verbatim from the call that
     /// found this: a nineteen-second join with nobody speaking.
     @Test("A server-side verdict of no speech is permanent")

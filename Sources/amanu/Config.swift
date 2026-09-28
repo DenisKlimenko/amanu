@@ -33,20 +33,19 @@ enum Config {
 
     /// The configured recordings root, or nil if no config file / no key.
     static func recordingsDir() -> URL? {
-        guard let dir = load()?["recordings_dir"] as? String, !dir.isEmpty else { return nil }
+        guard let dir = text(.recordingsDir, in: load()) else { return nil }
         return Home.current.expanding(dir, isDirectory: true)
     }
 
     /// Shell command to spawn once a session is finished — transcript, names
     /// and summary — or right after recording, if transcription is disabled.
     static func onStop() -> String? {
-        guard let cmd = load()?["on_stop"] as? String, !cmd.isEmpty else { return nil }
-        return cmd
+        text(.onStop, in: load())
     }
 
     /// Whether finished recordings are transcribed automatically. Default on.
     static func transcriptionEnabled() -> Bool {
-        transcription()?["enabled"] as? Bool ?? true
+        flag(.transcriptionEnabled, in: load())
     }
 
     /// Configured engine: `auto` (default), a local engine, or a cloud
@@ -59,19 +58,20 @@ enum Config {
     /// network nor account, so it is what should catch a session recorded on
     /// a train.
     static func transcriptionEngine() -> String {
-        transcription()?["engine"] as? String ?? "auto"
+        string(.transcriptionEngine, in: load())
     }
 
     /// Which local engine `auto` falls back to. Kept separately for the same
     /// reason as the cloud provider: both cloud and local may be enabled, so
     /// the single `engine` value cannot remember both choices.
     static func transcriptionLocalEngine() -> String {
-        let configured = transcription()?["local_engine"] as? String ?? "parakeet"
+        let configured = string(.transcriptionLocalEngine, in: load())
         guard localEngines.contains(configured) else {
+            let fallback = defaultString(.transcriptionLocalEngine)
             FileHandle.standardError.write(Data(
-                "warning: unknown local engine \"\(configured)\" — using parakeet\n".utf8
+                "warning: unknown local engine \"\(configured)\" — using \(fallback)\n".utf8
             ))
-            return "parakeet"
+            return fallback
         }
         return configured
     }
@@ -85,12 +85,13 @@ enum Config {
     /// leave this Mac", provider cards for "to whom". Turning the switch off
     /// and on again should not lose the answer to the second one.
     static func transcriptionCloudProvider() -> String {
-        let configured = transcription()?["cloud"] as? String ?? "assemblyai"
+        let configured = string(.transcriptionCloud, in: load())
         guard cloudEngines.contains(configured) else {
+            let fallback = defaultString(.transcriptionCloud)
             FileHandle.standardError.write(Data(
-                "warning: unknown cloud engine \"\(configured)\" — using assemblyai\n".utf8
+                "warning: unknown cloud engine \"\(configured)\" — using \(fallback)\n".utf8
             ))
-            return "assemblyai"
+            return fallback
         }
         return configured
     }
@@ -104,16 +105,13 @@ enum Config {
     /// that returns timings and speakers; the setting exists for the day they
     /// ship a better one, not as a menu to browse.
     static func openAITranscriptionModel() -> String {
-        guard let model = (transcription()?["openai"] as? [String: Any])?["model"] as? String,
-              !model.isEmpty
-        else { return "gpt-4o-transcribe-diarize" }
-        return model
+        string(.transcriptionOpenAIModel, in: load())
     }
 
     /// Parakeet model version: "v3" (multilingual, default) or "v2"
     /// (English-only, marginally higher recall on English).
     static func transcriptionModel() -> String {
-        transcription()?["model"] as? String ?? "v3"
+        string(.transcriptionModel, in: load())
     }
 
     /// Two-letter code for the language meetings are *mostly* in, e.g. "ru".
@@ -123,8 +121,7 @@ enum Config {
     /// shortlist whatever this says — see `MeetingLanguages`. nil means no
     /// expectation at all.
     static func transcriptionLanguage() -> String? {
-        guard let code = transcription()?["language"] as? String, !code.isEmpty else { return nil }
-        return code
+        text(.transcriptionLanguage, in: load())
     }
 
     /// Whether a meeting should feed the optional local streaming model while
@@ -141,8 +138,7 @@ enum Config {
 
     static func liveTranscriptionEnabled(in json: [String: Any]?) -> Bool {
         guard Platform.supportsLocalModels else { return false }
-        let settings = json?["live_transcription"] as? [String: Any]
-        return settings?["enabled"] as? Bool ?? false
+        return flag(.liveTranscription, in: json)
     }
 
     /// amanu's own key drawer: one directory, mode 0700, one file per
@@ -200,10 +196,9 @@ enum Config {
            !env.trimmed.isEmpty {
             return env.trimmed
         }
-        if let inline = assemblyAI()?["api_key"] as? String, !inline.trimmed.isEmpty {
-            return inline.trimmed
-        }
-        if let configured = (assemblyAI()?["api_key_path"] as? String)
+        let json = load()
+        if let inline = text(.assemblyAIKey, in: json) { return inline.trimmed }
+        if let configured = (value(.assemblyAIKeyPath, in: json) as? String)
             .map({ Home.current.expanding($0) }) {
             return secret(at: configured)
         }
@@ -213,14 +208,7 @@ enum Config {
     /// Override AssemblyAI's default speech model. nil sends nothing and lets
     /// the API pick.
     static func assemblyAISpeechModel() -> String? {
-        guard let model = assemblyAI()?["speech_model"] as? String, !model.isEmpty else {
-            return nil
-        }
-        return model
-    }
-
-    private static func assemblyAI() -> [String: Any]? {
-        transcription()?["assemblyai"] as? [String: Any]
+        text(.assemblyAISpeechModel, in: load())
     }
 
     static func elevenLabsKey() -> String? {
@@ -228,19 +216,13 @@ enum Config {
            !env.trimmed.isEmpty {
             return env.trimmed
         }
-        let settings = transcription()?["elevenlabs"] as? [String: Any]
-        if let inline = settings?["api_key"] as? String, !inline.trimmed.isEmpty {
-            return inline.trimmed
-        }
-        if let configured = (settings?["api_key_path"] as? String)
+        let json = load()
+        if let inline = text(.elevenLabsKey, in: json) { return inline.trimmed }
+        if let configured = (value(.elevenLabsKeyPath, in: json) as? String)
             .map({ Home.current.expanding($0) }) {
             return secret(at: configured)
         }
         return secret(at: elevenLabsKeyPath) ?? secret(atAnyOf: elevenLabsSharedKeyPaths)
-    }
-
-    private static func transcription() -> [String: Any]? {
-        load()?["transcription"] as? [String: Any]
     }
 
     /// Apple voice processing (acoustic echo cancellation) on the mic, so
@@ -259,7 +241,7 @@ enum Config {
     /// The same decision against supplied JSON, so an absent key's behavior is
     /// testable without reading or rewriting the person's real config file.
     static func micVoiceProcessing(in config: [String: Any]?) -> Bool {
-        config?["mic_voice_processing"] as? Bool ?? false
+        flag(.micVoiceProcessing, in: config)
     }
 
     /// Whether the transcript merge drops mic segments that duplicate
@@ -268,13 +250,13 @@ enum Config {
     /// to keep every segment from both tracks. Runs on per-track and
     /// multichannel transcripts; a mixed transcript has no duplicate segment.
     static func transcriptEchoFilter() -> Bool {
-        load()?["transcript_echo_filter"] as? Bool ?? true
+        flag(.transcriptEchoFilter, in: load())
     }
 
     /// Clean a derived microphone file before ASR without opening a playback
     /// device. Originals and the user's live call audio are never processed.
     static func offlineEchoCancellation() -> Bool {
-        load()?["offline_echo_cancellation"] as? Bool ?? true
+        flag(.offlineEchoCancellation, in: load())
     }
 
     // MARK: - speaker names
@@ -284,17 +266,14 @@ enum Config {
     /// Unset falls back to the machine's account name, but only when that
     /// reads as a person's name — see `SpeakerNamer.personName`.
     static func userName() -> String? {
-        guard let name = load()?["user_name"] as? String, !name.trimmed.isEmpty else {
-            return nil
-        }
-        return name.trimmed
+        text(.userName, in: load())?.trimmed
     }
 
     /// Putting real names to the transcript's mechanical speaker labels.
     struct SpeakerNamesSettings {
-        var enabled = true
+        var enabled = Config.defaultFlag(.speakerNamesEnabled)
         /// Which model to ask, in `LLMBackend`'s vocabulary.
-        var backend = "auto"
+        var backend = Config.defaultString(.speakerNamesBackend)
         /// Anthropic model for this pass specifically. nil uses the summary's,
         /// which is the strong one — fine, but naming is an easier job than
         /// summarizing and doesn't need to cost the same.
@@ -302,11 +281,11 @@ enum Config {
     }
 
     static func speakerNames() -> SpeakerNamesSettings {
+        let json = load()
         var settings = SpeakerNamesSettings()
-        guard let json = load()?["speaker_names"] as? [String: Any] else { return settings }
-        if let v = json["enabled"] as? Bool { settings.enabled = v }
-        if let v = json["backend"] as? String, !v.isEmpty { settings.backend = v }
-        if let v = json["model"] as? String, !v.isEmpty { settings.model = v }
+        settings.enabled = flag(.speakerNamesEnabled, in: json)
+        settings.backend = string(.speakerNamesBackend, in: json)
+        settings.model = text(.speakerNamesModel, in: json)
         return settings
     }
 
@@ -321,11 +300,11 @@ enum Config {
     /// and two independent backstops — silence and a hard cap — end a session
     /// no matter what the mic says.
     struct AutoRecordSettings {
-        var enabled = true
-        var micActivity = true
-        var calendar = false
+        var enabled = Config.defaultFlag(.autoRecordEnabled)
+        var micActivity = Config.defaultFlag(.autoRecordMicActivity)
+        var calendar = Config.defaultFlag(.autoRecordCalendar)
         /// How long a call app must hold the mic before this is a meeting.
-        var startDelay: TimeInterval = 12
+        var startDelay: TimeInterval = Config.defaultNumber(.autoRecordStartDelay)
         /// How long nobody may hold the mic before the meeting is over.
         ///
         /// Short, because the condition is already strong: the call app has
@@ -341,15 +320,15 @@ enum Config {
         /// mid-call) is a second or two, nowhere near that; an app that closes
         /// the input for longer would still fool this, and nobody has measured
         /// one.
-        var stopDelay: TimeInterval = 15
+        var stopDelay: TimeInterval = Config.defaultNumber(.autoRecordStopDelay)
         /// Auto-recordings shorter than this are deleted, not transcribed.
-        var minDuration: TimeInterval = 45
+        var minDuration: TimeInterval = Config.defaultNumber(.autoRecordMinDuration)
         /// Hard ceiling on any auto-recording.
-        var maxDuration: TimeInterval = 300 * 60
+        var maxDuration: TimeInterval = Config.defaultNumber(.autoRecordMaxDuration) * 60
         /// Silence on *both* tracks for this long ends the session regardless
         /// of who holds the mic. The backstop that would have caught
         /// mygranola's overnight 15-hour run.
-        var silenceStop: TimeInterval = 10 * 60
+        var silenceStop: TimeInterval = Config.defaultNumber(.autoRecordSilenceStop) * 60
         /// Bundle-id prefixes that count as a call. Empty means any process.
         var callApps: [String] = MicActivityMonitor.defaultCallApps
         /// Extra bundle ids / process names to never count.
@@ -357,21 +336,20 @@ enum Config {
     }
 
     static func autoRecord() -> AutoRecordSettings {
+        let json = load()
         var settings = AutoRecordSettings()
-        guard let json = load()?["auto_record"] as? [String: Any] else { return settings }
-
-        if let v = json["enabled"] as? Bool { settings.enabled = v }
-        if let v = json["mic_activity"] as? Bool { settings.micActivity = v }
-        if let v = json["calendar"] as? Bool { settings.calendar = v }
-        if let v = json["start_delay_seconds"] as? Double { settings.startDelay = v }
-        if let v = json["stop_delay_seconds"] as? Double { settings.stopDelay = v }
-        if let v = json["min_duration_seconds"] as? Double { settings.minDuration = v }
-        if let v = json["max_duration_minutes"] as? Double { settings.maxDuration = v * 60 }
-        if let v = json["silence_stop_minutes"] as? Double { settings.silenceStop = v * 60 }
+        settings.enabled = flag(.autoRecordEnabled, in: json)
+        settings.micActivity = flag(.autoRecordMicActivity, in: json)
+        settings.calendar = flag(.autoRecordCalendar, in: json)
+        settings.startDelay = number(.autoRecordStartDelay, in: json)
+        settings.stopDelay = number(.autoRecordStopDelay, in: json)
+        settings.minDuration = number(.autoRecordMinDuration, in: json)
+        settings.maxDuration = number(.autoRecordMaxDuration, in: json) * 60
+        settings.silenceStop = number(.autoRecordSilenceStop, in: json) * 60
         // An explicit empty list is meaningful here ("count any app"), so this
         // reads presence rather than non-emptiness.
-        if let v = json["apps"] as? [String] { settings.callApps = v }
-        if let v = json["ignore_apps"] as? [String] { settings.ignoreApps = v }
+        if let v = list(.autoRecordApps, in: json) { settings.callApps = v }
+        if let v = list(.autoRecordIgnoreApps, in: json) { settings.ignoreApps = v }
         return settings
     }
 
@@ -387,7 +365,7 @@ enum Config {
     /// identified: recording too much is a small wrong, recording nothing is
     /// the wrong that loses the meeting.
     static func systemAudioScope() -> String {
-        load()?["system_audio"] as? String ?? "app"
+        string(.systemAudio, in: load())
     }
 
     /// Read the calendar to name sessions after the meeting they belong to.
@@ -398,7 +376,7 @@ enum Config {
     /// depend on your calendar being an accurate description of what you're
     /// actually doing.
     static func useCalendar() -> Bool {
-        load()?["calendar"] as? Bool ?? true
+        flag(.calendar, in: load())
     }
 
     /// Show amanu in the Dock (and in ⌘-Tab) rather than running as a
@@ -406,7 +384,7 @@ enum Config {
     /// item when it runs out of room, and a recorder whose only indicator can
     /// silently disappear is a recorder you can't trust.
     static func dockIcon() -> Bool {
-        load()?["dock_icon"] as? Bool ?? true
+        flag(.dockIcon, in: load())
     }
 
     /// Show amanu's feather in the menu bar, with the clock beside it while a
@@ -416,13 +394,13 @@ enum Config {
     /// from Spotlight or from Applications, which reaches the copy already
     /// running rather than starting a second one.
     static func menuBarIcon() -> Bool {
-        load()?["menu_bar_icon"] as? Bool ?? true
+        flag(.menuBarIcon, in: load())
     }
 
     /// Open the status window at launch. Off for anyone who'd rather start
     /// from the Dock icon each time.
     static func showWindowAtLaunch() -> Bool {
-        load()?["window"] as? Bool ?? true
+        flag(.window, in: load())
     }
 
     /// What language amanu's own windows are written in: `auto` (default,
@@ -436,10 +414,7 @@ enum Config {
     /// the one setting here that is about amanu's own words. See
     /// `InterfaceLanguage`.
     static func interfaceLanguage() -> String? {
-        guard let value = load()?["interface_language"] as? String, !value.isEmpty else {
-            return nil
-        }
-        return value
+        text(.interfaceLanguage, in: load())
     }
 
     /// Whether the audio outlives the transcript it was recorded for.
@@ -456,7 +431,7 @@ enum Config {
     /// failed keeps its audio whatever this says — that recording is the only
     /// copy of the meeting, and the next attempt is all it has.
     static func keepAudio() -> Bool {
-        load()?["keep_audio"] as? Bool ?? false
+        flag(.keepAudio, in: load())
     }
 
     // MARK: - summary
@@ -465,21 +440,21 @@ enum Config {
     /// LLMBackend: the local `claude` CLI, the Anthropic API, the `codex` CLI,
     /// the OpenAI API, then ollama — subscriptions before metered keys.
     struct SummarySettings {
-        var enabled = true
-        var backend = "auto"
+        var enabled = Config.defaultFlag(.summaryEnabled)
+        var backend = Config.defaultString(.summaryBackend)
         /// Summarizing is where a cheap model quietly costs you something:
         /// a missed decision in a meeting you'll never listen to again. The
         /// difference between tiers is a few cents per meeting, so the default
         /// is the strong one.
-        var openAIModel = "gpt-5"
-        var openAIBaseURL = "https://api.openai.com/v1"
+        var openAIModel = Config.defaultString(.summaryOpenAIModel)
+        var openAIBaseURL = Config.defaultString(.summaryOpenAIBaseURL)
         /// Language for the summary itself; the transcript's own language is
         /// whatever was spoken. nil means "same language as the meeting".
         var language: String?
-        var model = "claude-opus-5"
-        var ollamaModel = "qwen3:8b"
-        var ollamaBaseURL = "http://127.0.0.1:11434"
-        var template = SummaryTemplate.default
+        var model = Config.defaultString(.summaryModel)
+        var ollamaModel = Config.defaultString(.summaryOllamaModel)
+        var ollamaBaseURL = Config.defaultString(.summaryOllamaBaseURL)
+        var template = Config.defaultString(.summaryTemplate)
         var apiKeyPath: URL?
     }
 
@@ -492,24 +467,16 @@ enum Config {
     /// config file.
     static func summary(in root: [String: Any]?) -> SummarySettings {
         var settings = SummarySettings()
-        guard let json = root?["summary"] as? [String: Any] else { return settings }
-
-        if let v = json["enabled"] as? Bool { settings.enabled = v }
-        if let v = json["backend"] as? String, !v.isEmpty { settings.backend = v }
-        if let v = json["language"] as? String, !v.isEmpty { settings.language = v }
-        if let v = json["model"] as? String, !v.isEmpty { settings.model = v }
-        if let v = json["ollama_model"] as? String, !v.isEmpty { settings.ollamaModel = v }
-        if let v = json["openai_model"] as? String, !v.isEmpty { settings.openAIModel = v }
-        if let v = json["openai_base_url"] as? String, !v.trimmed.isEmpty {
-            settings.openAIBaseURL = v.trimmed
-        }
-        if let v = json["ollama_base_url"] as? String, !v.trimmed.isEmpty {
-            settings.ollamaBaseURL = v.trimmed
-        }
-        if let v = json["template"] as? String, !v.trimmed.isEmpty { settings.template = v }
-        if let v = json["api_key_path"] as? String, !v.isEmpty {
-            settings.apiKeyPath = Home.current.expanding(v)
-        }
+        settings.enabled = flag(.summaryEnabled, in: root)
+        settings.backend = string(.summaryBackend, in: root)
+        settings.language = text(.summaryLanguage, in: root)
+        settings.model = string(.summaryModel, in: root)
+        settings.ollamaModel = string(.summaryOllamaModel, in: root)
+        settings.openAIModel = string(.summaryOpenAIModel, in: root)
+        settings.openAIBaseURL = string(.summaryOpenAIBaseURL, in: root).trimmed
+        settings.ollamaBaseURL = string(.summaryOllamaBaseURL, in: root).trimmed
+        settings.template = string(.summaryTemplate, in: root)
+        settings.apiKeyPath = text(.summaryKeyPath, in: root).map { Home.current.expanding($0) }
         return settings
     }
 
@@ -520,15 +487,11 @@ enum Config {
            !env.trimmed.isEmpty {
             return env.trimmed
         }
-        if let configured = (summaryJSON()?["openai_api_key_path"] as? String)
+        if let configured = (value(.summaryOpenAIKeyPath, in: load()) as? String)
             .map({ Home.current.expanding($0) }) {
             return secret(at: configured)
         }
         return secret(at: openAIKeyPath) ?? secret(atAnyOf: openAISharedKeyPaths)
-    }
-
-    private static func summaryJSON() -> [String: Any]? {
-        load()?["summary"] as? [String: Any]
     }
 
     /// Anthropic key, in order: ANTHROPIC_API_KEY, a token file named by
@@ -542,28 +505,102 @@ enum Config {
         return secret(at: anthropicKeyPath) ?? secret(atAnyOf: anthropicSharedKeyPaths)
     }
 
+    // MARK: - the file itself
+
+    /// What is at `path`, told apart the three ways that matter.
+    ///
+    /// "No file" and "a file nobody can parse" used to be one answer, and every
+    /// getter fell back to its default for both. For no file that is right.
+    /// For a broken one it switched analytics back on for somebody who had
+    /// turned it off and sent meetings to the cloud for somebody who had
+    /// chosen a local engine — and the next write from any window replaced
+    /// the whole file with the one key it was changing, which is how a stray
+    /// comma would have cost somebody every setting they had.
+    enum File {
+        case absent
+        case parsed([String: Any])
+        /// There is a file and it is not a JSON object; the reason is the
+        /// parser's own, for the person who has to find the comma.
+        case unreadable(reason: String)
+    }
+
+    static func file() -> File {
+        let url = path
+        guard FileManager.default.fileExists(atPath: url.path) else { return .absent }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            return .unreadable(reason: error.localizedDescription)
+        }
+        // An empty file holds no decisions to lose, and refusing to write into
+        // one would make `touch config.json` a trap.
+        if String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return .parsed([:])
+        }
+        do {
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return .unreadable(reason: "it is not a JSON object")
+            }
+            return .parsed(json)
+        } catch {
+            let parser = (error as NSError).userInfo[NSDebugDescriptionErrorKey] as? String
+            return .unreadable(reason: parser ?? error.localizedDescription)
+        }
+    }
+
+    /// Why the file cannot be read, or nil when it can — or when there is no
+    /// file, which is a perfectly good config.
+    static var unreadableReason: String? {
+        if case .unreadable(let reason) = file() { return reason }
+        return nil
+    }
+
+    /// What anything that could send a meeting somewhere throws while the
+    /// file cannot be read.
+    ///
+    /// The whole pipeline after recording waits rather than only the cloud
+    /// half of it: which engine is local and whether a summary is wanted are
+    /// both answers in the file that cannot be read, and the defaults that
+    /// stand in for them are `auto` and on. Recording itself needs none of
+    /// that and goes on as normal; the sessions stay in the folder, which is
+    /// the queue, and are picked up when the file can be read again.
+    struct Unreadable: Error, CustomStringConvertible {
+        let reason: String
+
+        var description: String {
+            "config.json can't be read (\(reason)) — transcription and summaries wait until it can"
+        }
+    }
+
+    static func requireReadable() throws {
+        if let reason = unreadableReason { throw Unreadable(reason: reason) }
+    }
+
     /// Parse the config file. A malformed config is reported on stderr rather
     /// than silently ignored — recordings landing in an unexpected place is
     /// worse than a warning.
     private static func load() -> [String: Any]? {
-        guard FileManager.default.fileExists(atPath: path.path) else { return nil }
-        guard
-            let data = try? Data(contentsOf: path),
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
+        switch file() {
+        case .absent:
+            return nil
+        case .parsed(let json):
+            return json
+        case .unreadable(let reason):
             FileHandle.standardError.write(Data(
-                "warning: \(path.path) is not valid JSON — ignoring config\n".utf8
+                "warning: \(path.path) is not valid JSON (\(reason)) — using defaults\n".utf8
             ))
             return nil
         }
-        return json
     }
 
     // MARK: - writing
 
     /// The config file as it is on disk, or an empty object when there isn't
-    /// one yet. The settings window reads this to show what has been set,
-    /// as distinct from what merely defaults.
+    /// one yet — or when it cannot be read, which `file()` tells apart. The
+    /// settings window reads this to show what has been set, as distinct from
+    /// what merely defaults.
     static func raw() -> [String: Any] { load() ?? [:] }
 
     /// Set (or, with a nil value, clear) one setting, addressed by its path
@@ -589,7 +626,26 @@ enum Config {
     @discardableResult
     static func update(path: [String], value: Any?) -> Bool {
         guard let first = path.first else { return false }
-        var json = raw()
+        // The writing half of `Key`: a setting nothing reads, written by a
+        // window, is a setting that silently does nothing.
+        assert(Key(rawValue: path.joined(separator: ".")) != nil,
+               "\(path.joined(separator: ".")) is not a Config.Key")
+        var json: [String: Any]
+        switch file() {
+        case .absent:
+            json = [:]
+        case .parsed(let parsed):
+            json = parsed
+        case .unreadable(let reason):
+            // Writing now would mean writing the defaults plus this one key
+            // over everything the person has in there. The file is theirs to
+            // fix; until then nothing changes it.
+            FileHandle.standardError.write(Data(
+                ("not changing \(Self.path.path): it can't be read (\(reason)), and "
+                    + "writing it now would replace everything in it\n").utf8
+            ))
+            return false
+        }
 
         if path.count == 1 {
             if let value { json[first] = value } else { json.removeValue(forKey: first) }

@@ -73,7 +73,9 @@ The script runs eight stages and stops at the first failure. That ordering is
 the whole design: **nothing is public until stage 8**, so a failure anywhere
 before it costs time and nothing else. Do not "helpfully" reorder them.
 
-1. **Tests.** Build and verify LocalVQE, then run `swift test`. Fix the tests.
+1. **Tests.** Build and verify LocalVQE, then run `swift test` with
+   `AMANU_REQUIRE_LOCALVQE=1`, so the echo tests that skip on a fresh checkout
+   run and fail if the assets are missing. Fix the tests.
 2. **Build and sign.** `make app`. Both Amanu and its LocalVQE dylib are
    universal. The Swift build uses `swift build
    --arch arm64 --arch x86_64`, which also moves the product to
