@@ -243,9 +243,10 @@ final class AppController {
         }
         return setup
     }()
-    /// Sparkle, and amanu's rule that a meeting outranks an update. Lazy for
-    /// the same reason the windows are: most of amanu's life is spent
-    /// recording, and the updater is only ever touched from a menu or a timer.
+    /// Sparkle, and amanu's rule that a meeting outranks an update. Lazy only
+    /// so that its gate can ask `self` whether a recording is running; it is
+    /// built in `init` all the same, where the menu asks whether updates are
+    /// available at all.
     private lazy var updates = AppUpdates(
         gate: UpdateGate(isRecording: { [weak self] in self?.isRecording == true })
     )
@@ -279,10 +280,9 @@ final class AppController {
     /// How the app menu is told whether to offer **Setup…**; the status
     /// item's own menu is reached directly.
     var onSetupAvailable: ((Bool) -> Void)?
-    /// The live-transcript switch is on the status window and in the setup
-    /// form, which is in two windows; whichever one is used, the others have
-    /// to agree.
-    private var configWatch: ConfigWatch.Token?
+    /// Takes up every setting that can change while amanu runs, whichever
+    /// window wrote it — see `SettingsApplier`.
+    private var settingsApplier: SettingsApplier?
     private var recordRequestObserver: NSObjectProtocol?
     private var activateObserver: NSObjectProtocol?
     private var sleepObserver: NSObjectProtocol?
@@ -374,14 +374,14 @@ final class AppController {
             reason: "amanu watches for meetings and answers its command line")
 
         offerSetup()
-        configWatch = ConfigWatch.observe { [weak self] in
-            self?.window.updateLivePreference(enabled: Config.liveTranscriptionEnabled())
-            self?.applyIconPreferences()
-            // auto_record.enabled is written by Settings, the setup form, the
-            // menu and the status window alike, and obeyed from here.
-            self?.autoRecord.reloadSettings()
-            self?.showAutoRecord()
-        }
+        settingsApplier = SettingsApplier(
+            apply: { [weak self] change in self?.take(change) },
+            always: { [weak self] in
+                // auto_record.enabled is written by Settings, the setup form,
+                // the menu and the status window alike, and obeyed from here.
+                self?.autoRecord.reloadSettings()
+                self?.showAutoRecord()
+            })
         setupRequestObserver = SetupRequest.observe { [weak self] in self?.showSetup() }
         activateObserver = SingleInstance.observe { [weak self] in self?.showWindow() }
         // A recording does not go on across a sleep. The Mac only sleeps
@@ -610,9 +610,27 @@ final class AppController {
         window.updateAutoRecord(enabled: autoRecord.enabled, decision: decision)
     }
 
+    /// The status window's live-transcript switch. It only writes, as the
+    /// setup form's switch does; the recording is rewired by `take`, which
+    /// hears both.
     private func toggleLive(_ enabled: Bool) {
         Config.update(
             path: ["live_transcription", "enabled"], value: enabled ? true : nil)
+    }
+
+    /// One setting that changed while amanu was running.
+    private func take(_ change: SettingsApplier.Change) {
+        switch change {
+        case .liveTranscription(let enabled):
+            window.updateLivePreference(enabled: enabled)
+            rewireLive(enabled)
+        case .icons:
+            applyIconPreferences()
+        }
+    }
+
+    /// Start or stop the live transcript under a recording already running.
+    private func rewireLive(_ enabled: Bool) {
         guard let session else { return }
 
         // Close the old epoch synchronously. Any partial result already in
