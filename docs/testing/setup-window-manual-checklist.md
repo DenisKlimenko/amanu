@@ -93,6 +93,9 @@ The section is four rows: Start at login, Microphone, System audio, Calendar.
 - System audio: click **Allow and test**, accept the prompt, hear the short
   tone, and confirm the row says it heard it — it reads `heard the tone · <date>`
   afterwards, and offers **Test again**. **By hand**: the tone is the point.
+- Start a recording and click **Test again**, and the wizard's own button if it
+  offers the test: no tone plays, and the row says it will not while a
+  recording is running. Stop the recording and confirm the test works again.
 - Calendar: verify both Allow and Open Settings paths. Calendar is optional,
   must not block **Done**, and while it is the only thing ungranted the footer
   still reads *Everything amanu needs is granted*.
@@ -327,6 +330,11 @@ checking by hand is only the seam between them.
   had touched kept the old answer until it was reopened.
 - With both open, turn the live transcript on in one and confirm the status
   window's own live switch follows too, and the other form with it.
+- **By hand:** start a recording with the live transcript off, then turn it
+  on from the Setup tab — not from the status window. The status window's
+  transcript starts filling within a few seconds. Turn it off the same way
+  and confirm it stops. This switch used to write the setting and leave the
+  recording as it was.
 - Automated tests cover the listening half of this — every open form redraws
   when told the file changed. That a write *announces* itself is only checked
   here, because writing the config file of whoever runs the suite is not
@@ -415,6 +423,31 @@ read once at startup, which is what the row under it says.
 - Grant it back **in this window** and confirm the line clears itself. There
   is deliberately no button under it: in a settings window a button beside a
   list of settings reads as "apply".
+
+## Keyboard and VoiceOver
+
+- Turn on **Keyboard navigation** (System Settings → Keyboard) and Tab
+  through the Setup tab. Every choice card takes the focus ring round its
+  whole outline; Space or Return chooses it; the arrow keys move the choice
+  along its row and skip a card that is dimmed.
+- With VoiceOver on (⌘F5), move through the form. Every switch is announced
+  by its row's title — "Keep the audio after transcribing, switch, off" —
+  never as a bare "switch". Each card is "OpenAI, radio button", selected or
+  not, followed by its price and what the machine said about it. Each Access
+  button says what it is for: "Allow — Microphone".
+- On the Advanced tab, confirm every switch and field is announced by the
+  setting's label.
+
+## The recordings window
+
+- Open **Recordings** with a meeting still transcribing. When it finishes,
+  its row changes from pending to done without the window being closed, and
+  **Finish processing** answers for the finished session, not the stale one.
+- Select a session that is being transcribed and click **Delete**: the window
+  says amanu is working on it and moves nothing to the Trash.
+- Drop a large file to import, press **Cancel** in the import status, and
+  immediately drop another: the second one is imported once the first has
+  stopped, and is not silently forgotten.
 
 ## Reopening and restart behavior
 
