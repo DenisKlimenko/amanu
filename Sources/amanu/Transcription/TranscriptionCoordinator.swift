@@ -100,8 +100,13 @@ actor TranscriptionCoordinator {
     /// queueing so the answer can be checked without a coordinator running a
     /// drain over real audio.
     static func pendingSessions(in root: URL) -> [URL] {
+        // Hidden folders are never sessions. The importer stages a file in
+        // `.import-<uuid>` and writes its meta.json there before moving the
+        // folder into place, so without this a half-finished import could be
+        // transcribed from its staging directory, and then again once it had
+        // arrived.
         guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: nil
+            at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
         ) else { return [] }
 
         let fm = FileManager.default
