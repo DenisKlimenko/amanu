@@ -774,10 +774,7 @@ struct SetupTests {
     /// not having been saved, and is the reason to look at the file to find
     /// out what a program thinks.
     ///
-    /// This is the listening half. That a write announces itself is not
-    /// tested here, because `Config.update` writes to the config file of
-    /// whoever is running the suite; the manual checklist covers the two
-    /// halves together.
+    /// This is the listening half; the writing half is the test after it.
     @Test("A config change redraws every open copy of the form")
     @MainActor
     func everyOpenFormRedrawsOnAChange() throws {
@@ -808,6 +805,37 @@ struct SetupTests {
 
         for (panel, toggle) in zip(panels, switches) {
             #expect(toggle.state == stored, "\(panel.title) kept the stale answer")
+        }
+    }
+
+    /// The half that could not be tested while the suite wrote to the config
+    /// file of whoever ran it: a click in one window writes the file, the
+    /// write announces itself, and the other window follows.
+    @Test("A switch thrown in one window is written, and the other window follows")
+    @MainActor
+    func aClickIsWrittenAndFollowed() throws {
+        try withFreshHome { home in
+            let setup = SetupWindow()
+            let settings = SettingsWindow()
+            defer { withExtendedLifetime((setup, settings)) {} }
+
+            let panels = [
+                try #require(NSApp.windows.last { $0.title == "amanu setup" }),
+                try #require(NSApp.windows.last { $0.title == "amanu settings" }),
+            ]
+            let switches = try panels.map { panel in
+                let label = try #require(panel.contentView?.allDescendants
+                    .compactMap { $0 as? NSTextField }
+                    .first { $0.stringValue == "Keep the audio after transcribing" })
+                let row = try #require(label.superview?.superview as? NSStackView)
+                return try #require(row.arrangedSubviews.compactMap { $0 as? NSSwitch }.first)
+            }
+            #expect(switches.allSatisfy { $0.state == .off })
+
+            switches[0].performClick(nil)
+
+            #expect(home.configText?.contains("\"keep_audio\" : true") == true)
+            #expect(switches[1].state == .on, "the settings window kept the old answer")
         }
     }
 
@@ -1197,13 +1225,13 @@ private extension NSView {
 
 /// The transcription section's three settings, in memory.
 ///
-/// `Config.update` writes the config file of whoever is running the suite, so
-/// the form's writes went untested — and the ordering bug that made a click
-/// on the local switch save the arrangement it was leaving lived in exactly
-/// that gap. It has to be a store rather than a list of writes because the
-/// section is a loop: a click writes the choice and then redraws the switches
-/// from what it wrote, and a fake that only remembered the writing would have
-/// the form redrawing from somebody's real config file.
+/// `Config.update` used to write the config file of whoever was running the
+/// suite, so the form's writes went untested — and the ordering bug that made
+/// a click on the local switch save the arrangement it was leaving lived in
+/// exactly that gap. It has to be a store rather than a list of writes because
+/// the section is a loop: a click writes the choice and then redraws the
+/// switches from what it wrote, and a fake that only remembered the writing
+/// would have the form redrawing from a config file the test does not own.
 @MainActor
 private final class TranscriptionStore {
     /// nil is the setting absent from the file, which reads as `auto`.

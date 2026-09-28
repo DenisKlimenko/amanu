@@ -11,13 +11,13 @@ import Foundation
 ///
 /// Every backend is a fallback for the one before it, so a summary survives an
 /// expired key, an exhausted subscription, or a plane.
-struct LLMBackend {
+struct LLMBackend: Sendable {
     let name: String
     /// Exact local/configured model used for the call. It stays local;
     /// analytics allow-lists it before sending anything.
     let model: String?
     /// (system prompt, user prompt) → completion text.
-    let call: (String, String) async throws -> String
+    let call: @Sendable (String, String) async throws -> String
 
     /// The backends to try, in order.
     ///
@@ -38,6 +38,9 @@ struct LLMBackend {
         anthropicModel: String? = nil,
         openAIModel overriddenOpenAIModel: String? = nil
     ) -> [LLMBackend] {
+        // Whatever the home says instead — nothing at all, in a test that has
+        // not brought a fake of its own.
+        if let supplied = Home.current.languageModels { return supplied(preference) }
         let settings = Config.summary()
         let anthropicModelID = anthropicModel ?? settings.model
         let openAIModelID = overriddenOpenAIModel ?? settings.openAIModel

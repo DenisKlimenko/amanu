@@ -19,8 +19,7 @@ enum SetupState {
     /// Raise this when the window gains something a person must answer.
     static let current = 1
 
-    static let path = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".config/amanu/setup.json")
+    static var path: URL { Home.current.setupFile }
 
     /// The version of setup that has been completed, or nil for a machine that
     /// has never been through it.

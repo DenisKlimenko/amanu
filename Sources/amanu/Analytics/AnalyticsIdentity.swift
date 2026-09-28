@@ -17,8 +17,7 @@ import Foundation
 /// Both files sit in `~/.config/amanu`, which makes "forget everything you
 /// know about me, locally" a single `rm ~/.config/amanu/analytics*.json`.
 enum AnalyticsIdentity {
-    static let path = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".config/amanu/analytics.json")
+    static var path: URL { Home.current.analyticsIdentityFile }
 
     /// On unless the config file says otherwise. Opt-out is the whole reason
     /// the numbers are worth anything, and the whole reason the disclosure in
