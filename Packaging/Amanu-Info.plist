@@ -42,12 +42,13 @@
     <string>https://amanu.me/appcast.xml</string>
     <key>SUPublicEDKey</key>
     <string>/AxdBBPOFIca/y7RYwvi83FE6WqnIAjkVV0nTkRq9/c=</string>
-    <!-- Check on our own rather than asking on first launch: amanu already
-         opens a setup window the first time, and a second dialog about update
-         policy on top of it is one question too many. UpdateGate keeps the
-         checks out of the way of a recording. -->
+    <!-- Off in this fork. The feed and the key above are upstream's, so an
+         automatic check would find upstream's next release, verify it, and
+         install it over this build — silently taking the fork's changes
+         with it. "Check for Updates…" still asks upstream; ignore what it
+         offers until the fork has a feed of its own. -->
     <key>SUEnableAutomaticChecks</key>
-    <true/>
+    <false/>
     <key>SUScheduledCheckInterval</key>
     <integer>86400</integer>
     <key>NSMicrophoneUsageDescription</key>

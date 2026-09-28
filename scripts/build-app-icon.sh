@@ -21,6 +21,17 @@ test -f "$FALLBACK_ICON" || {
     exit 1
 }
 
+# actool comes with Xcode, not with the Command Line Tools. Without it the
+# bundle carries the classic icon alone, which is what Sonoma and Sequoia show
+# anyway; Tahoe then draws it without the layered appearance variants.
+if ! xcrun --find actool >/dev/null 2>&1; then
+    echo "actool not found (Xcode is not installed) — using the classic icon only" >&2
+    mkdir -p "$OUTPUT_DIR"
+    rm -f "$OUTPUT_DIR/Assets.car"
+    cp "$FALLBACK_ICON" "$OUTPUT_DIR/Amanu.icns"
+    exit 0
+fi
+
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/amanu-app-icon.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/compiled" "$OUTPUT_DIR"

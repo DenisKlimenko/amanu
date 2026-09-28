@@ -22,7 +22,13 @@
 # runs on Apple Silicon and Intel Macs. Two
 # --arch flags select a multi-arch directory. Ask SwiftPM for its path:
 # Xcode 27's Swift Build engine uses .build/out instead of .build/apple.
-BUILT = $(shell swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/amanu
+#
+# ARCHS=arm64 builds one slice, for a machine-local copy on a Mac where only
+# the Command Line Tools are installed: the ones for macOS 27 ship the Swift
+# compatibility libraries without x86_64, and the x86_64 link fails there.
+ARCHS     ?= arm64 x86_64
+ARCH_FLAGS = $(foreach arch,$(ARCHS),--arch $(arch))
+BUILT = $(shell swift build -c release $(ARCH_FLAGS) --show-bin-path)/amanu
 
 # The application bundle. Assembled by hand rather than by an Xcode project:
 # the package already builds and tests with SwiftPM, and an .app is a
@@ -88,7 +94,7 @@ verify-localvqe: localvqe
 	@scripts/verify-localvqe.py
 
 build: localvqe
-	swift build -c release --arch arm64 --arch x86_64
+	swift build -c release $(ARCH_FLAGS)
 
 # Drawn from the same feather the menu bar uses, so the Dock, the window and
 # the status item are one program rather than three.
@@ -110,7 +116,8 @@ app: build $(ICON)
 		Packaging/Amanu-Info.plist > $(APP)/Contents/Info.plist
 	@printf 'APPL????' > $(APP)/Contents/PkgInfo
 	@cp $(BUILT_ICON)/Amanu.icns $(APP)/Contents/Resources/Amanu.icns
-	@cp $(BUILT_ICON)/Assets.car $(APP)/Contents/Resources/Assets.car
+	@if [ -f $(BUILT_ICON)/Assets.car ]; then \
+		cp $(BUILT_ICON)/Assets.car $(APP)/Contents/Resources/Assets.car; fi
 	@mkdir -p $(APP)/Contents/Resources/Licenses
 	@cp LICENSE $(APP)/Contents/Resources/LICENSE
 	@cp THIRD-PARTY-NOTICES.md $(APP)/Contents/Resources/
@@ -138,7 +145,7 @@ app: build $(ICON)
 		$(APP)/Contents/Resources/Licenses/transcribe.cpp-miniz-LICENSE
 	@test -s $(APP)/Contents/Resources/LICENSE \
 		&& test -s $(APP)/Contents/Resources/Amanu.icns \
-		&& test -s $(APP)/Contents/Resources/Assets.car \
+		&& { test ! -f $(BUILT_ICON)/Assets.car || test -s $(APP)/Contents/Resources/Assets.car; } \
 		&& test -s $(APP)/Contents/Resources/THIRD-PARTY-NOTICES.md \
 		&& test -s $(APP)/Contents/Resources/Models/localvqe-v1.4-aec-200K-f32.gguf \
 		&& test -s $(APP)/Contents/Resources/LocalVQE-verification.json \
@@ -199,9 +206,10 @@ app: build $(ICON)
 	@codesign --verify --strict --verbose=2 $(APP)
 	@# A missing slice is invisible until someone on the wrong Mac opens the
 	@# disk image, so fail here instead.
-	@lipo -archs $(APP)/Contents/MacOS/$(APP_NAME) | grep -q x86_64 \
-		&& lipo -archs $(APP)/Contents/MacOS/$(APP_NAME) | grep -q arm64 \
-		|| (echo "not universal: $$(lipo -archs $(APP)/Contents/MacOS/$(APP_NAME))"; exit 1)
+	@for arch in $(ARCHS); do \
+		lipo -archs $(APP)/Contents/MacOS/$(APP_NAME) | grep -qw $$arch \
+		|| { echo "no $$arch slice: $$(lipo -archs $(APP)/Contents/MacOS/$(APP_NAME))"; exit 1; }; \
+	done
 	@lipo -archs $(APP)/Contents/Frameworks/liblocalvqe.dylib | grep -q x86_64 \
 		&& lipo -archs $(APP)/Contents/Frameworks/liblocalvqe.dylib | grep -q arm64 \
 		|| (echo "LocalVQE not universal: $$(lipo -archs $(APP)/Contents/Frameworks/liblocalvqe.dylib)"; exit 1)
