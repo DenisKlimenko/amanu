@@ -38,7 +38,7 @@ enum DoctorReport {
             checkTranscription(),
             checkAutoRecord(),
             checkSummary(),
-        ]
+        ] + [checkSpeakerNames()].compactMap { $0 }
     }
 
     /// A first-run window can repair a denied microphone grant. It cannot
@@ -159,33 +159,204 @@ enum DoctorReport {
         )
     }
 
-    static func checkSummary() -> Check {
-        let settings = Config.summary()
-        guard settings.enabled, settings.backend != "none" else {
-            return Check(name: "summary", status: .ok, remediation: nil)
-        }
-        if hasSummaryBackend(
-            anthropicKey: Config.anthropicKey(),
-            openAIKey: Config.openAIKey(),
-            claudeRuns: Tooling.probe("claude")?.runs == true,
-            codexRuns: Tooling.probe("codex")?.runs == true
-        ) {
-            return Check(name: "summary", status: .ok, remediation: nil)
-        }
-        return Check(
-            name: "summary",
-            status: .warn("no key and no claude or codex CLI — will fall back to ollama"),
-            remediation: "paste a key in Setup, or run ollama, or set summary.enabled=false"
-        )
+    // MARK: - summaries and names
+
+    /// What this machine has for each backend, gathered once so the same
+    /// facts decide both checks and so the decision can be tested without
+    /// any of them being real.
+    struct ModelFacts {
+        var claudeRuns = false
+        var codexRuns = false
+        var anthropicKey = false
+        var openAIKey = false
+        /// Why the OpenAI Base URL will not be used, when it won't.
+        var openAIEndpointProblem: String?
+        var ollama: OllamaStatus = .unreachable
     }
 
-    static func hasSummaryBackend(
-        anthropicKey: String?,
-        openAIKey: String?,
-        claudeRuns: Bool,
-        codexRuns: Bool
-    ) -> Bool {
-        anthropicKey != nil || openAIKey != nil || claudeRuns || codexRuns
+    enum OllamaStatus: Equatable {
+        /// Not asked, because nothing configured would use it.
+        case notAsked
+        /// Nothing answered at the Base URL.
+        case unreachable
+        /// The Base URL itself is refused — see `OpenAICompatible.EndpointError`.
+        case refused(String)
+        case running([OllamaClient.Model])
+    }
+
+    /// The summary's check: the backend it is configured for, walked the way
+    /// `LLMBackend` will walk it, including whether Ollama is answering and
+    /// has the model — rather than whether any key or CLI exists anywhere,
+    /// which is what it used to ask regardless of `summary.backend`.
+    static func checkSummary() -> Check {
+        let route = MeetingEgress.route(for: .summary)
+        return evaluate(
+            "summary", route: route, facts: gatherFacts(for: [route]),
+            settings: Config.summary())
+    }
+
+    /// Naming's own check, shown only when naming has a backend of its own;
+    /// otherwise it goes wherever the summary goes, and the summary's line
+    /// already says where that is.
+    static func checkSpeakerNames() -> Check? {
+        guard Config.speakerNames().ownBackend != nil else { return nil }
+        let route = MeetingEgress.route(for: .speakerNames)
+        guard route != nil else {
+            return Check(name: "speaker names", status: .ok, remediation: nil)
+        }
+        return evaluate(
+            "speaker names", route: route, facts: gatherFacts(for: [route]),
+            settings: Config.summary())
+    }
+
+    static func evaluate(
+        _ name: String,
+        route: MeetingEgress.Route?,
+        facts: ModelFacts,
+        settings: Config.SummarySettings
+    ) -> Check {
+        guard let route else { return Check(name: name, status: .ok, remediation: nil) }
+        let wanted = route.preference == "auto" ? LLMBackend.names : [route.preference]
+        guard route.preference == "auto" || LLMBackend.names.contains(route.preference) else {
+            return Check(
+                name: name,
+                status: .warn("backend \"\(route.preference)\" is not one amanu knows — "
+                    + "no model will be asked"),
+                remediation: "set it to auto or one of " + LLMBackend.names.joined(separator: ", "))
+        }
+
+        var ready: [String] = []
+        var problems: [(String, String)] = []
+        for backend in wanted {
+            if let problem = problem(backend, facts: facts, settings: settings) {
+                problems.append(problem)
+            } else {
+                ready.append(backend)
+            }
+        }
+
+        if let first = ready.first {
+            var said = "via \(first)"
+            if ready.count > 1 { said += " (then \(ready.dropFirst().joined(separator: ", ")))" }
+            // Where the meeting goes is what this line is for, so a route
+            // that sends it off the Mac is a warning, as a cloud
+            // transcription engine is — informative, never blocking.
+            if first == "ollama" {
+                if case .running(let models) = facts.ollama,
+                   SetupSelection.ollamaModel(named: settings.ollamaModel, in: models)?
+                       .isRemote == true {
+                    return Check(name: name, status: .warn(
+                        said + " · \(settings.ollamaModel) is an Ollama cloud model, so the "
+                            + "transcript leaves this machine"), remediation: nil)
+                }
+                guard OllamaClient.isLocal(baseURL: settings.ollamaBaseURL) else {
+                    return Check(name: name, status: .warn(
+                        said + " · the transcript goes to \(settings.ollamaBaseURL)"),
+                        remediation: nil)
+                }
+                return Check(name: name, status: .ok, remediation: nil)
+            }
+            return Check(
+                name: name, status: .warn(said + " · the transcript leaves this machine"),
+                remediation: nil)
+        }
+        guard route.preference != "auto", let (what, fix) = problems.first else {
+            return Check(
+                name: name,
+                status: .warn("no backend is ready — " + problems.map(\.0).joined(separator: "; ")),
+                remediation: "paste a key in Setup, install the claude or codex CLI, or start "
+                    + "Ollama — or set summary.enabled=false")
+        }
+        return Check(name: name, status: .warn(what), remediation: fix)
+    }
+
+    /// Why one backend cannot answer, with what to do about it; nil when it
+    /// can.
+    private static func problem(
+        _ backend: String, facts: ModelFacts, settings: Config.SummarySettings
+    ) -> (String, String)? {
+        switch backend {
+        case "claude-cli":
+            return facts.claudeRuns ? nil
+                : ("the claude CLI is not installed or does not run",
+                   "install Claude Code and sign in, or choose another backend")
+        case "codex-cli":
+            return facts.codexRuns ? nil
+                : ("the codex CLI is not installed or does not run",
+                   "install Codex and sign in, or choose another backend")
+        case "anthropic-api":
+            return facts.anthropicKey ? nil
+                : ("no Anthropic key", "paste an Anthropic key in Setup")
+        case "openai-api":
+            if let why = facts.openAIEndpointProblem {
+                return ("the OpenAI Base URL is refused: \(why)", "fix summary.openai_base_url")
+            }
+            return facts.openAIKey ? nil : ("no OpenAI key", "paste an OpenAI key in Setup")
+        case "ollama":
+            switch facts.ollama {
+            case .notAsked:
+                return ("Ollama was not asked", "run amanu doctor")
+            case .refused(let why):
+                return ("the Ollama Base URL is refused: \(why)", "fix summary.ollama_base_url")
+            case .unreachable:
+                return ("nothing answers at \(settings.ollamaBaseURL)",
+                        "start Ollama, or fix summary.ollama_base_url")
+            case .running(let models):
+                guard SetupSelection.ollamaModel(named: settings.ollamaModel, in: models) != nil
+                else {
+                    return ("Ollama is running but \(settings.ollamaModel) is not pulled",
+                            "ollama pull \(settings.ollamaModel)")
+                }
+                return nil
+            }
+        default:
+            return ("\(backend) is not a backend amanu knows", "choose another backend")
+        }
+    }
+
+    /// Ask the machine only what the routes would use: `--version` of a CLI
+    /// that is never going to be run proves nothing, and neither does a
+    /// request to an Ollama nobody configured.
+    static func gatherFacts(for routes: [MeetingEgress.Route?]) -> ModelFacts {
+        let wanted = Set(routes.compactMap { $0 }.flatMap { route in
+            route.preference == "auto" ? LLMBackend.names : [route.preference]
+        })
+        let settings = Config.summary()
+        var facts = ModelFacts()
+        if wanted.contains("claude-cli") { facts.claudeRuns = Tooling.probe("claude")?.runs == true }
+        if wanted.contains("codex-cli") { facts.codexRuns = Tooling.probe("codex")?.runs == true }
+        facts.anthropicKey = Config.anthropicKey() != nil
+        facts.openAIKey = Config.openAIKey() != nil
+        do {
+            _ = try OpenAICompatible.url(baseURL: settings.openAIBaseURL, path: "models")
+        } catch {
+            facts.openAIEndpointProblem = "\(error)"
+        }
+        facts.ollama = wanted.contains("ollama")
+            ? ollamaStatus(baseURL: settings.ollamaBaseURL) : .notAsked
+        return facts
+    }
+
+    /// Ollama's answer, waited for: the doctor is synchronous and prints in
+    /// order, and `listModels` gives up after two seconds of its own.
+    static func ollamaStatus(baseURL: String) -> OllamaStatus {
+        do {
+            _ = try OpenAICompatible.url(baseURL: baseURL, path: "api/tags")
+        } catch {
+            return .refused("\(error)")
+        }
+        guard Home.current.discoversTools else { return .unreachable }
+        final class Answer: @unchecked Sendable { var models: [OllamaClient.Model]? }
+        let answer = Answer()
+        let done = DispatchSemaphore(value: 0)
+        Task.detached {
+            answer.models = try? await OllamaClient.listModels(baseURL: baseURL)
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + 5) == .success, let models = answer.models else {
+            return .unreachable
+        }
+        return .running(models)
     }
 
     static func checkMicrophone() -> Check {

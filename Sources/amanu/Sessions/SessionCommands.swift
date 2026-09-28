@@ -50,34 +50,58 @@ struct FormatTranscripts: ParsableCommand {
     var dryRun = false
 
     func run() throws {
-        let changed = try Self.reformat(in: Config.resolveRoot(cliOverride: out), dryRun: dryRun)
+        var failures: [(URL, Error)] = []
+        let changed = try Self.reformat(
+            in: Config.resolveRoot(cliOverride: out), dryRun: dryRun,
+            onFailure: { failures.append(($0, $1)) })
         for dir in changed { print(dir.appendingPathComponent("transcript.md").path) }
         print("\(changed.count) transcript(s) \(dryRun ? "would be reformatted" : "reformatted").")
+        guard !failures.isEmpty else { return }
+        for (dir, error) in failures {
+            SessionLog.complain("skipped \(dir.path): \(error)")
+        }
+        SessionLog.complain("\(failures.count) session(s) could not be reformatted.")
+        throw ExitCode(1)
     }
 
-    static func reformat(in root: URL, dryRun: Bool = false) throws -> [URL] {
+    /// Rewrite every AssemblyAI `transcript.md` under `root` that differs from
+    /// what its `transcript.json` renders to, and return the folders changed.
+    ///
+    /// One session that cannot be read is reported through `onFailure` and
+    /// passed over rather than ending the run: the command exists for a
+    /// recordings folder with years in it, and a single damaged transcript
+    /// used to leave every session after it alphabetically untouched. Only a
+    /// root that cannot be listed at all throws.
+    static func reformat(
+        in root: URL,
+        dryRun: Bool = false,
+        onFailure: (URL, Error) -> Void = { _, _ in }
+    ) throws -> [URL] {
         let fileManager = FileManager.default
         let folders = try fileManager.contentsOfDirectory(
             at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
         ).sorted { $0.lastPathComponent < $1.lastPathComponent }
         var changed: [URL] = []
         for dir in folders {
-            guard try dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
-                continue
+            do {
+                guard try dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
+                else { continue }
+                let jsonURL = dir.appendingPathComponent("transcript.json")
+                guard fileManager.fileExists(atPath: jsonURL.path) else { continue }
+                let transcript = try JSONDecoder().decode(
+                    Transcript.self, from: Data(contentsOf: jsonURL))
+                guard transcript.engine == "assemblyai" else { continue }
+                let markdownURL = dir.appendingPathComponent("transcript.md")
+                let rendered = Data(transcript.rendered(
+                    title: dir.lastPathComponent, names: SpeakerNames.read(from: dir)).utf8)
+                if (try? Data(contentsOf: markdownURL)) == rendered { continue }
+                if !dryRun {
+                    try rendered.write(to: markdownURL, options: .atomic)
+                }
+                changed.append(dir)
+            } catch {
+                onFailure(dir, error)
             }
-            let jsonURL = dir.appendingPathComponent("transcript.json")
-            guard fileManager.fileExists(atPath: jsonURL.path) else { continue }
-            let transcript = try JSONDecoder().decode(
-                Transcript.self, from: Data(contentsOf: jsonURL))
-            guard transcript.engine == "assemblyai" else { continue }
-            let markdownURL = dir.appendingPathComponent("transcript.md")
-            let rendered = Data(transcript.rendered(
-                title: dir.lastPathComponent, names: SpeakerNames.read(from: dir)).utf8)
-            if (try? Data(contentsOf: markdownURL)) == rendered { continue }
-            if !dryRun {
-                try rendered.write(to: markdownURL, options: .atomic)
-            }
-            changed.append(dir)
         }
         return changed
     }

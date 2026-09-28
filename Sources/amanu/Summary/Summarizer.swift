@@ -3,7 +3,8 @@ import Foundation
 /// Turns a finished transcript into `summary.md`.
 ///
 /// The backend chain lives in LLMBackend: subscription CLIs first, then API
-/// keys, then ollama. Summarizing is just one caller of it.
+/// keys, then ollama. Which of them may read the meeting is `MeetingEgress`'s
+/// to say; summarizing is just one caller of it.
 ///
 /// Nothing here is allowed to fail loudly. A missing summary is an
 /// inconvenience; a transcript lost because summarizing threw is a lost
@@ -25,7 +26,7 @@ enum Summarizer {
         func log(_ message: String) { appendSessionLog(message, to: dir) }
 
         let settings = Config.summary()
-        guard settings.enabled, settings.backend != "none" else { return nil }
+        guard MeetingEgress.route(for: .summary) != nil else { return nil }
 
         let body = plainText(transcript)
         guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -33,7 +34,7 @@ enum Summarizer {
             return nil
         }
 
-        let backends = LLMBackend.available(preference: settings.backend)
+        let backends = MeetingEgress.backends(for: .summary)
         guard !backends.isEmpty else {
             log("summary skipped — no backend available")
             Analytics.track(.summaryFailed, [
@@ -43,11 +44,13 @@ enum Summarizer {
             ])
             return nil
         }
-        // Whether every failure so far was of a kind that passes. If they all
-        // are, the session is left marked for a later run rather than written
-        // off: a meeting summarized on a plane should still get its summary
-        // that evening.
-        var allTransient = true
+        // Whether any backend failed in a way that passes. If one did, the
+        // session is left marked for a later run rather than written off: a
+        // meeting summarized on a plane should still get its summary that
+        // evening, even if a backend that was reachable answered badly — the
+        // one that wasn't may well answer. Only when every backend failed for
+        // good is the summary given up on.
+        var anyTransient = false
         var lastReason = Analytics.Reason.unknown
 
         // Whatever we know about the meeting, above the transcript. Names in
@@ -66,7 +69,10 @@ enum Summarizer {
                     to: dir.appendingPathComponent("summary.md"), options: .atomic
                 )
                 log("summary written by \(backend.name)")
-                SessionState.update(dir, with: [SessionState.Key.summaryStatus: nil])
+                SessionState.update(dir, with: [
+                    SessionState.Key.summaryStatus: nil,
+                    SessionState.Key.summaryFailedFor: nil,
+                ])
                 Analytics.track(.summaryFinished, [
                     .backend: .text(backend.name),
                     .model: .text(AnalyticsCatalogue.summaryModel(
@@ -77,8 +83,7 @@ enum Summarizer {
                 // Falling through is the expected path when a subscription is
                 // spent, so say which kind of failure this was — otherwise a
                 // healthy hand-off reads like something broke.
-                let transient = LLMError.isTransient(error)
-                allTransient = allTransient && transient
+                anyTransient = anyTransient || LLMError.isTransient(error)
                 lastReason = Analytics.reason(for: error)
                 Analytics.track(.summaryBackendFailed, [
                     .backend: .text(backend.name),
@@ -96,15 +101,19 @@ enum Summarizer {
         // tell "come back to this" from "this will never work".
         SessionState.update(dir, with: [
             SessionState.Key.summaryStatus:
-                allTransient ? SessionState.deferred : "failed",
+                anyTransient ? SessionState.deferred : SessionState.failed,
+            SessionState.Key.summaryFailedFor:
+                anyTransient ? nil : MeetingEgress.fingerprint(for: .summary),
         ])
-        log(allTransient
-            ? "no backend could be reached — summary deferred, will be retried later"
-            : "every backend failed for good — giving up on the summary")
+        log(anyTransient
+            ? "no backend answered, and at least one could not be reached — summary deferred, "
+                + "will be retried later"
+            : "every backend failed for good — giving up on the summary until the "
+                + "summary settings, keys or backends change")
         Analytics.track(.summaryFailed, [
             .backend: .text(settings.backend),
             .reason: .text(lastReason.rawValue),
-            .outcome: .text((allTransient
+            .outcome: .text((anyTransient
                 ? Analytics.Outcome.deferred : .gaveUp).rawValue),
         ])
         return nil
@@ -142,12 +151,13 @@ enum Summarizer {
         backend: LLMBackend
     ) async throws -> String {
         let system = systemPrompt(language: settings.language)
-        if body.count <= maxCharsPerCall {
+        let limit = min(maxCharsPerCall, backend.promptLimit ?? maxCharsPerCall)
+        if body.count <= limit {
             return try await backend.call(system, singlePassPrompt(
                 body: body, header: header, template: settings.template))
         }
 
-        let chunks = split(body, limit: maxCharsPerCall)
+        let chunks = split(body, limit: limit)
         var notes: [String] = []
         for (index, chunk) in chunks.enumerated() {
             notes.append(try await backend.call(

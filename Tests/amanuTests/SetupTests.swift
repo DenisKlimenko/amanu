@@ -1208,16 +1208,6 @@ struct SetupTests {
         }
         return resolved
     }
-
-    @Test("Doctor accepts either API key or a CLI that actually runs")
-    func summaryAvailabilityPolicy() {
-        #expect(DoctorReport.hasSummaryBackend(
-            anthropicKey: nil, openAIKey: "key", claudeRuns: false, codexRuns: false))
-        #expect(DoctorReport.hasSummaryBackend(
-            anthropicKey: nil, openAIKey: nil, claudeRuns: false, codexRuns: true))
-        #expect(!DoctorReport.hasSummaryBackend(
-            anthropicKey: nil, openAIKey: nil, claudeRuns: false, codexRuns: false))
-    }
 }
 
 /// The transcription section's three settings, in memory.

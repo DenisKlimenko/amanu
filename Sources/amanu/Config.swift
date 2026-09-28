@@ -272,13 +272,22 @@ enum Config {
     /// Putting real names to the transcript's mechanical speaker labels.
     struct SpeakerNamesSettings {
         var enabled = Config.defaultFlag(.speakerNamesEnabled)
-        /// Which model to ask, in `LLMBackend`'s vocabulary.
+        /// Which model to ask, in `LLMBackend`'s vocabulary, or `summary` to
+        /// go wherever the summary goes. Read it through `ownBackend`, and act
+        /// on it only through `MeetingEgress`.
         var backend = Config.defaultString(.speakerNamesBackend)
         /// Anthropic model for this pass specifically. nil uses the summary's,
         /// which is the strong one — fine, but naming is an easier job than
         /// summarizing and doesn't need to cost the same.
         var model: String?
+
+        /// The backend naming was given of its own, or nil when it follows
+        /// the summary.
+        var ownBackend: String? { backend == Config.followsSummary ? nil : backend }
     }
+
+    /// The word for "whatever the summary does", and the default.
+    static let followsSummary = "summary"
 
     static func speakerNames() -> SpeakerNamesSettings {
         let json = load()
@@ -452,6 +461,11 @@ enum Config {
         /// whatever was spoken. nil means "same language as the meeting".
         var language: String?
         var model = Config.defaultString(.summaryModel)
+        /// `model` when the config file names one, nil when it is the
+        /// default. The API always needs a model; the `claude` CLI is only
+        /// told one when somebody chose it, and otherwise keeps whatever
+        /// Claude Code is set to — which a subscription may be limited to.
+        var configuredModel: String?
         var ollamaModel = Config.defaultString(.summaryOllamaModel)
         var ollamaBaseURL = Config.defaultString(.summaryOllamaBaseURL)
         var template = Config.defaultString(.summaryTemplate)
@@ -471,6 +485,7 @@ enum Config {
         settings.backend = string(.summaryBackend, in: root)
         settings.language = text(.summaryLanguage, in: root)
         settings.model = string(.summaryModel, in: root)
+        settings.configuredModel = text(.summaryModel, in: root)
         settings.ollamaModel = string(.summaryOllamaModel, in: root)
         settings.openAIModel = string(.summaryOpenAIModel, in: root)
         settings.openAIBaseURL = string(.summaryOpenAIBaseURL, in: root).trimmed

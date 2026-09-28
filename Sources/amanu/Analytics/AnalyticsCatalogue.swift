@@ -80,7 +80,9 @@ enum AnalyticsCatalogue {
             .transcriptionCloudProvider: Config.transcriptionCloudProvider(),
             .summaryBackend: Config.summary().backend,
             .summaryEnabled: Config.summary().enabled,
-            .speakerNamesBackend: Config.speakerNames().backend,
+            // Where naming actually goes, which since it follows the summary
+            // is not what its own key says.
+            .speakerNamesBackend: MeetingEgress.route(for: .speakerNames)?.preference ?? "none",
             .keepAudio: Config.keepAudio(),
         ]
         if let version = appVersion() { values[.appVersion] = version }
@@ -92,7 +94,9 @@ enum AnalyticsCatalogue {
     static func sanitized(_ properties: [String: Any]) -> [String: Any] {
         var result = properties
         let engines = ["auto", "parakeet", "openai", "assemblyai", "elevenlabs"]
-        let backends = ["auto", "claude-cli", "codex-cli", "anthropic-api", "openai-api", "ollama"]
+        let backends = [
+            "auto", "claude-cli", "codex-cli", "anthropic-api", "openai-api", "ollama", "none",
+        ]
         let allowed = [
             "engine": engines, "from_engine": engines, "to_engine": engines,
             "transcription_engine": engines,
