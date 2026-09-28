@@ -157,7 +157,15 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
 
     private let parakeetStatus = NSTextField(labelWithString: "")
     private let parakeetBar = NSProgressIndicator()
+    /// The bar's clock, which is only worth running while somebody can see
+    /// the bar.
     private var parakeetProgress: Timer?
+    /// The download itself, which is not the same thing as its bar. It used
+    /// not to be kept at all: closing the window stopped the timer, the form
+    /// took that to mean nothing was downloading, and opening it again
+    /// offered a second fetch of the same 460 megabytes into the same cache
+    /// while the first was still running.
+    private var parakeetDownload: Task<Void, Never>?
 
     private let summariesOn = NSSwitch()
     private let summaryCards = ChoiceGroup()
@@ -264,6 +272,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// `auto_record.enabled`, and a form showing yesterday's answer is worse
     /// than no form at all.
     func reload() {
+        if parakeetDownload != nil, parakeetProgress == nil { watchParakeetSize() }
         refresh()
         // Detection runs off the main thread: finding `claude` can mean
         // starting the login shell, and a form that freezes while it asks
@@ -274,6 +283,10 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// Put down what outlives a keystroke. The setup window calls it on the
     /// way out: a timer polling a download directory has no reason to keep
     /// running behind a closed window.
+    ///
+    /// The parakeet download itself is left running: FluidAudio offers no way
+    /// to stop one partway, and a bar put away is not a download abandoned.
+    /// `reload` puts the bar back.
     func stop() {
         parakeetProgress?.invalidate()
         parakeetProgress = nil
@@ -1220,30 +1233,34 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
 
     private func downloadParakeetIfNeeded() {
         guard !parakeetIsHere() else { return }
-        guard parakeetProgress == nil else { return }
+        guard parakeetDownload == nil else { return }
         let asset = Config.transcriptionModel() == "v2" ? "parakeet-v2" : "parakeet-v3"
         Analytics.track(.modelDownloadStarted, [.asset: .text(asset)])
         watchParakeetSize()
-        // So the footer button says what is happening from the first second,
-        // rather than at the end of it.
-        refresh()
-        Task {
+        let fetch = fetchParakeet
+        parakeetDownload = Task { [weak self] in
+            var failure: String?
             do {
-                try await fetchParakeet()
+                try await fetch()
                 Analytics.track(.modelDownloadFinished, [.asset: .text(asset)])
             } catch {
                 Analytics.track(.modelDownloadFailed, [
                     .asset: .text(asset),
                     .reason: .text(Analytics.reason(for: error).rawValue),
                 ])
-                localDownloadErrors["parakeet"] =
-                    localised("download failed: ", "не удалось скачать: ") + "\(error)"
+                failure = localised("download failed: ", "не удалось скачать: ") + "\(error)"
             }
+            guard let self else { return }
+            if let failure { localDownloadErrors["parakeet"] = failure }
+            parakeetDownload = nil
             parakeetProgress?.invalidate()
             parakeetProgress = nil
             parakeetBar.isHidden = true
             refresh()
         }
+        // So the footer button says what is happening from the first second,
+        // rather than at the end of it.
+        refresh()
     }
 
     /// FluidAudio hands back no progress, so the progress is the cache
@@ -1756,7 +1773,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         switch id {
         case "whisper": return whisperDownloadTask != nil
         case "gigaam": return gigaAMDownloadTask != nil
-        default: return parakeetProgress != nil
+        default: return parakeetDownload != nil
         }
     }
 
@@ -1808,7 +1825,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
             systemAudio: systemAudio,
             missingLocalModel: localModelIsWantedAndMissing
                 ? transcriptionChoice.localEngine : nil,
-            localModelDownloading: parakeetProgress != nil || whisperDownloadTask != nil
+            localModelDownloading: parakeetDownload != nil || whisperDownloadTask != nil
                 || gigaAMDownloadTask != nil,
             liveModelWanted: live,
             liveModelReady: live && liveModelStore.isReady(language: prompt),
