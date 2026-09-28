@@ -1186,9 +1186,8 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// is here rather than on either button.
     private func testSystemAudio() async {
         if isRecording?() == true {
-            report(audioRow, localised(
-                "not while a recording is running — the test tone would play into the call",
-                "не во время записи — тестовый тон прозвучит в звонке"))
+            toneRefused = true
+            refresh()
             return
         }
         audioRow.working(localised("playing a tone…", "играет тон…"))
@@ -1203,6 +1202,12 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         }
         refresh()
     }
+
+    /// The test was asked for during a recording and refused. Kept rather
+    /// than written once into the row, because the next redraw — any write
+    /// to the config, from anywhere — would put the row back as if nothing
+    /// had been asked, while the recording that is the reason goes on.
+    private var toneRefused = false
 
     /// Seeded from the last tone that was heard, because macOS will not tell
     /// us and a working Mac should not be asked to prove itself every time.
@@ -1696,7 +1701,12 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         micRow.update(SetupPermissions.microphone())
         calendarRow.update(calendarGrant ?? SetupPermissions.calendar())
 
+        if toneRefused, isRecording?() != true { toneRefused = false }
         switch systemAudio {
+        case _ where toneRefused:
+            audioRow.update(.denied, detail: localised(
+                "not while a recording is running — the test tone would play into the call",
+                "не во время записи — тестовый тон прозвучит в звонке"))
         case .heard:
             audioRow.update(
                 .granted,

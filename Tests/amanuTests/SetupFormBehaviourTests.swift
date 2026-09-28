@@ -102,9 +102,13 @@ struct SetupFormBehaviourTests {
         var redraws = 0
         form.onStateChange = { redraws += 1 }
 
+        // Counted across each post rather than from zero: a parallel test's
+        // config write redraws every form, but only between these lines —
+        // nothing else runs on the main thread inside them.
+        var before = redraws
         NotificationCenter.default.post(
             name: NSApplication.didBecomeActiveNotification, object: NSApp)
-        #expect(redraws == 0, "a form nobody can see asked macOS for its grants")
+        #expect(redraws == before, "a form nobody can see asked macOS for its grants")
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
@@ -114,9 +118,10 @@ struct SetupFormBehaviourTests {
         window.orderFront(nil)
         defer { window.orderOut(nil) }
 
+        before = redraws
         NotificationCenter.default.post(
             name: NSApplication.didBecomeActiveNotification, object: NSApp)
-        #expect(redraws == 1)
+        #expect(redraws == before + 1)
     }
 }
 
