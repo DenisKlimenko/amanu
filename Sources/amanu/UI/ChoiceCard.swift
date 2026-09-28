@@ -20,6 +20,10 @@ final class ChoiceCard: NSView, LayerTinted {
 
     private let radio = NSImageView()
     private let titleLabel: NSTextField
+    private let detailLabel: NSTextField
+    /// A compact card is one line that truncates; every other card's detail
+    /// wraps, at the width the card turns out to have.
+    private let detailWraps: Bool
     private let statusLabel = NSTextField(labelWithString: "")
     private var linkButton: NSButton?
     private var selected = false
@@ -93,6 +97,8 @@ final class ChoiceCard: NSView, LayerTinted {
         self.title = title
         self.detail = detail
         titleLabel = NSTextField(labelWithString: title)
+        detailLabel = NSTextField(labelWithString: detail)
+        detailWraps = !compact
         super.init(frame: .zero)
         identifier = NSUserInterfaceItemIdentifier("choice.\(id)")
 
@@ -106,12 +112,13 @@ final class ChoiceCard: NSView, LayerTinted {
         heading.alignment = .firstBaseline
         heading.spacing = 7
 
-        let detailLabel = NSTextField(labelWithString: detail)
         detailLabel.font = SetupLayout.detailFont
         detailLabel.textColor = .secondaryLabelColor
         detailLabel.lineBreakMode = compact ? .byTruncatingTail : .byWordWrapping
         detailLabel.maximumNumberOfLines = compact ? 1 : 4
-        detailLabel.preferredMaxLayoutWidth = 190
+        // A first guess narrower than any card, so that nothing is pushed
+        // wider before `layout` knows the real width.
+        detailLabel.preferredMaxLayoutWidth = 120
 
         statusLabel.font = SetupLayout.statusFont
         statusLabel.textColor = .secondaryLabelColor
@@ -155,6 +162,19 @@ final class ChoiceCard: NSView, LayerTinted {
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    /// The detail wraps at the card's own width. It used to wrap at a fixed
+    /// 190 points, which suited only a card about 220 wide: three to a row
+    /// leave less room than that, so the words ran through the right inset
+    /// and over the border, while a card as wide as the form folded its one
+    /// sentence into a narrow column.
+    override func layout() {
+        let room = bounds.width - SetupLayout.cardInsets.left - SetupLayout.cardInsets.right
+        if detailWraps, room > 0, detailLabel.preferredMaxLayoutWidth != room {
+            detailLabel.preferredMaxLayoutWidth = room
+        }
+        super.layout()
+    }
 
     func tintLayer() {
         layer?.borderColor = selected
