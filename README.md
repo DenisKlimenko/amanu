@@ -278,7 +278,9 @@ only values that differ from the defaults. A compact example:
   `template`, `api_key_path`, and `openai_api_key_path`. The two Base URLs
   allow OpenAI-compatible servers and a non-default Ollama host; only a
   loopback Ollama URL keeps the transcript on this Mac, and any other host
-  must be reached over https — plain http is refused off this Mac. `template` contains
+  must be reached over https — plain http is refused off this Mac.
+  `amanu doctor` walks the configured summary backend, including whether
+  Ollama is answering and has the chosen model. `template` contains
   the complete summary instructions and starts with Amanu's built-in default.
 - `mic_voice_processing` enables Apple's capture-time voice processing;
   `offline_echo_cancellation` (on by default) instead cleans a copy of the mic
