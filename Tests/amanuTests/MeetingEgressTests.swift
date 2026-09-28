@@ -155,7 +155,7 @@ struct MeetingEgressTests {
     @Test("The codex CLI is asked read-only and leaves no session behind")
     func codexArgumentsArePinned() {
         let output = URL(fileURLWithPath: "/tmp/answer.txt")
-        #expect(LLMBackend.codexArguments(model: "gpt-5", output: output) == [
+        #expect(LLMBackend.codexArguments(model: "gpt-5", output: output, mcpServers: []) == [
             "exec",
             "--skip-git-repo-check",
             "--sandbox", "read-only",
@@ -164,5 +164,64 @@ struct MeetingEgressTests {
             "--output-last-message", "/tmp/answer.txt",
             "-",
         ])
+    }
+
+    /// The read-only sandbox does not reach an MCP server's tools, which run
+    /// in the server's own process. `-c mcp_servers={}` would have been the
+    /// obvious override, and codex merges it into the file's table instead
+    /// of replacing it — so every server is switched off by name.
+    @Test("Every MCP server in the codex config is switched off for the run")
+    func codexMCPServersAreOff() {
+        let output = URL(fileURLWithPath: "/tmp/answer.txt")
+        let arguments = LLMBackend.codexArguments(
+            model: "gpt-5", output: output, mcpServers: ["github", "fs-tools"])
+        #expect(arguments == [
+            "exec",
+            "--skip-git-repo-check",
+            "--sandbox", "read-only",
+            "--ephemeral",
+            "-c", "mcp_servers.github.enabled=false",
+            "-c", "mcp_servers.fs-tools.enabled=false",
+            "--model", "gpt-5",
+            "--output-last-message", "/tmp/answer.txt",
+            "-",
+        ])
+
+        // A name codex would split on its dot, or servers that could not be
+        // named at all: the config file is not read.
+        for unnameable in [["my.server"], nil] as [[String]?] {
+            let skipped = LLMBackend.codexArguments(
+                model: "gpt-5", output: output, mcpServers: unnameable)
+            #expect(skipped.contains("--ignore-user-config"))
+            #expect(!skipped.contains("-c"))
+        }
+    }
+
+    @Test("MCP servers are found in every shape a TOML file can give them")
+    func mcpServerNamesAreRead() {
+        let toml = """
+        model = "gpt-5"
+        mcp_servers.inline.command = "a"
+
+        [mcp_servers.github]
+        command = "gh-mcp"
+
+        [mcp_servers.github.env]
+        TOKEN = "x"
+
+        [mcp_servers."quoted-name"]
+        command = "q"
+
+        [mcp_servers]
+        tabled = { command = "t" }
+        # commented = { command = "c" }
+
+        [profiles.work]
+        mcp_servers = "not a server"
+        """
+        #expect(LLMBackend.mcpServerNames(inTOML: toml)
+            == ["inline", "github", "quoted-name", "tabled"])
+        #expect(LLMBackend.mcpServerNames(inTOML: "model = \"gpt-5\"\n") == [])
+        #expect(LLMBackend.mcpServerNames(inTOML: "mcp_servers = {x={command=\"y\"}}") == nil)
     }
 }

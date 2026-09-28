@@ -225,16 +225,106 @@ struct LLMBackend: Sendable {
     /// Codex's own session files. It still reads the person's config.toml,
     /// on purpose: that is where a custom provider lives, and without it the
     /// CLI may not be able to answer at all.
-    static func codexArguments(model: String, output: URL) -> [String] {
-        [
+    ///
+    /// But config.toml is also where MCP servers live, and the sandbox does
+    /// not cover them: a tool an MCP server offers runs in that server's
+    /// process, with whatever it can reach. So every server the file names
+    /// is switched off for this run, one by one — `-c mcp_servers={}` does
+    /// nothing, because codex merges a table given on the command line into
+    /// the one in the file rather than replacing it (checked against codex
+    /// 0.145.0 with a config of its own). A server has to be named exactly:
+    /// disabling one the file does not define stops codex with "invalid
+    /// transport", and the name is split on dots, so a server whose name has
+    /// one cannot be reached this way. Then the file is not read at all.
+    ///
+    /// `mcpServers` is nil when the file defines servers that could not be
+    /// told apart, which is answered the same way.
+    static func codexArguments(
+        model: String, output: URL, mcpServers: [String]? = codexMCPServers()
+    ) -> [String] {
+        var arguments = [
             "exec",
             "--skip-git-repo-check",
             "--sandbox", "read-only",
             "--ephemeral",
+        ]
+        if let mcpServers, mcpServers.allSatisfy(isBareTOMLKey) {
+            for server in mcpServers {
+                arguments += ["-c", "mcp_servers.\(server).enabled=false"]
+            }
+        } else {
+            arguments.append("--ignore-user-config")
+        }
+        arguments += [
             "--model", model,
             "--output-last-message", output.path,
             "-",
         ]
+        return arguments
+    }
+
+    /// The MCP servers the person's codex config defines, read from
+    /// `$CODEX_HOME/config.toml` or `~/.codex/config.toml`.
+    static func codexMCPServers() -> [String]? {
+        let home = Home.current.variable("CODEX_HOME").map { Home.current.expanding($0) }
+            ?? Home.current.url.appendingPathComponent(".codex", isDirectory: true)
+        guard let text = try? String(
+            contentsOf: home.appendingPathComponent("config.toml"), encoding: .utf8)
+        else { return [] }
+        return mcpServerNames(inTOML: text)
+    }
+
+    /// The server names under `mcp_servers` in a TOML document, in the three
+    /// shapes TOML allows: `[mcp_servers.name]` (or a subtable of it), a key
+    /// under `[mcp_servers]`, and a dotted key at the top level.
+    ///
+    /// Not a TOML parser, and it errs one way: a file that mentions
+    /// `mcp_servers` and yields no name here answers nil, which makes codex
+    /// skip the file rather than keep a server this could not see.
+    static func mcpServerNames(inTOML text: String) -> [String]? {
+        let name = #"\s*("([^"]*)"|'([^']*)'|([A-Za-z0-9_-]+))"#
+        let header = try! NSRegularExpression(pattern: #"^\s*\[\s*mcp_servers\s*\."# + name)
+        let dotted = try! NSRegularExpression(pattern: #"^\s*mcp_servers\s*\."# + name)
+        let key = try! NSRegularExpression(pattern: "^" + name + #"\s*[=.]"#)
+
+        func capture(_ regex: NSRegularExpression, in line: String) -> String? {
+            let range = NSRange(line.startIndex..., in: line)
+            guard let match = regex.firstMatch(in: line, range: range) else { return nil }
+            for group in 2...4 {
+                if let found = Range(match.range(at: group), in: line) {
+                    return String(line[found])
+                }
+            }
+            return nil
+        }
+
+        var names: [String] = []
+        var section: String?
+        for raw in text.split(whereSeparator: \.isNewline) {
+            let line = String(raw)
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("#") { continue }
+            if trimmed.hasPrefix("[") {
+                section = trimmed
+                if let found = capture(header, in: line) { names.append(found) }
+                continue
+            }
+            if section == nil, let found = capture(dotted, in: line) {
+                names.append(found)
+            } else if let section,
+                      section.replacingOccurrences(of: " ", with: "") == "[mcp_servers]",
+                      let found = capture(key, in: line) {
+                names.append(found)
+            }
+        }
+        var seen = Set<String>()
+        names = names.filter { seen.insert($0).inserted }
+        if names.isEmpty, text.contains("mcp_servers") { return nil }
+        return names
+    }
+
+    private static func isBareTOMLKey(_ name: String) -> Bool {
+        !name.isEmpty && name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }
     }
 
     private static func openAI(key: String, model: String, baseURL: String) -> LLMBackend {

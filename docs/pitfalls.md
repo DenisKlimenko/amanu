@@ -382,6 +382,14 @@ the transcript is whatever anybody on the call chose to say.
 `LLMBackend.claudeArguments` is pinned by a test; a flag dropped from it is a
 meeting that can talk a coding agent into reading the disk.
 
+`codex exec` keeps the person's config.toml, where a custom provider lives,
+and so also the MCP servers it defines — which the read-only sandbox does not
+cover, since their tools run in the servers' own processes. `-c
+mcp_servers={}` looks like the override and does nothing: codex merges a
+table from the command line into the file's. Each server is switched off by
+name instead (`LLMBackend.codexArguments`), and naming one the file does not
+define stops codex outright, so the names are read from the file each time.
+
 # What has never been verified
 
 Not defects, and not oversights: places where the code is believed correct on
@@ -418,6 +426,10 @@ reasoning alone. Worth knowing before trusting any of them in front of someone.
   which counts as a permanent failure and falls through to the next backend.
   Likewise "API Error: Connection error." as the CLI's offline answer is what
   it printed before, not something captured with this version offline.
+- **The codex CLI with its MCP servers switched off.** The overrides were
+  checked with `codex mcp list` against a `CODEX_HOME` of their own, codex
+  0.145.0; no prompt has been run through `codex exec` with them, and the
+  file's server names are found by a line reader, not a TOML parser.
 - **The system tap has no restart.** Unlike the mic, a tap that dies mid-call
   is only reported — by the stall watchdog and the far-end warning — and never
   rebuilt. `AVAudioFile` cannot append, so a rebuilt tap would need a second
