@@ -77,6 +77,13 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         await check.ask()
     }
 
+    /// The system-audio test: a tone out of the speakers and a tap listening
+    /// for it. A seam so a test can prove when it is *not* played without
+    /// playing it.
+    var playTestTone: @MainActor () async -> SetupPermissions.SystemAudioResult = {
+        await SetupPermissions.testSystemAudio()
+    }
+
     /// The form itself, for a host to put in a scroll view.
     let view = FlippedStackView()
 
@@ -218,6 +225,10 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         form.edgeInsets = NSEdgeInsets(
             top: 22, left: SetupLayout.gutter, bottom: 22, right: SetupLayout.gutter)
 
+        launchRow.identifier = NSUserInterfaceItemIdentifier("access.login")
+        micRow.identifier = NSUserInterfaceItemIdentifier("access.microphone")
+        audioRow.identifier = NSUserInterfaceItemIdentifier("access.system-audio")
+        calendarRow.identifier = NSUserInterfaceItemIdentifier("access.calendar")
         form.addArrangedSubview(SetupLayout.section(
             localised("Access", "Доступ"),
             content: SetupLayout.box([launchRow, micRow, audioRow, calendarRow])))
@@ -1093,9 +1104,23 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// person has just said yes is the button looking broken all over again.
     private var calendarGrant: SetupPermissions.State?
 
+    /// Play a tone and listen for it through a tap of our own.
+    ///
+    /// Never during a recording, which the comment on `isRecording` promised
+    /// and only the login item kept: the test opens a second tap beside the
+    /// one recording the meeting and plays 440 Hz out of the speakers, into
+    /// the call — the far end hears it, and it lands in the recording too.
+    /// The wizard's button reaches this as well as the row's, so the refusal
+    /// is here rather than on either button.
     private func testSystemAudio() async {
+        if isRecording?() == true {
+            report(audioRow, localised(
+                "not while a recording is running — the test tone would play into the call",
+                "не во время записи — тестовый тон прозвучит в звонке"))
+            return
+        }
         audioRow.working(localised("playing a tone…", "играет тон…"))
-        let result = await SetupPermissions.testSystemAudio()
+        let result = await playTestTone()
         systemAudio = result
         if result == .heard { SetupState.rememberSystemAudioHeard() }
         switch result {

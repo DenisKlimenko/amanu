@@ -65,16 +65,57 @@ struct SetupFormBehaviourTests {
         #expect(fetches == 1)
         form.stop()
     }
+
+    /// The rule was written down on `isRecording` and kept only by the login
+    /// item: the system-audio test opened a second tap during a meeting and
+    /// played a tone the far end could hear.
+    @Test("The system-audio test is refused during a recording, and says why",
+          .freshHome)
+    func noToneDuringARecording() async throws {
+        let form = SetupForm()
+        defer { form.stop() }
+        var tones = 0
+        form.playTestTone = { tones += 1; return .heard }
+        var recording = true
+        form.isRecording = { recording }
+        let row = try #require(Self.view("access.system-audio", in: form) as? AccessRow)
+
+        row.onAct?()
+        for _ in 0..<5 { await Task.yield() }
+        #expect(tones == 0, "a tone was played into a meeting")
+        let words = Self.labels(in: row).joined(separator: " ")
+        #expect(words.contains("not while a recording is running"))
+
+        recording = false
+        row.onAct?()
+        for _ in 0..<5 where tones == 0 { await Task.yield() }
+        #expect(tones == 1)
+    }
 }
 
 extension SetupFormBehaviourTests {
     fileprivate static func button(_ id: String, in form: SetupForm) -> NSButton? {
+        view(id, in: form) as? NSButton
+    }
+
+    fileprivate static func view(_ id: String, in form: SetupForm) -> NSView? {
         var pending: [NSView] = [form.view]
         while let view = pending.popLast() {
-            if let button = view as? NSButton, button.identifier?.rawValue == id { return button }
+            if view.identifier?.rawValue == id { return view }
             pending.append(contentsOf: view.subviews)
         }
         return nil
+    }
+
+    /// The words on screen under a view, hidden ones left out.
+    fileprivate static func labels(in root: NSView) -> [String] {
+        var found: [String] = []
+        var pending: [NSView] = [root]
+        while let view = pending.popLast() {
+            if let label = view as? NSTextField, !label.isHidden { found.append(label.stringValue) }
+            pending.append(contentsOf: view.subviews)
+        }
+        return found
     }
 }
 
