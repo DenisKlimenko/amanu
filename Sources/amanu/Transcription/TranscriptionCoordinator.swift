@@ -32,6 +32,8 @@ actor TranscriptionCoordinator {
     /// than at once: the same drain would only fail them the same way.
     private var heldBack: [URL] = []
     private var draining = false
+    /// Whoever is waiting for the queue to run dry — see `waitUntilIdle`.
+    private var idleWaiters: [CheckedContinuation<Void, Never>] = []
     private var environmentalFailureNoted = false
     private var lastFailure: String?
     private var statusHandler: (@Sendable (Status) -> Void)?
@@ -210,6 +212,24 @@ actor TranscriptionCoordinator {
         // An enqueue that landed between the loop exiting and the release
         // finishing would otherwise sit until the next enqueue.
         drainIfIdle()
+        guard !draining else { return }
+        let waiters = idleWaiters
+        idleWaiters = []
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// Return once nothing is being transcribed: at once when the queue is
+    /// idle, otherwise when the drain running now — and any it runs into —
+    /// has finished.
+    ///
+    /// For the sweep, which finishes sessions left over from earlier runs.
+    /// `resumePending` returns as soon as its drain has started, so a sweep
+    /// run straight after it went through the recordings folder alongside
+    /// the drain, reaching for the session being settled and filling its log
+    /// with "another amanu has this session".
+    func waitUntilIdle() async {
+        guard draining else { return }
+        await withCheckedContinuation { idleWaiters.append($0) }
     }
 
     /// Transcribe one session now, and wait for it.

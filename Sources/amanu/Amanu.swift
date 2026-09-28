@@ -254,6 +254,10 @@ final class AppController {
         gate: UpdateGate(isRecording: { [weak self] in self?.isRecording == true })
     )
     private let transcription = TranscriptionCoordinator()
+    /// The sweep of the recordings folder, after the queue and one at a time
+    /// — see `SweepScheduler`. It sweeps whatever folder is current when it
+    /// runs.
+    private var sweeps: SweepScheduler!
     private var mediaImport: MediaImportCoordinator
     private let liveTranscription = LiveTranscriptionCoordinator()
     private let calendar: CalendarWatcher?
@@ -325,6 +329,13 @@ final class AppController {
         // whether or not the event is what started the recording.
         calendar = (Config.useCalendar() || settings.calendar) ? CalendarWatcher() : nil
         autoRecord = AutoRecordController(settings: settings, calendar: calendar)
+        sweeps = SweepScheduler(
+            waitForQueue: { [transcription] in await transcription.waitUntilIdle() },
+            sweep: { [weak self] in
+                guard let self else { return }
+                await PostProcessor.sweep(root: root)
+                sessionsChanged()
+            })
 
         menuBar.onToggle = { [weak self] in self?.toggle() }
         menuBar.onTogglePause = { [weak self] in self?.togglePause() }
@@ -464,22 +475,20 @@ final class AppController {
                 }
             }
             await transcription.resumePending(root: root)
-            // After the queue, not before: a session that transcribes in this
-            // pass gets named and summarized by the coordinator itself, and
-            // the sweep is only for what was left over from earlier runs.
-            await PostProcessor.sweep(root: root)
-            sessionsChanged()
+            // After the queue has drained, not merely after it has been asked
+            // to start: a session that transcribes in this pass gets named
+            // and summarized by the coordinator itself, and the sweep is only
+            // for what was left over from earlier runs. `resumePending`
+            // returns as soon as its drain begins, and a sweep started then
+            // walked the folder alongside it.
+            sweeps.request()
         }
 
         // A backlog deferred for want of a model is only half-solved by
         // recording the fact — something has to come back for it when the
         // network does.
         let monitor = NetworkMonitor { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let root = self?.root else { return }
-                await PostProcessor.sweep(root: root)
-                self?.sessionsChanged()
-            }
+            Task { @MainActor [weak self] in self?.sweeps.request() }
         }
         monitor.start()
         network = monitor
@@ -695,12 +704,7 @@ final class AppController {
         // The new folder may be an old one, with its own leftovers: a crash
         // to adopt, sessions nobody transcribed.
         RecordingSession.recoverInterrupted(root: folder)
-        if automaticFeaturesStarted {
-            Task { [transcription] in
-                await transcription.resumePending(root: folder)
-                await PostProcessor.sweep(root: folder)
-            }
-        }
+        if automaticFeaturesStarted { catchUp() }
         if recordingsBuilt { recordings.setRoot(folder) }
     }
 
@@ -891,9 +895,19 @@ final class AppController {
         let unreadable = Config.unreadableReason != nil
         defer { configWasUnreadable = unreadable }
         guard configWasUnreadable, !unreadable, automaticFeaturesStarted else { return }
-        Task { [transcription, root] in
-            await transcription.resumePending(root: root)
-            await PostProcessor.sweep(root: root)
+        catchUp()
+    }
+
+    /// Offer the current recordings folder to the queue, and sweep it once
+    /// the queue has drained. A fixed config that also names a new folder
+    /// asks for this twice in one turn — once for the folder, once for the
+    /// file — and gets the queue asked twice, which it takes as once, and
+    /// one sweep.
+    private func catchUp() {
+        let folder = root
+        Task { [transcription, weak self] in
+            await transcription.resumePending(root: folder)
+            self?.sweeps.request()
         }
     }
 
