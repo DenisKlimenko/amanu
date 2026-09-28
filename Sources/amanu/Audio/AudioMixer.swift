@@ -38,8 +38,17 @@ enum AudioMixer {
     }
 
     /// Write `tracks` mixed down into `output`, replacing whatever was there.
-    /// A track that's missing, empty, or unreadable is skipped — one dead
-    /// track shouldn't cost the other one its transcript.
+    ///
+    /// A track that is missing or holds no frames is left out — one track that
+    /// never recorded should not cost the other its transcript. A track that
+    /// is there and cannot be read is another matter, and throws: mixing
+    /// without it produced a one-sided transcript that reported success, and
+    /// after it the audio was settled like any other — the recoverable track
+    /// deleted along with the rest.
+    ///
+    /// The mix is written beside `output` and renamed onto it only when
+    /// complete. The transcription coordinator reuses a `mixed.m4a` it finds,
+    /// so a mix interrupted halfway used to be transcribed as the meeting.
     static func mix(_ tracks: [Track], to output: URL) async throws {
         // Off the cooperative pool: this is a few seconds of solid arithmetic
         // and encoding per hour of meeting, and the pool has a recording to run.
@@ -48,25 +57,60 @@ enum AudioMixer {
 
     // MARK: -
 
+    /// Where a mix is written before it is complete. Still `.m4a`, because
+    /// `AVAudioFile` chooses the container by extension.
+    static func temporary(for output: URL) -> URL {
+        output.deletingPathExtension().appendingPathExtension("tmp.m4a")
+    }
+
     /// One second of output at a time. Big enough that the per-block bookkeeping
     /// disappears next to the arithmetic, small enough that an hour-long meeting
     /// never holds more than a few hundred kilobytes of audio in memory — the
     /// mistake the predecessor made was keeping whole meetings resident.
     private static func mixNow(_ tracks: [Track], to output: URL) throws {
-        let sources = tracks.compactMap { Source($0) }
-        guard !sources.isEmpty else { throw MixError.noUsableTracks }
-
+        let present = try tracks.compactMap { track -> (Track, Double)? in
+            guard FileManager.default.fileExists(atPath: track.url.path) else { return nil }
+            do {
+                return (track, try AudioTrackReader(url: track.url).sourceRate)
+            } catch AudioTrackReader.ReadError.empty {
+                return nil
+            }
+        }
         // Mono, at the fastest rate any source runs at: the mix is speech
         // headed for a transcriber, so a second channel would only carry the
         // same words twice, and downsampling is a decision better left to
         // whoever consumes it.
-        let rate = sources.map(\.rate).max()!
-        guard
-            let format = AVAudioFormat(
+        guard let rate = present.map(\.1).max(),
+              let format = AVAudioFormat(
                 commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false)
         else { throw MixError.noUsableTracks }
+        let readers = try present.map {
+            try AudioTrackReader(url: $0.0.url, rate: rate, offset: $0.0.offset)
+        }
         let blockFrames = AVAudioFrameCount(rate)
 
+        let temporary = temporary(for: output)
+        try? FileManager.default.removeItem(at: temporary)
+        do {
+            try write(readers, format: format, blockFrames: blockFrames, to: temporary)
+            // AVAudioFile won't overwrite, and a leftover from a failed run
+            // would otherwise wedge every retry.
+            try? FileManager.default.removeItem(at: output)
+            try FileManager.default.moveItem(at: temporary, to: output)
+        } catch {
+            try? FileManager.default.removeItem(at: temporary)
+            throw error
+        }
+    }
+
+    /// The mixing itself. A function of its own so the output file is closed
+    /// — it is, when it goes out of scope — before anything renames it.
+    private static func write(
+        _ readers: [AudioTrackReader],
+        format: AVAudioFormat,
+        blockFrames: AVAudioFrameCount,
+        to url: URL
+    ) throws {
         // Two blocks in rotation plus a silent one. Two, because the last block
         // of the mix is the only one allowed to be short and there is no way to
         // know a block is the last until the next one comes back empty — so one
@@ -83,19 +127,13 @@ enum AudioMixer {
         silence.frameLength = blockFrames
         silence.floatChannelData![0].update(repeating: 0, count: Int(blockFrames))
 
-        let readers = sources.compactMap { Reader($0, to: format) }
-        guard !readers.isEmpty else { throw MixError.noUsableTracks }
-
-        // AVAudioFile won't overwrite, and a leftover from a failed run would
-        // otherwise wedge every retry.
-        try? FileManager.default.removeItem(at: output)
         let file: AVAudioFile
         do {
             file = try AVAudioFile(
-                forWriting: output,
+                forWriting: url,
                 settings: [
                     AVFormatIDKey: kAudioFormatMPEG4AAC,
-                    AVSampleRateKey: rate,
+                    AVSampleRateKey: format.sampleRate,
                     AVNumberOfChannelsKey: 1,
                 ],
                 commonFormat: .pcmFormatFloat32,
@@ -120,18 +158,8 @@ enum AudioMixer {
             var filled = 0
 
             for reader in readers where !reader.spent {
-                // Where inside this block the track's own timeline begins.
-                // Zero once it's running: it just keeps flowing.
-                let lead = max(0, reader.start - position)
-                guard lead < AVAudioFramePosition(blockFrames) else { continue }
-                guard let chunk = reader.next(blockFrames - AVAudioFrameCount(lead)) else {
-                    continue
-                }
-
-                let samples = chunk.floatChannelData![0]
-                let base = Int(lead)
-                for i in 0..<Int(chunk.frameLength) { mixed[base + i] += samples[i] }
-                filled = max(filled, base + Int(chunk.frameLength))
+                filled = max(filled, try reader.read(
+                    into: mixed, frames: blockFrames, at: position, adding: true))
             }
             position += AVAudioFramePosition(blockFrames)
 
@@ -161,94 +189,6 @@ enum AudioMixer {
         if let held = pending, pendingFrames > 0 {
             held.frameLength = AVAudioFrameCount(pendingFrames)
             try file.write(from: held)
-        }
-    }
-
-    /// A track that opened and has something in it. Split out from `Reader` so
-    /// the output sample rate can be chosen from every source before any
-    /// converter is built.
-    private struct Source {
-        let file: AVAudioFile
-        let start: TimeInterval
-        var rate: Double { file.processingFormat.sampleRate }
-
-        init?(_ track: Track) {
-            guard
-                FileManager.default.fileExists(atPath: track.url.path),
-                let file = try? AVAudioFile(forReading: track.url),
-                file.length > 0
-            else { return nil }
-            self.file = file
-            self.start = track.offset
-        }
-    }
-
-    /// One source, resampled to the mix's format and handed out in pieces.
-    ///
-    /// `@unchecked Sendable` because `AVAudioConverter`'s input block is typed
-    /// `@Sendable` while being documented to run synchronously inside
-    /// `convert(to:error:withInputFrom:)` — one reader never crosses a thread,
-    /// it just gets called back on the one it's already on.
-    private final class Reader: @unchecked Sendable {
-        private let file: AVAudioFile
-        private let converter: AVAudioConverter
-        private let staging: AVAudioPCMBuffer
-        private let format: AVAudioFormat
-
-        /// First frame of the mix this track contributes to.
-        let start: AVAudioFramePosition
-        /// Nothing left, or nothing readable left. Either way, stop asking.
-        private(set) var spent = false
-
-        init?(_ source: Source, to format: AVAudioFormat) {
-            let input = source.file.processingFormat
-            guard
-                let converter = AVAudioConverter(from: input, to: format),
-                let staging = AVAudioPCMBuffer(
-                    pcmFormat: input, frameCapacity: AVAudioFrameCount(input.sampleRate))
-            else { return nil }
-            self.file = source.file
-            self.converter = converter
-            self.staging = staging
-            self.format = format
-            self.start = AVAudioFramePosition((source.start * format.sampleRate).rounded())
-        }
-
-        /// Up to `frames` of mix-format audio, or nil once the track is spent.
-        func next(_ frames: AVAudioFrameCount) -> AVAudioPCMBuffer? {
-            guard !spent, frames > 0,
-                let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)
-            else { return nil }
-
-            var error: NSError?
-            let status = converter.convert(to: out, error: &error) { [self] _, status in
-                staging.frameLength = 0
-                // Bounded by framePosition, not by a short read: reading past
-                // the end throws instead of returning nothing, so "read until
-                // it comes back empty" ends every mix in a spurious failure.
-                guard file.framePosition < file.length,
-                    (try? file.read(into: staging)) != nil,
-                    staging.frameLength > 0
-                else {
-                    status.pointee = .endOfStream
-                    return nil
-                }
-                status.pointee = .haveData
-                return staging
-            }
-
-            if status == .endOfStream || status == .error {
-                spent = true
-                if status == .error, let error {
-                    // Truncated tail, unreadable packets — drop the rest of this
-                    // track rather than the whole mix, same as the per-track
-                    // path does.
-                    FileHandle.standardError.write(Data(
-                        "warning: \(file.url.lastPathComponent) ends early in the mix: \(error)\n"
-                            .utf8))
-                }
-            }
-            return out.frameLength > 0 ? out : nil
         }
     }
 }
