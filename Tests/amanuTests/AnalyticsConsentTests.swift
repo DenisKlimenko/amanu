@@ -3,16 +3,17 @@ import Testing
 
 @testable import amanu
 
-@Suite("Analytics consent and delivery transitions", .serialized)
+@Suite("Analytics consent and delivery transitions")
 struct AnalyticsConsentTests {
     @Test("Flushing before start never creates an identity or a queue")
-    func flushBeforeStart() {
+    func flushBeforeStart() async {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let sink = AnalyticsSink(store: root.appendingPathComponent("pending.json"),
                                  transport: { _ in .all }, switchIsOn: { true },
-                                 identity: { Issue.record("Identity requested before start"); return ("test", true) })
-        sink.flush(waitingUpTo: 0.1)
+                                 identity: { Issue.record("Identity requested before start"); return ("test", true) },
+                                 schedulesSends: false)
+        await sink.flush()
         #expect(sink.bufferedCount == 0)
         #expect(!FileManager.default.fileExists(atPath: root.path))
     }
@@ -89,7 +90,7 @@ struct AnalyticsConsentTests {
         sink.record(.transcriptFailed, [.engine: .text("private-engine-name"),
                                       .backend: .text("private-server-name"),
                                       .trigger: .text("private-meeting-name")])
-        await Task.detached { sink.flush(waitingUpTo: 2) }.value
+        await sink.flush()
         let bodies = await collector.bodies
         #expect(bodies.count == 1)
         let text = String(decoding: try #require(bodies.first), as: UTF8.self)
@@ -100,7 +101,7 @@ struct AnalyticsConsentTests {
                       transport: @escaping AnalyticsSink.Transport = { _ in .retry }) -> AnalyticsSink {
         AnalyticsSink(store: store, transport: transport, switchIsOn: { toggle.get() },
                       identity: { ("consent-test", false) }, appVersion: { nil },
-                      markVersionSeen: { _ in false })
+                      markVersionSeen: { _ in false }, schedulesSends: false)
     }
 
     @Test("Enabling analytics after an opted-out launch starts collecting")
@@ -132,7 +133,7 @@ struct AnalyticsConsentTests {
         // Another process can update the file without posting our local notification.
         toggle.set(false)
         sink.record(.recordingFinished, [:])
-        await Task.detached { sink.flush(waitingUpTo: 1) }.value
+        await sink.flush()
 
         #expect(sink.bufferedCount == 0)
         #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("pending.json").path))
@@ -148,13 +149,15 @@ struct AnalyticsConsentTests {
         sink.start(surface: .app)
         for _ in 0..<AnalyticsSink.capacity { sink.record(.recordingStarted, [:]) }
         #expect(sink.bufferedCount == AnalyticsSink.capacity)
-        sink.flush(waitingUpTo: 0)
+        // Start a send without waiting for it: the transport holds the first
+        // request open until the test says otherwise.
+        sink.flush {}
         await delivery.waitForFirstSend()
         sink.record(.summaryFinished, [:])
         #expect(sink.bufferedCount == AnalyticsSink.capacity)
 
         await delivery.deliverFirst()
-        await Task.detached { sink.flush(waitingUpTo: 2) }.value
+        await sink.flush()
 
         let bodies = await delivery.bodies
         let names = try bodies.flatMap { body -> [String] in

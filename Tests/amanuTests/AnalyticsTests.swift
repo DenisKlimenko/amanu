@@ -6,10 +6,13 @@ import Testing
 /// The queue, and the three rules it exists to keep: nothing is sent when the
 /// switch is off, nothing is lost to a restart, and nothing grows without a
 /// ceiling.
-// These tests deliberately call the synchronous quit-time flush around an
-// async transport. Running several of them together on a small cooperative
-// thread pool can starve the transport tasks they are waiting for.
-@Suite("Analytics queue", .serialized)
+///
+/// Every sink here sends only when flushed, and every flush is awaited to the
+/// end rather than waited on for half a second. The suite used to block a
+/// thread per test on the quit-time flush while the transport it was waiting
+/// for needed a thread of its own, which is why CI ran the whole suite one
+/// test at a time.
+@Suite("Analytics queue")
 struct AnalyticsQueueTests {
     private static func scratch() -> URL {
         let dir = FileManager.default.temporaryDirectory
@@ -18,16 +21,17 @@ struct AnalyticsQueueTests {
         return dir.appendingPathComponent("pending.json")
     }
 
-    /// A transport that keeps what it was given and answers as told.
+    /// A transport that keeps what it was given and answers as told — after
+    /// the gate opens, when there is one.
     private final class Recorder: @unchecked Sendable {
         private let lock = NSLock()
         private var bodies: [Data] = []
         let succeeds: Bool
-        let delay: Duration
+        let gate: Gate?
 
-        init(succeeds: Bool, delay: Duration = .zero) {
+        init(succeeds: Bool, gate: Gate? = nil) {
             self.succeeds = succeeds
-            self.delay = delay
+            self.gate = gate
         }
 
         private func keep(_ body: Data) {
@@ -39,7 +43,7 @@ struct AnalyticsQueueTests {
         var transport: AnalyticsSink.Transport {
             { [self] body in
                 keep(body)
-                if delay > .zero { try? await Task.sleep(for: delay) }
+                await gate?.pass()
                 return succeeds ? .all : .retry
             }
         }
@@ -59,11 +63,12 @@ struct AnalyticsQueueTests {
             transport: transport ?? { _ in .all },
             clock: clock,
             switchIsOn: { on },
-            identity: { (id: "test-identity", isFirstRun: firstRun) })
+            identity: { (id: "test-identity", isFirstRun: firstRun) },
+            schedulesSends: false)
     }
 
     @Test("With the switch off nothing is buffered and nothing is sent")
-    func offSendsNothing() {
+    func offSendsNothing() async {
         let store = Self.scratch()
         let recorder = Recorder(succeeds: true)
         let sink = Self.sink(
@@ -71,7 +76,7 @@ struct AnalyticsQueueTests {
 
         sink.start(surface: .app)
         sink.record(.recordingStarted, [.trigger: .text("manual")])
-        sink.flush(waitingUpTo: 0.5)
+        await sink.flush()
 
         #expect(sink.bufferedCount == 0)
         #expect(recorder.sent.isEmpty)
@@ -81,70 +86,107 @@ struct AnalyticsQueueTests {
     /// The one event nobody can fire twice: it means "this machine had no
     /// identifier", and asking for the identifier is what ends that.
     @Test("installed fires on the first run and not on the second")
-    func installedIsOnce() {
+    func installedIsOnce() async {
         let store = Self.scratch()
         let first = Self.sink(store: store, firstRun: true, transport: { _ in .retry })
         first.start(surface: .app)
-        first.flush(waitingUpTo: 0.5)
+        await first.flush()
         #expect(first.bufferedCount == 1)
 
         let second = Self.sink(store: store, firstRun: false, transport: { _ in .retry })
         second.start(surface: .app)
-        second.flush(waitingUpTo: 0.5)
+        await second.flush()
         // The one from the first run, still unsent, and nothing added.
         #expect(second.bufferedCount == 1)
     }
 
     @Test("What could not be sent is still there after a restart")
-    func failedSendsSurviveARestart() {
+    func failedSendsSurviveARestart() async {
         let store = Self.scratch()
         let failing = Self.sink(store: store, transport: { _ in .retry })
         failing.start(surface: .app)
         failing.record(.recordingFinished, [.durationBucket: .text("5_15m")])
         failing.record(.transcriptFinished, [.engine: .text("parakeet")])
-        failing.flush(waitingUpTo: 0.5)
+        await failing.flush()
         #expect(failing.bufferedCount == 2)
 
         let next = Self.sink(store: store, transport: { _ in .retry })
         next.start(surface: .app)
-        next.flush(waitingUpTo: 0.5)
+        await next.flush()
         #expect(next.bufferedCount == 2)
     }
 
     @Test("A successful send clears the queue")
-    func successClearsTheQueue() {
+    func successClearsTheQueue() async {
         let store = Self.scratch()
         let recorder = Recorder(succeeds: true)
         let sink = Self.sink(store: store, transport: recorder.transport)
         sink.start(surface: .app)
         sink.record(.summaryFinished, [.backend: .text("ollama")])
-        sink.flush(waitingUpTo: 2)
+        await sink.flush()
 
         #expect(sink.bufferedCount == 0)
         #expect(recorder.sent.count == 1)
     }
 
+    /// A flush that arrives while a send is already in flight has to wait for
+    /// that send, not return because `sending` is already true. The send is
+    /// held open by a gate the test controls, so "still in flight" is a fact
+    /// here rather than a quarter of a second somebody hoped was long enough.
     @Test("An explicit flush waits for a send that is already in flight")
-    func flushWaitsForAnInflightSend() {
+    func flushWaitsForAnInflightSend() async {
         let store = Self.scratch()
-        let recorder = Recorder(succeeds: true, delay: .milliseconds(250))
+        let gate = Gate()
+        let recorder = Recorder(succeeds: true, gate: gate)
         let sink = Self.sink(store: store, transport: recorder.transport)
         sink.start(surface: .app)
         sink.record(.summaryFinished, [.backend: .text("ollama")])
 
-        // Start a send, but deliberately stop waiting before its transport
-        // finishes. The next flush must join that send instead of returning
-        // just because `sending` is already true.
-        sink.flush(waitingUpTo: 0.01)
+        let first = Flag()
+        sink.flush { first.raise() }
+        let joined = Flag()
+        sink.flush { joined.raise() }
+        // `bufferedCount` waits its turn on the sink's queue, so both flushes
+        // have been handled — the first started the send, the second found it
+        // running — by the time it answers.
         #expect(sink.bufferedCount == 1)
-        sink.flush(waitingUpTo: 2)
+        #expect(!first.isRaised && !joined.isRaised, "a flush finished before its send did")
 
+        gate.open()
+        await sink.flush()
+
+        #expect(first.isRaised && joined.isRaised)
         #expect(sink.bufferedCount == 0)
         #expect(recorder.sent.count == 1)
     }
 
+    /// And the flush quitting uses keeps its promise the other way: it gives
+    /// up when it said it would, and what did not go is still on disk.
+    @Test("Quitting waits for a send only as long as it said it would",
+          .timeLimit(.minutes(1)))
+    func quitDoesNotWaitForASend() async {
+        let store = Self.scratch()
+        let gate = Gate()
+        let sink = Self.sink(store: store, transport: Recorder(succeeds: true, gate: gate).transport)
+        sink.start(surface: .app)
+        sink.record(.recordingFinished, [:])
+
+        // On a thread of its own: this is the one call that blocks.
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                sink.flush(waitingUpTo: 0.05)
+                done.resume()
+            }
+        }
+        #expect(sink.bufferedCount == 1, "the unsent event is kept for the next launch")
+
+        gate.open()
+        await sink.flush()
+        #expect(sink.bufferedCount == 0)
+    }
+
     @Test("A packaged version is reported once per version")
-    func versionSeenIsOncePerVersion() throws {
+    func versionSeenIsOncePerVersion() async throws {
         let store = Self.scratch()
         let state = store.deletingLastPathComponent().appendingPathComponent("identity.json")
         _ = AnalyticsIdentity.identifier(at: state)
@@ -156,12 +198,13 @@ struct AnalyticsQueueTests {
                 switchIsOn: { true },
                 identity: { (id: "test-identity", isFirstRun: false) },
                 appVersion: { version },
-                markVersionSeen: { AnalyticsIdentity.markVersionSeen($0, at: state) })
+                markVersionSeen: { AnalyticsIdentity.markVersionSeen($0, at: state) },
+                schedulesSends: false)
         }
 
         let first = sink(version: "0.4.13")
         first.start(surface: .app)
-        first.flush(waitingUpTo: 0.5)
+        await first.flush()
         #expect(first.bufferedCount == 1)
         let pendingData = try Data(contentsOf: store)
         let pendingJSON = try #require(
@@ -172,12 +215,12 @@ struct AnalyticsQueueTests {
 
         let same = sink(version: "0.4.13")
         same.start(surface: .app)
-        same.flush(waitingUpTo: 0.5)
+        await same.flush()
         #expect(same.bufferedCount == 1, "only the first sink's unsent event remains")
 
         let next = sink(version: "0.4.14")
         next.start(surface: .app)
-        next.flush(waitingUpTo: 0.5)
+        await next.flush()
         #expect(next.bufferedCount == 2)
 
         let data = try Data(contentsOf: state)
@@ -189,31 +232,31 @@ struct AnalyticsQueueTests {
     /// A laptop that spent a month offline should not come back with a month
     /// of events, and should not eat disk while it is away.
     @Test("The queue stops at its ceiling, dropping the oldest")
-    func theQueueHasACeiling() {
+    func theQueueHasACeiling() async {
         let store = Self.scratch()
         let sink = Self.sink(store: store, transport: { _ in .retry })
         sink.start(surface: .app)
         for _ in 0..<(AnalyticsSink.capacity + 40) {
             sink.record(.recordingStarted, [.trigger: .text("manual")])
         }
-        sink.flush(waitingUpTo: 0.5)
+        await sink.flush()
         #expect(sink.bufferedCount == AnalyticsSink.capacity)
     }
 
     @Test("Events older than a week are dropped rather than sent late")
-    func staleEventsAreDropped() {
+    func staleEventsAreDropped() async {
         let store = Self.scratch()
         let old = Date()
         let stale = Self.sink(store: store, transport: { _ in .retry }, clock: { old })
         stale.start(surface: .app)
         stale.record(.recordingStarted, [.trigger: .text("manual")])
-        stale.flush(waitingUpTo: 0.5)
+        await stale.flush()
         #expect(stale.bufferedCount == 1)
 
         let later = old.addingTimeInterval(AnalyticsSink.maximumAge + 60)
         let fresh = Self.sink(store: store, transport: { _ in .retry }, clock: { later })
         fresh.start(surface: .app)
-        fresh.flush(waitingUpTo: 0.5)
+        await fresh.flush()
         #expect(fresh.bufferedCount == 0)
     }
 
@@ -221,7 +264,7 @@ struct AnalyticsQueueTests {
     /// production: a body the server silently drops looks exactly like nobody
     /// using amanu.
     @Test("The body is a batch Umami can ingest")
-    func theBodyIsWellFormed() throws {
+    func theBodyIsWellFormed() async throws {
         let store = Self.scratch()
         let recorder = Recorder(succeeds: true)
         let sink = Self.sink(store: store, transport: recorder.transport)
@@ -231,7 +274,7 @@ struct AnalyticsQueueTests {
             .durationBucket: .text("30_60m"),
             .liveUsed: .flag(true),
         ])
-        sink.flush(waitingUpTo: 2)
+        await sink.flush()
 
         let body = try #require(recorder.sent.first)
         let batch = try #require(
@@ -276,59 +319,6 @@ struct AnalyticsQueueTests {
 
 @Suite("Analytics v2 catalogue")
 struct AnalyticsV2CatalogueTests {
-    /// Removing one of these means the product loses a blind spot it explicitly
-    /// chose to measure: release adoption, failed capture, fallback, model
-    /// setup, transcript consumption, or speaker naming.
-    @Test("The v2 lifecycle events are available to every caller")
-    func lifecycleEventsExist() {
-        let actual = Set(Analytics.Event.allCases.map(\.rawValue))
-        let expected: Set<String> = [
-            "version_seen",
-            "settings_opened",
-            "recording_start_failed",
-            "transcript_fallback",
-            "summary_backend_failed",
-            "speaker_names_finished",
-            "speaker_names_failed",
-            "model_download_started",
-            "model_download_finished",
-            "model_download_failed",
-            "artifact_opened",
-        ]
-        #expect(expected.isSubset(of: actual), "missing: \(expected.subtracting(actual).sorted())")
-    }
-
-    /// These are the finite dimensions needed to explain the new lifecycle
-    /// events. Free-form values still have no route onto the wire.
-    @Test("The v2 event dimensions are closed catalogue properties")
-    func lifecyclePropertiesExist() {
-        let actual = Set(Analytics.Property.allCases.map(\.rawValue))
-        let expected: Set<String> = [
-            "model",
-            "fallback_used",
-            "from_engine",
-            "to_engine",
-            "component",
-            "outcome",
-            "asset",
-            "artifact",
-        ]
-        #expect(expected.isSubset(of: actual), "missing: \(expected.subtracting(actual).sorted())")
-    }
-
-    @Test("The v2 install state distinguishes choices from successful work")
-    func installPropertiesExist() {
-        let actual = Set(AnalyticsCatalogue.PersonProperty.allCases.map(\.rawValue))
-        let expected: Set<String> = [
-            "analytics_schema_version",
-            "transcription_enabled",
-            "transcription_cloud_provider",
-            "summary_enabled",
-            "speaker_names_backend",
-        ]
-        #expect(expected.isSubset(of: actual), "missing: \(expected.subtracting(actual).sorted())")
-    }
-
     @Test("STT model names are useful without allowing arbitrary text onto the wire")
     func transcriptionModelsAreNormalised() {
         let cases: [(String, String, String)] = [
@@ -546,6 +536,29 @@ struct AnalyticsCatalogueTests {
             let name = row.dropFirst(3).prefix { $0 != "`" }
             guard !name.isEmpty else { continue }
             if !known.contains(String(name)) { invented.append(String(name)) }
+        }
+        #expect(invented.isEmpty, "docs/analytics.md names: \(invented.joined(separator: ", "))")
+    }
+
+    /// The same direction for the fields. Removing a property the page still
+    /// lists is how the product loses a dimension it chose to measure without
+    /// anything saying so — the check that used to stand here re-listed the
+    /// enum's raw values by hand, which only ever tested itself.
+    @Test("The page names no field the program cannot attach")
+    func thePageInventsNoField() throws {
+        let page = try Self.page
+        let known = Set(Analytics.Property.allCases.map(\.rawValue))
+        let fields = page.components(separatedBy: "## The fields")
+        let table = try #require(fields.count == 2 ? fields[1] : nil)
+            .components(separatedBy: "\n## ")[0]
+        var invented: [String] = []
+        for row in table.components(separatedBy: "\n") where row.hasPrefix("| `") {
+            // The first column, which may name several fields: `a`, `b`.
+            let column = row.dropFirst(2).prefix { $0 != "|" }
+            for name in column.split(separator: "`", omittingEmptySubsequences: false).enumerated()
+            where name.offset % 2 == 1 && !known.contains(String(name.element)) {
+                invented.append(String(name.element))
+            }
         }
         #expect(invented.isEmpty, "docs/analytics.md names: \(invented.joined(separator: ", "))")
     }

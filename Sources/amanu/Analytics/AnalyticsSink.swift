@@ -68,6 +68,11 @@ final class AnalyticsSink: @unchecked Sendable {
     /// was handed in, because a caller that brought its own destination has
     /// said where things go.
     private let hasSomewhereToSend: Bool
+    /// Whether sends happen by themselves — a second after starting and
+    /// every half minute after — or only when somebody flushes. Always in the
+    /// program; never in a test, where a send the clock started at a moment
+    /// nobody chose is the difference between a test and a race.
+    private let schedulesSends: Bool
 
     private var pending: [[String: Any]] = []
     private var enabled = false
@@ -92,7 +97,8 @@ final class AnalyticsSink: @unchecked Sendable {
         appVersion: @escaping @Sendable () -> String? = { AnalyticsCatalogue.appVersion() },
         markVersionSeen: @escaping @Sendable (String) -> Bool = {
             AnalyticsIdentity.markVersionSeen($0)
-        }
+        },
+        schedulesSends: Bool = true
     ) {
         self.store = store
         self.transport = transport ?? AnalyticsSink.post
@@ -102,6 +108,7 @@ final class AnalyticsSink: @unchecked Sendable {
         self.appVersion = appVersion
         self.markVersionSeen = markVersionSeen
         self.hasSomewhereToSend = transport != nil || Endpoint.isConfigured
+        self.schedulesSends = schedulesSends
     }
 
     // MARK: - starting
@@ -112,7 +119,7 @@ final class AnalyticsSink: @unchecked Sendable {
             started = true
             self.surface = surface
             watchTheSwitch()
-            startTimer()
+            if schedulesSends { startTimer() }
             enabled = switchIsOn()
             guard enabled else {
                 try? FileManager.default.removeItem(at: store)
@@ -127,7 +134,7 @@ final class AnalyticsSink: @unchecked Sendable {
                 append(.versionSeen, [:])
             }
         }
-        flushSoon()
+        if schedulesSends { flushSoon() }
     }
 
     /// A switch that only takes effect at the next launch is a switch people
@@ -222,18 +229,40 @@ final class AnalyticsSink: @unchecked Sendable {
     /// Quitting is an instruction, and analytics does not get a vote on it.
     /// Whatever has not gone when the wait runs out is already on disk and
     /// goes at the next launch — which is why the timeout can be this rude.
+    ///
+    /// This is the one call that blocks its thread, because quitting is
+    /// synchronous. Anything that can wait properly — every test — awaits
+    /// `flush()` instead: a semaphore held on a cooperative thread is a thread
+    /// the transport it is waiting for may need, and that is how a timeout
+    /// that was never going to matter became the suite's reason to run one
+    /// test at a time.
     func flush(waitingUpTo seconds: TimeInterval) {
         let done = DispatchSemaphore(value: 0)
+        flush { done.signal() }
+        _ = done.wait(timeout: .now() + seconds)
+    }
+
+    /// Send what is buffered, and return once it has gone or failed to —
+    /// however long that takes.
+    func flush() async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            flush { done.resume() }
+        }
+    }
+
+    /// Both flushes: start sending and call `finished` when the send this
+    /// joins, or starts, is over. Enqueued before it returns, so everything
+    /// recorded before it is included.
+    func flush(then finished: @escaping @Sendable () -> Void) {
         queue.async { [self] in
             reread()
             guard enabled, !pending.isEmpty else {
-                done.signal()
+                finished()
                 return
             }
-            flushWaiters.append { done.signal() }
+            flushWaiters.append(finished)
             send()
         }
-        _ = done.wait(timeout: .now() + seconds)
     }
 
     private func send() {
