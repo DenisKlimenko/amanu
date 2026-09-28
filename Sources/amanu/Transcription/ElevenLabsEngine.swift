@@ -7,11 +7,15 @@ import Foundation
 actor ElevenLabsEngine: TranscriptionEngine {
     enum EngineError: TranscriptionFailure, CustomStringConvertible {
         case noAPIKey
-        case http(Int, String)
         case empty
 
         var isPermanent: Bool {
             if case .empty = self { return true }
+            return false
+        }
+
+        var isEnvironmental: Bool {
+            if case .noAPIKey = self { return true }
             return false
         }
 
@@ -21,8 +25,6 @@ actor ElevenLabsEngine: TranscriptionEngine {
                 return "no ElevenLabs API key — put one in \(Config.elevenLabsKeyPath.path)"
                     + " (chmod 600), set ELEVENLABS_API_KEY, or configure"
                     + " transcription.elevenlabs.api_key_path"
-            case .http(let code, let body):
-                return "elevenlabs transcription failed: HTTP \(code) \(body.prefix(400))"
             case .empty:
                 return "elevenlabs returned no speech"
             }
@@ -36,10 +38,17 @@ actor ElevenLabsEngine: TranscriptionEngine {
     nonisolated let input: TranscriptionInput = .multichannel
 
     private let apiKey: String
+    private let http: CloudHTTP
 
-    init() throws {
-        guard let key = Config.elevenLabsKey() else { throw EngineError.noAPIKey }
-        apiKey = key
+    init(
+        apiKey: String? = nil,
+        session: URLSession = .shared,
+        retry: CloudHTTP.RetryPolicy = .standard,
+        sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+    ) throws {
+        guard let key = apiKey ?? Config.elevenLabsKey() else { throw EngineError.noAPIKey }
+        self.apiKey = key
+        http = CloudHTTP(service: .elevenLabs, session: session, retry: retry, sleep: sleep)
     }
 
     func prepare() async throws {}
@@ -55,10 +64,7 @@ actor ElevenLabsEngine: TranscriptionEngine {
         var all: [TranscriptSegment] = []
         for index in 0..<channels {
             let channel: Int? = channels > 1 ? index : nil
-            let cache = audio.deletingLastPathComponent().appendingPathComponent(
-                Self.cacheName(
-                    audio: audio.deletingPathExtension().lastPathComponent,
-                    channel: channel))
+            let cache = cacheURL(for: audio, channel: channel)
             let response: Response
             if let cached = try? Data(contentsOf: cache),
                let decoded = try? JSONDecoder().decode(Response.self, from: cached) {
@@ -83,8 +89,10 @@ actor ElevenLabsEngine: TranscriptionEngine {
                 defer {
                     if channel != nil { try? FileManager.default.removeItem(at: upload) }
                 }
-                let data = try await send(upload)
-                response = try JSONDecoder().decode(Response.self, from: data)
+                let data = try await http.sendMultipart(
+                    to: Self.endpoint, fields: Self.requestFields(), file: upload,
+                    key: apiKey, what: "transcription", timeout: 1800)
+                response = try http.decode(Response.self, from: data, what: "transcription")
                 try? data.write(to: cache, options: .atomic)
             }
             all += Self.segments(from: response, duration: duration, channel: channel)
@@ -93,9 +101,14 @@ actor ElevenLabsEngine: TranscriptionEngine {
         return all.sorted { $0.start < $1.start }
     }
 
-    static func cacheName(audio: String, channel: Int?) -> String {
-        "transcript.elevenlabs.\(audio)"
-            + (channel.map { ".channel\($0 + 1)" } ?? "") + ".json"
+    /// Where one channel's response is cached: named for the audio, the
+    /// model and every field sent with it.
+    func cacheURL(for audio: URL, channel: Int?) -> URL {
+        ProviderCache.url(
+            in: audio.deletingLastPathComponent(), provider: .elevenLabs,
+            parts: [audio.lastPathComponent, model]
+                + Self.requestFields().map { "\($0.0)=\($0.1)" },
+            suffix: channel.map { "channel\($0 + 1)" })
     }
 
     static func requestFields() -> [(String, String)] {
@@ -120,8 +133,22 @@ actor ElevenLabsEngine: TranscriptionEngine {
         let words: [Word]
     }
 
-    /// Assemble word timestamps into short turns. Prefix speaker labels from
-    /// stereo tracks with their one-based channel number for the coordinator.
+    /// Assemble word timestamps into turns — runs of one speaker's words
+    /// with no one else's in between — and label them the way the other
+    /// diarizing engines do.
+    ///
+    /// A turn ends where another voice begins, as AssemblyAI's utterances do.
+    /// This used to carry each speaker's turn across the other voices for up
+    /// to a second and a half, so the canonical transcript said one person
+    /// spoke straight through an interjection that happened in the middle of
+    /// their sentence. Merging a brief interruption away is a question of
+    /// presentation, and it is answered where AssemblyAI's is: in
+    /// transcript.md, from the timestamps kept here.
+    ///
+    /// Labels are letters, `A` for `speaker_0`, prefixed with the one-based
+    /// channel for stereo input, so the coordinator reads `1A` as `me A`
+    /// exactly as it does for AssemblyAI. A mono import used to keep
+    /// ElevenLabs' own `speaker_0`, where every other engine says `A`.
     static func segments(
         from response: Response, duration: TimeInterval, channel: Int?
     ) -> [TranscriptSegment] {
@@ -133,19 +160,15 @@ actor ElevenLabsEngine: TranscriptionEngine {
         }
 
         guard duration.isFinite, duration > 0 else { return [] }
-        var active: [String: Turn] = [:]
-        var completed: [Turn] = []
+        var turns: [Turn] = []
         var lastSpeaker: String?
         for word in response.words {
             guard word.start.isFinite, word.end.isFinite else { continue }
             let rawSpeaker = word.speaker_id ?? lastSpeaker ?? "speaker"
-            let speaker = channel.map {
-                String($0 + 1) + speakerSuffix(rawSpeaker)
-            } ?? rawSpeaker
+            let speaker = (channel.map { String($0 + 1) } ?? "") + label(rawSpeaker)
             if word.type == "spacing" {
-                if var turn = active[speaker] {
-                    turn.text += word.text
-                    active[speaker] = turn
+                if let last = turns.indices.last, turns[last].speaker == speaker {
+                    turns[last].text += word.text
                 }
                 continue
             }
@@ -154,97 +177,39 @@ actor ElevenLabsEngine: TranscriptionEngine {
             let end = min(duration, word.end)
             guard start < duration, end > start else { continue }
             lastSpeaker = rawSpeaker
-            if var turn = active[speaker], start - turn.end <= 1.5 {
-                turn.text += word.text
-                turn.end = max(turn.end, end)
-                active[speaker] = turn
+            if let last = turns.indices.last, turns[last].speaker == speaker,
+               start - turns[last].end <= 1.5 {
+                turns[last].text += word.text
+                turns[last].end = max(turns[last].end, end)
             } else {
-                if let previous = active.removeValue(forKey: speaker) {
-                    completed.append(previous)
-                }
-                active[speaker] = Turn(start: start, end: end, text: word.text, speaker: speaker)
+                turns.append(Turn(start: start, end: end, text: word.text, speaker: speaker))
             }
         }
-        completed += active.values
-        let segments: [TranscriptSegment] = completed.sorted { $0.start < $1.start }.compactMap { turn in
+        let segments: [TranscriptSegment] = turns.compactMap { turn in
             let text = turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return nil }
             return TranscriptSegment(
-                start: turn.start, end: turn.end, text: text, speaker: turn.speaker)
+                start: turn.start, end: turn.end, text: text,
+                speaker: turn.speaker.isEmpty ? nil : turn.speaker)
         }
         if !segments.isEmpty { return segments }
         let text = (response.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return [] }
         return [TranscriptSegment(
             start: 0, end: duration, text: text,
-            speaker: channel.map { String($0 + 1) } ?? "speaker")]
+            speaker: channel.map { String($0 + 1) })]
     }
 
-    private static func speakerSuffix(_ speaker: String) -> String {
+    /// `speaker_0` as `A`, `speaker_27` as `AB`; nothing at all for a word
+    /// the service gave no speaker; any other id as it came, with no space
+    /// in front of it — `MultichannelSpeakerLabels` puts the one space
+    /// between side and voice, and a second made `me  guest`.
+    private static func label(_ speaker: String) -> String {
         guard speaker.hasPrefix("speaker_"),
               let index = Int(speaker.dropFirst("speaker_".count)),
-              (0..<32).contains(index)
-        else { return speaker == "speaker" ? "" : " \(speaker)" }
+              (0..<52).contains(index)
+        else { return speaker == "speaker" ? "" : speaker }
         let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
         return index < 26 ? String(letters[index]) : "A\(letters[index - 26])"
-    }
-
-    private func send(_ audio: URL) async throws -> Data {
-        let boundary = "amanu.\(UUID().uuidString)"
-        let body = FileManager.default.temporaryDirectory
-            .appendingPathComponent("amanu-elevenlabs-\(UUID().uuidString).multipart")
-        try Self.writeMultipart(
-            fields: Self.requestFields(), file: audio,
-            boundary: boundary, to: body)
-        defer { try? FileManager.default.removeItem(at: body) }
-
-        var request = URLRequest(url: Self.endpoint)
-        request.httpMethod = "POST"
-        request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
-        request.setValue(
-            "multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "content-type")
-        request.timeoutInterval = 1800
-
-        let (data, response) = try await URLSession.shared.upload(for: request, fromFile: body)
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw EngineError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
-        }
-        return data
-    }
-
-    static func writeMultipart(
-        fields: [(String, String)], file: URL, boundary: String, to destination: URL
-    ) throws {
-        FileManager.default.createFile(atPath: destination.path, contents: nil)
-        let output = try FileHandle(forWritingTo: destination)
-        defer { try? output.close() }
-        for (name, value) in fields {
-            let field = "--\(boundary)\r\n"
-                + "Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n"
-                + "\(value)\r\n"
-            try output.write(contentsOf: Data(field.utf8))
-        }
-        let header = "--\(boundary)\r\n"
-            + "Content-Disposition: form-data; name=\"file\";"
-            + " filename=\"\(file.lastPathComponent)\"\r\n"
-            + "Content-Type: \(contentType(for: file))\r\n\r\n"
-        try output.write(contentsOf: Data(header.utf8))
-        let source = try FileHandle(forReadingFrom: file)
-        defer { try? source.close() }
-        while let chunk = try source.read(upToCount: 1 << 20), !chunk.isEmpty {
-            try output.write(contentsOf: chunk)
-        }
-        try output.write(contentsOf: Data("\r\n--\(boundary)--\r\n".utf8))
-    }
-
-    private static func contentType(for file: URL) -> String {
-        switch file.pathExtension.lowercased() {
-        case "m4a", "mp4": return "audio/mp4"
-        case "wav": return "audio/wav"
-        case "mp3": return "audio/mpeg"
-        case "flac": return "audio/flac"
-        case "aiff", "aif": return "audio/aiff"
-        default: return "application/octet-stream"
-        }
     }
 }

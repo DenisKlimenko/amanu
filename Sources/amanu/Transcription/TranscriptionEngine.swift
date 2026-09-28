@@ -100,6 +100,15 @@ enum MultichannelSpeakerLabels {
 /// paid API on every restart, which is what amanu did until 2026.08.17.
 protocol TranscriptionFailure: Error {
     var isPermanent: Bool { get }
+    /// A failure of the machine rather than of the recording: no key, a key
+    /// the service refuses, a model that would not download. Retrying the
+    /// same session cannot fix it and neither can giving up on it, so it is
+    /// not counted against the session's attempts at all.
+    var isEnvironmental: Bool { get }
+}
+
+extension TranscriptionFailure {
+    var isEnvironmental: Bool { false }
 }
 
 /// A speech-to-text engine amanu can run. Engines are prepared lazily (model

@@ -250,6 +250,13 @@ only values that differ from the defaults. A compact example:
 - `recordings_dir` selects the session folder; `keep_audio` retains the compact
   stereo archive after a successful transcript; `on_stop` is a shell command
   run after processing; `analytics` controls anonymous product-usage reporting.
+- `on_stop` gets the session folder as its only argument and runs once per
+  transcript, after naming and summarizing have had their pass — done,
+  turned off, failed, or deferred for want of a model (a summary that arrives
+  later does not run it again). It never runs while an amanu is still
+  finishing the session, and a crash in between is made good by the next
+  launch. With transcription off it runs once the recording is archived; a
+  recording that could not be transcribed does not run it.
 - `transcription.*` covers `enabled`, `engine`, `cloud`, `local_engine`, `model`, and `language`.
   `local_engine` is `parakeet` by default, `whisper`, or `gigaam`; Whisper
   downloads about 550 MB once. GigaAM v3 downloads about 260 MB and runs

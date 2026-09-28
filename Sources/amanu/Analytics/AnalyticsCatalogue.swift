@@ -93,7 +93,7 @@ enum AnalyticsCatalogue {
     /// closed vocabulary at collection and again when replaying older queues.
     static func sanitized(_ properties: [String: Any]) -> [String: Any] {
         var result = properties
-        let engines = ["auto", "parakeet", "openai", "assemblyai", "elevenlabs"]
+        let engines = ["auto"] + Array(Config.localEngines.union(Config.cloudEngines)).sorted()
         let backends = [
             "auto", "claude-cli", "codex-cli", "anthropic-api", "openai-api", "ollama", "none",
         ]
@@ -142,6 +142,11 @@ enum AnalyticsCatalogue {
             return model == "universal" ? "universal" : "custom"
         case "elevenlabs":
             return provenance == "scribe_v2" ? "scribe_v2" : "custom"
+        case "whisper":
+            return provenance == WhisperModelStore.defaultManifest.id
+                ? "whisper-large-v3-turbo" : "custom"
+        case "gigaam":
+            return provenance == GigaAMModelStore.defaultManifest.id ? "gigaam-v3" : "custom"
         default:
             return "unknown"
         }

@@ -48,8 +48,57 @@ struct ElevenLabsEngineTests {
 
         let turns = ElevenLabsEngine.segments(from: response, duration: 1, channel: nil)
         #expect(turns.map(\.text) == ["Hi.", "Hello."])
-        #expect(turns.map(\.speaker) == ["speaker_0", "speaker_1"])
+        #expect(turns.map(\.speaker) == ["A", "B"])
         #expect(turns.map(\.end) == [0.4, 1])
+    }
+
+    /// The canonical transcript says who spoke when. A speaker's turn used to
+    /// run straight through somebody else's interjection, as if they had
+    /// never been interrupted.
+    @Test("A turn ends where another voice begins, and the Markdown joins it up again")
+    func turnsDoNotCrossAnotherVoice() throws {
+        let response = try JSONDecoder().decode(ElevenLabsEngine.Response.self, from: Data("""
+        {"text":"","words":[
+          {"start":0.0,"end":0.5,"text":"First","type":"word","speaker_id":"speaker_0"},
+          {"start":0.5,"end":0.5,"text":" ","type":"spacing","speaker_id":"speaker_0"},
+          {"start":0.5,"end":0.9,"text":"half","type":"word","speaker_id":"speaker_0"},
+          {"start":1.0,"end":1.3,"text":"Right.","type":"word","speaker_id":"speaker_1"},
+          {"start":1.4,"end":2.0,"text":"second half.","type":"word","speaker_id":"speaker_0"}
+        ]}
+        """.utf8))
+
+        let turns = ElevenLabsEngine.segments(from: response, duration: 3, channel: 1)
+        #expect(turns.map(\.text) == ["First half", "Right.", "second half."])
+        #expect(turns.map(\.speaker) == ["2A", "2B", "2A"])
+
+        let transcript = Transcript(
+            engine: "elevenlabs", model: "scribe_v2", created_at: "2026-09-28T00:00:00Z",
+            segments: MultichannelSpeakerLabels.map(turns))
+        let markdown = transcript.rendered(title: "t", names: nil)
+        #expect(markdown.contains("them A:** First half second half."))
+        #expect(markdown.contains("them B:** Right."))
+    }
+
+    @Test("A speaker id Scribe has no number for keeps a single space after the side")
+    func unknownSpeakerIdIsNotDoubleSpaced() throws {
+        let response = try JSONDecoder().decode(ElevenLabsEngine.Response.self, from: Data("""
+        {"text":"","words":[
+          {"start":0,"end":0.4,"text":"Hello.","type":"word","speaker_id":"guest"}
+        ]}
+        """.utf8))
+
+        let mapped = MultichannelSpeakerLabels.map(
+            ElevenLabsEngine.segments(from: response, duration: 1, channel: 0))
+        #expect(mapped.map(\.speaker) == ["me guest"])
+    }
+
+    @Test("A mono import with no word timings has no invented speaker")
+    func monoFlatTextHasNoSpeaker() throws {
+        let response = try JSONDecoder().decode(ElevenLabsEngine.Response.self, from: Data("""
+        {"text":"Just text.","words":[]}
+        """.utf8))
+        let turns = ElevenLabsEngine.segments(from: response, duration: 5, channel: nil)
+        #expect(turns.map(\.speaker) == [nil])
     }
 
     @Test("Speech is retained when Scribe returns text without word timings")
@@ -72,12 +121,15 @@ struct ElevenLabsEngineTests {
     }
 
     @Test("Each channel has a separate response cache")
-    func channelCachesAreDistinct() {
+    func channelCachesAreDistinct() async throws {
+        let engine = try ElevenLabsEngine(apiKey: "test-key")
+        let folder = URL(fileURLWithPath: "/tmp/meeting")
+        let multichannel = folder.appendingPathComponent("multichannel.m4a")
         let names = [
-            ElevenLabsEngine.cacheName(audio: "multichannel", channel: 0),
-            ElevenLabsEngine.cacheName(audio: "multichannel", channel: 1),
-            ElevenLabsEngine.cacheName(audio: "multichannel", channel: nil),
-            ElevenLabsEngine.cacheName(audio: "mixed", channel: nil),
+            await engine.cacheURL(for: multichannel, channel: 0),
+            await engine.cacheURL(for: multichannel, channel: 1),
+            await engine.cacheURL(for: multichannel, channel: nil),
+            await engine.cacheURL(for: folder.appendingPathComponent("mixed.m4a"), channel: nil),
         ]
         #expect(Set(names).count == names.count, "two requests would share a cache: \(names)")
     }
@@ -92,7 +144,7 @@ struct ElevenLabsEngineTests {
         let body = dir.appendingPathComponent("request.multipart")
         try Data([0, 1, 2, 255]).write(to: audio)
 
-        try ElevenLabsEngine.writeMultipart(
+        try CloudHTTP.writeMultipart(
             fields: ElevenLabsEngine.requestFields(),
             file: audio, boundary: "test-boundary", to: body)
 
@@ -117,7 +169,7 @@ struct ElevenLabsEngineTests {
         let body = dir.appendingPathComponent("request.multipart")
         try Data([0, 1]).write(to: audio)
 
-        try ElevenLabsEngine.writeMultipart(
+        try CloudHTTP.writeMultipart(
             fields: ElevenLabsEngine.requestFields(),
             file: audio, boundary: "test-boundary", to: body)
 

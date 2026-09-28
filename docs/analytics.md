@@ -103,7 +103,7 @@ Every event also carries `surface`, which is `app` or `cli`.
 | `backend` | the summary backend's name |
 | `model` | a known public model name, or `default`, `custom`, `custom-local`, `unknown` |
 | `fallback_used` | true or false |
-| `from_engine`, `to_engine` | `assemblyai`, `openai`, `elevenlabs`, `parakeet`, or `auto` when selection failed before an engine existed |
+| `from_engine`, `to_engine` | `assemblyai`, `openai`, `elevenlabs`, `parakeet`, `whisper`, `gigaam`, or `auto` when selection failed before an engine existed |
 | `component` | `system_audio`, `microphone`, or `unknown` |
 | `outcome` | `deferred` or `gave_up` |
 | `asset` | `runtime`, `parakeet-v2`, `parakeet-v3`, `gigaam-v3`, `whisper-large-v3-turbo`, or `nemotron-live` |

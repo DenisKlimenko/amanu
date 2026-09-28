@@ -13,6 +13,11 @@ import Foundation
 /// `resumePending()` rescans at launch, so a crash or quit mid-transcription
 /// just retries on next run. Failures append to the session's transcribe.log
 /// and never block later jobs.
+///
+/// The coordinator owns the queue and the order of events. Which engine a
+/// session gets is `EngineResolver`'s question, how the audio reaches it is
+/// `TranscriptionInputs`', and what a failure costs the session is
+/// `TranscriptionFailurePolicy`'s.
 actor TranscriptionCoordinator {
     enum Status: Sendable {
         case idle
@@ -20,34 +25,43 @@ actor TranscriptionCoordinator {
         case failed(session: String)
     }
 
-    /// The single mixed-down file used by engines that cannot consume the two
-    /// channels directly. Derived from the tracks and regenerated when absent.
-    private static let mixedFile = "mixed.m4a"
-    private static let multichannelFile = "multichannel.m4a"
-    private static let multichannelTemporary = "multichannel.tmp.m4a"
-
-    /// How many times a session may fail before the queue stops offering it.
-    /// The queue lives in the filesystem and is rescanned at every launch, so
-    /// without a limit a session that cannot be transcribed is retried for
-    /// ever — and with a cloud engine, re-uploaded and re-charged every time.
-    private static let maxAttempts = 3
-
     private var queue: [URL] = []
+    /// Sessions a drain set aside because the machine could not transcribe
+    /// them — a model that would not download, no network, no key. They go
+    /// back in front of the queue the next time something is queued, rather
+    /// than at once: the same drain would only fail them the same way.
+    private var heldBack: [URL] = []
     private var draining = false
-    private var engine: TranscriptionEngine?
+    private var environmentalFailureNoted = false
     private var lastFailure: String?
     private var statusHandler: (@Sendable (Status) -> Void)?
 
-    /// An engine settled on in advance rather than chosen for the machine at
-    /// the moment there is work. Only tests pass one: everything real wants
-    /// the configured answer, and wants it decided late.
-    private let fixedEngine: TranscriptionEngine?
+    private let engines: EngineResolver
+    /// The engine the session in hand was given, for the failure report when
+    /// it throws: nil until one was prepared.
+    private var current: TranscriptionEngine?
     private let onStop: @Sendable () -> String?
+    private let echoCanceller: EchoCancellerFactory
 
+    typealias EchoCancellerFactory = @Sendable () throws -> EchoCanceller
+
+    /// `engine` is one settled on in advance rather than chosen for the
+    /// machine at the moment there is work. Only tests pass one: everything
+    /// real wants the configured answer, and wants it decided late.
     init(engine: TranscriptionEngine? = nil,
-         onStop: @escaping @Sendable () -> String? = { Config.onStop() }) {
-        fixedEngine = engine
+         onStop: @escaping @Sendable () -> String? = { Config.onStop() },
+         echoCanceller: @escaping EchoCancellerFactory = { try EchoCanceller() }) {
+        engines = EngineResolver(fixed: engine)
         self.onStop = onStop
+        self.echoCanceller = echoCanceller
+    }
+
+    init(engines: EngineResolver,
+         onStop: @escaping @Sendable () -> String? = { Config.onStop() },
+         echoCanceller: @escaping EchoCancellerFactory = { try EchoCanceller() }) {
+        self.engines = engines
+        self.onStop = onStop
+        self.echoCanceller = echoCanceller
     }
 
     func setStatusHandler(_ handler: @escaping @Sendable (Status) -> Void) {
@@ -64,8 +78,15 @@ actor TranscriptionCoordinator {
             }
             return
         }
-        queue.append(sessionDir)
+        requeueHeldBack()
+        if !queue.contains(sessionDir) { queue.append(sessionDir) }
         drainIfIdle()
+    }
+
+    private func requeueHeldBack() {
+        guard !draining else { return }
+        queue = heldBack.filter { !queue.contains($0) } + queue
+        heldBack = []
     }
 
     /// With no transcript the audio is the only copy of the meeting. Archive
@@ -73,8 +94,9 @@ actor TranscriptionCoordinator {
     func archiveRecordingOnly(_ dir: URL) async throws {
         try SessionClaim.acquire(dir, stage: .transcribe)
         await Task.detached(priority: .utility) { TrackCompressor.compress(sessionDir: dir) }.value
+        StopHook.owe(dir)
         SessionClaim.release(dir)
-        runHook(for: dir)
+        StopHook.fireIfOwed(dir, command: onStop())
     }
 
     /// Scan the recordings root for sessions that finished (meta.json exists)
@@ -84,6 +106,7 @@ actor TranscriptionCoordinator {
         // A config that cannot be read holds the queue — see `Config.Unreadable`.
         // The app offers the folder again once the file is fixed.
         guard Config.unreadableReason == nil, Config.transcriptionEnabled() else { return }
+        requeueHeldBack()
         let pending = Self.pendingSessions(in: root)
         for dir in pending where !queue.contains(dir) {
             queue.append(dir)
@@ -102,8 +125,13 @@ actor TranscriptionCoordinator {
     /// queueing so the answer can be checked without a coordinator running a
     /// drain over real audio.
     static func pendingSessions(in root: URL) -> [URL] {
+        // Hidden folders are never sessions. The importer stages a file in
+        // `.import-<uuid>` and writes its meta.json there before moving the
+        // folder into place, so without this a half-finished import could be
+        // transcribed from its staging directory, and then again once it had
+        // arrived.
         guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: nil
+            at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
         ) else { return [] }
 
         let fm = FileManager.default
@@ -111,7 +139,7 @@ actor TranscriptionCoordinator {
             .filter {
                 fm.fileExists(atPath: $0.appendingPathComponent("meta.json").path)
                     && !fm.fileExists(atPath: $0.appendingPathComponent("transcript.json").path)
-                    && !hasGivenUp(on: $0)
+                    && !TranscriptionFailurePolicy.hasGivenUp(on: $0)
                     // A session another process is already transcribing is not
                     // pending, it is in progress somewhere else. Queueing it
                     // would be refused at the claim anyway; leaving it out is
@@ -128,6 +156,7 @@ actor TranscriptionCoordinator {
         guard !draining, !queue.isEmpty else { return }
         draining = true
         lastFailure = nil
+        environmentalFailureNoted = false
         Task { await drain() }
     }
 
@@ -154,7 +183,12 @@ actor TranscriptionCoordinator {
             } catch {
                 log(dir, "transcription failed: \(error)")
                 lastFailure = dir.lastPathComponent
-                recordFailure(error, for: dir)
+                let outcome = TranscriptionFailurePolicy.record(
+                    error, for: dir, engine: current, notify: !environmentalFailureNoted)
+                if outcome == .environmental {
+                    environmentalFailureNoted = true
+                    heldBack.append(dir)
+                }
             }
         }
         await releaseEngine()
@@ -189,7 +223,7 @@ actor TranscriptionCoordinator {
             throw held
         } catch {
             log(dir, "transcription failed: \(error)")
-            recordFailure(error, for: dir)
+            TranscriptionFailurePolicy.record(error, for: dir, engine: current)
             await releaseEngine()
             throw error
         }
@@ -202,30 +236,31 @@ actor TranscriptionCoordinator {
         // Before the claim and before the engine: nothing about this session
         // is decided while the answers are in a file that cannot be read.
         try Config.requireReadable()
+        current = nil
         var fallbackUsed = false
+        let engine: TranscriptionEngine
         do {
-            try await transcribe(dir)
+            engine = try await transcribe(dir)
         } catch {
             // The network can go away between the reachability probe and the
             // upload. One retry on the local engine, so a dropped connection
-            // costs minutes rather than the transcript.
-            guard Self.configuredEngine(for: dir) == "auto",
-                  Platform.supportsLocalModels,
-                  engineIsCloud(), Self.looksLikeNetworkTrouble(error)
+            // costs minutes rather than the transcript — this session's
+            // minutes only: the next one is resolved afresh, and gets the
+            // cloud again if the cloud is back.
+            guard EngineResolver.configuredEngine(for: dir) == "auto",
+                  engines.canFallBackLocally,
+                  let failed = current, EngineResolver.isCloud(failed),
+                  TranscriptionFailurePolicy.looksLikeNetworkTrouble(error)
             else { throw error }
-            let from = engine?.name ?? Self.configuredEngine(for: dir)
             let local = Config.transcriptionLocalEngine()
             log(dir, "cloud transcription failed (\(error)) — retrying locally")
-            await engine?.release()
-            engine = Self.localEngine(named: local)
             Analytics.track(.transcriptFallback, [
-                .fromEngine: .text(from),
+                .fromEngine: .text(failed.name),
                 .toEngine: .text(local),
                 .reason: .text(Analytics.reason(for: error).rawValue),
             ])
             fallbackUsed = true
-            try await engine?.prepare()
-            try await transcribe(dir)
+            engine = try await transcribe(dir, with: try await engines.localFallback())
         }
         // After the transcript, never instead of it: transcript.json is the
         // completion marker, so anything that runs before it risks retiring a
@@ -235,11 +270,10 @@ actor TranscriptionCoordinator {
         // Outside `transcribe` rather than at the end of it because both take
         // the session's claim, and a claim held while asking for a second one
         // would refuse itself.
-        let engineName = engine?.name ?? Config.transcriptionEngine()
         Analytics.track(.transcriptFinished, [
-            .engine: .text(engineName),
+            .engine: .text(engine.name),
             .model: .text(AnalyticsCatalogue.transcriptionModel(
-                engine: engineName, provenance: engine?.model ?? "")),
+                engine: engine.name, provenance: engine.model)),
             .fallbackUsed: .flag(fallbackUsed),
         ])
         await PostProcessor.finish(dir)
@@ -247,94 +281,11 @@ actor TranscriptionCoordinator {
             title: localised("amanu — transcript ready", "amanu — расшифровка готова"),
             body: dir.lastPathComponent,
             opening: dir)
-        runHook(for: dir)
+        StopHook.fireIfOwed(dir, command: onStop())
     }
 
     private func releaseEngine() async {
-        await engine?.release()
-        engine = nil
-    }
-
-    /// Count a failure against the session, and retire it once retrying has
-    /// stopped being reasonable — either because the error can't be fixed by
-    /// repeating it, or because we've repeated it enough.
-    ///
-    /// A retired session keeps its audio and gets it compressed: there will
-    /// never be a transcript, so holding a gigabyte an hour of PCM against a
-    /// future attempt is pure waste. Delete `transcription_failed` from
-    /// meta.json to offer it to the queue again.
-    private func engineIsCloud() -> Bool {
-        guard let input = engine?.input else { return false }
-        switch input {
-        case .perTrack: return false
-        case .multichannel, .mixed: return true
-        }
-    }
-
-    /// Network-shaped failures, the ones a local engine can rescue. A bad key
-    /// or a rejected file is not one of them — retrying locally would still be
-    /// right, but silently swapping engines for every failure hides real
-    /// problems.
-    private static func looksLikeNetworkTrouble(_ error: Error) -> Bool {
-        let urlErrorCodes: Set<URLError.Code> = [
-            .notConnectedToInternet, .networkConnectionLost, .timedOut,
-            .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed,
-            .internationalRoamingOff, .dataNotAllowed, .secureConnectionFailed,
-        ]
-        if let urlError = error as? URLError { return urlErrorCodes.contains(urlError.code) }
-        return "\(error)".contains("offline") || "\(error)".contains("timed out")
-    }
-
-    private func recordFailure(_ error: Error, for dir: URL) {
-        let permanent = (error as? TranscriptionFailure)?.isPermanent ?? false
-        let attempts =
-            (SessionState.value(dir, SessionState.Key.transcriptionAttempts) as? Int ?? 0) + 1
-        let gaveUp = permanent || attempts >= Self.maxAttempts
-        let engineName = engine?.name ?? Config.transcriptionEngine()
-        let reason: Analytics.Reason = {
-            if Self.looksLikeNetworkTrouble(error) { return .noNetwork }
-            if permanent { return .refused }
-            return Analytics.reason(for: error)
-        }()
-        Analytics.track(.transcriptFailed, [
-            .engine: .text(engineName),
-            .model: .text(AnalyticsCatalogue.transcriptionModel(
-                engine: engineName, provenance: engine?.model ?? "")),
-            .reason: .text(reason.rawValue),
-            .outcome: .text((gaveUp
-                ? Analytics.Outcome.gaveUp : .deferred).rawValue),
-        ])
-        var fields: [String: Any?] = [SessionState.Key.transcriptionAttempts: attempts]
-
-        if gaveUp {
-            fields[SessionState.Key.transcriptionFailed] = "\(error)"
-            SessionState.update(dir, with: fields)
-            log(dir, permanent
-                ? "giving up: \(error) — retrying cannot change this"
-                : "giving up after \(attempts) attempts")
-            notifyUser(
-                title: localised(
-                    "amanu — transcription gave up", "amanu — расшифровка не вышла"),
-                body: dir.lastPathComponent + localised(
-                    " — audio kept, see transcribe.log",
-                    " — звук сохранён, подробности в transcribe.log"),
-                opening: dir
-            )
-            TrackCompressor.compress(sessionDir: dir)
-        } else {
-            SessionState.update(dir, with: fields)
-            notifyUser(
-                title: localised(
-                    "amanu — transcription failed", "amanu — расшифровка не удалась"),
-                body: dir.lastPathComponent + localised(
-                    " — see transcribe.log", " — подробности в transcribe.log"),
-                opening: dir
-            )
-        }
-    }
-
-    private static func hasGivenUp(on dir: URL) -> Bool {
-        SessionState.value(dir, SessionState.Key.transcriptionFailed) != nil
+        await engines.release()
     }
 
     private struct EmptyTranscript: TranscriptionFailure, CustomStringConvertible {
@@ -342,7 +293,12 @@ actor TranscriptionCoordinator {
         var description: String { "No speech was recognized; audio kept for a manual retry." }
     }
 
-    private func transcribe(_ dir: URL) async throws {
+    /// Transcribe one session with the engine it asks for, or with `given`,
+    /// and return the engine that did it.
+    @discardableResult
+    private func transcribe(
+        _ dir: URL, with given: TranscriptionEngine? = nil
+    ) async throws -> TranscriptionEngine {
         // The one place both routes into transcription meet: the app draining
         // its queue and `amanu process` given a folder by hand. Claiming here,
         // before an engine is prepared and long before anything is uploaded,
@@ -353,49 +309,35 @@ actor TranscriptionCoordinator {
         defer { SessionClaim.release(dir) }
 
         var meta = try SessionMeta.read(from: dir)
-        let engine = try await preparedEngine(for: dir)
+        let engine: TranscriptionEngine
+        if let given { engine = given } else { engine = try await engines.engine(for: dir) }
+        current = engine
 
         var audioDirectory = dir
         var cleaned: OfflineEchoAudio.Result?
         defer { cleaned?.removeAudio() }
         if Config.offlineEchoCancellation(),
            let mic = meta.track(for: "me"), let system = meta.track(for: "them") {
-            let microphone = OfflineEchoAudio.Source(
-                url: dir.appendingPathComponent(mic.file), channel: mic.channel ?? 0, offsetMs: mic.offsetMs)
-            let reference = OfflineEchoAudio.Source(
-                url: dir.appendingPathComponent(system.file), channel: system.channel ?? 0, offsetMs: system.offsetMs)
-            log(dir, "removing acoustic echo from a microphone copy before transcription")
-            let worker = Task.detached(priority: .utility) {
-                try OfflineEchoAudio.prepare(microphone: microphone, system: reference, in: dir)
+            if let prepared = try await cancelEcho(in: dir, mic: mic, system: system) {
+                cleaned = prepared
+                audioDirectory = prepared.directory
+                meta = SessionMeta(tracks: [
+                    .init(file: "mic.caf", speaker: "me", offsetMs: 0, channel: nil),
+                    .init(file: "system.caf", speaker: "them", offsetMs: 0, channel: nil),
+                ], title: meta.title, attendees: meta.attendees, app: meta.app)
             }
-            let prepared = try await withTaskCancellationHandler {
-                try await worker.value
-            } onCancel: { worker.cancel() }
-            cleaned = prepared
-            try Task.checkCancellation()
-            audioDirectory = prepared.directory
-            meta = SessionMeta(tracks: [
-                .init(file: "mic.caf", speaker: "me", offsetMs: 0, channel: nil),
-                .init(file: "system.caf", speaker: "them", offsetMs: 0, channel: nil),
-            ], title: meta.title, attendees: meta.attendees, app: meta.app)
-            SessionState.update(dir, with: ["audio_echo_cancellation": [
-                "processor": LocalVQEAssets.processorVersion,
-                "model_sha256": LocalVQEAssets.modelSHA256,
-                "sample_rate": EchoCanceller.sampleRate,
-                "frames": prepared.frames,
-                "cache_directory": prepared.directory.lastPathComponent,
-            ]])
-            log(dir, "audio echo cancellation complete; original tracks kept")
         } else {
             SessionState.update(dir, with: ["audio_echo_cancellation": nil])
         }
 
+        let inputs = TranscriptionInputs(
+            session: dir, audio: audioDirectory, meta: meta, engine: engine)
         var merged: [Transcript.Segment]
         var echoFilterRan = false
         var echoesDropped = 0
         switch engine.input {
         case .perTrack:
-            merged = try await transcribePerTrack(audioDirectory, meta: meta, engine: engine)
+            merged = try await inputs.perTrack()
             merged.sort { $0.start_ms < $1.start_ms }
             // Only the per-track path can double-transcribe the far end: it
             // reads both tracks, and a raw mic recording through speakers has
@@ -412,7 +354,7 @@ actor TranscriptionCoordinator {
                 }
             }
         case .multichannel:
-            merged = try await transcribeMultichannel(audioDirectory, meta: meta, engine: engine)
+            merged = try await inputs.multichannel()
             merged.sort { $0.start_ms < $1.start_ms }
             if Config.transcriptEchoFilter(), !meta.isSingleSource {
                 echoFilterRan = true
@@ -426,7 +368,7 @@ actor TranscriptionCoordinator {
             }
             merged = MultichannelSpeakerLabels.collapseSingleSides(merged)
         case .mixed:
-            merged = try await transcribeMixed(audioDirectory, meta: meta, engine: engine)
+            merged = try await inputs.mixed()
             merged.sort { $0.start_ms < $1.start_ms }
         }
 
@@ -442,6 +384,7 @@ actor TranscriptionCoordinator {
         )
         try transcript.write(to: dir)
         SessionState.update(dir, with: [
+            StopHook.key: StopHook.owed,
             "transcription_input": engine.input.metadataName,
             "echo_filter": [
                 "ran": echoFilterRan,
@@ -462,378 +405,59 @@ actor TranscriptionCoordinator {
         // the gigabyte wait for a model it isn't going to be shown to would be
         // paying twice for nothing.
         TrackCompressor.settle(sessionDir: dir)
-    }
-
-    /// One aligned stereo input. One-based channel labels from the engine
-    /// carry the side directly (`1A` is mic, `2A` is system), so this path does
-    /// no envelope comparison and remains correct when the raw mic contains a
-    /// quieter acoustic copy of the far end.
-    private func transcribeMultichannel(
-        _ dir: URL,
-        meta: SessionMeta,
-        engine: TranscriptionEngine
-    ) async throws -> [Transcript.Segment] {
-        // An imported file has no "my side" and "their side" — it is one
-        // ordinary mixed recording. Hand its mono source to a diarizing engine
-        // as-is, and keep the engine's A/B labels rather than interpreting
-        // their first character as a channel number.
-        if meta.isSingleSource, let source = meta.tracks.first {
-            let audio = dir.appendingPathComponent(source.file)
-            log(dir, "transcribing \(source.file) (\(engine.name))")
-            return try await engine.transcribe(audio).map { segment in
-                Transcript.Segment(
-                    speaker: segment.speaker ?? "speaker",
-                    start_ms: Int(segment.start * 1000),
-                    end_ms: Int(segment.end * 1000),
-                    text: segment.text)
-            }
-        }
-
-        let sharedArchive = meta.tracks.count == 2
-            && meta.tracks.allSatisfy { $0.file == meta.tracks[0].file && $0.channel != nil }
-        let audio = sharedArchive
-            ? dir.appendingPathComponent(meta.tracks[0].file)
-            : dir.appendingPathComponent(Self.multichannelFile)
-
-        if !sharedArchive && !FileManager.default.fileExists(atPath: audio.path) {
-            let temporary = dir.appendingPathComponent(Self.multichannelTemporary)
-            let mic = meta.track(for: "me").map {
-                TrackCompressor.StereoTrack(
-                    url: dir.appendingPathComponent($0.file), offsetMs: $0.offsetMs)
-            }
-            let system = meta.track(for: "them").map {
-                TrackCompressor.StereoTrack(
-                    url: dir.appendingPathComponent($0.file), offsetMs: $0.offsetMs)
-            }
-            log(dir, "aligning tracks → \(Self.multichannelFile)")
-            do {
-                try await Task.detached(priority: .utility) {
-                    _ = try TrackCompressor.encodeStereo(
-                        mic: mic, system: system, to: temporary)
-                    try? FileManager.default.removeItem(at: audio)
-                    try FileManager.default.moveItem(at: temporary, to: audio)
-                }.value
-            } catch {
-                try? FileManager.default.removeItem(at: temporary)
-                throw error
-            }
-        }
-
-        log(dir, "transcribing \(audio.lastPathComponent) (\(engine.name))")
-        return MultichannelSpeakerLabels.map(try await engine.transcribe(audio))
-    }
-
-    /// One pass per track, speaker taken from the track itself.
-    private func transcribePerTrack(
-        _ dir: URL,
-        meta: SessionMeta,
-        engine: TranscriptionEngine
-    ) async throws -> [Transcript.Segment] {
-        var merged: [Transcript.Segment] = []
-        for track in meta.tracks {
-            let storedAudio = dir.appendingPathComponent(track.file)
-            guard FileManager.default.fileExists(atPath: storedAudio.path) else {
-                throw CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: storedAudio.path])
-            }
-
-            var audio = storedAudio
-            var temporary: URL?
-            if let channel = track.channel {
-                let extracted = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("amanu-\(UUID().uuidString)-channel-\(channel).m4a")
-                do {
-                    try await Task.detached(priority: .utility) {
-                        try AudioChannelExtractor.extract(
-                            channel: channel, from: storedAudio, to: extracted)
-                    }.value
-                    audio = extracted
-                    temporary = extracted
-                } catch {
-                    try? FileManager.default.removeItem(at: extracted)
-                    log(dir, "could not extract \(track.speaker) channel in \(track.file): \(error)")
-                    throw error
-                }
-            }
-
-            log(dir, "transcribing \(track.file)\(track.channel.map { " channel \($0)" } ?? "") "
-                + "(\(engine.name))")
-            // A failed track must not turn into a successful partial transcript:
-            // successful completion allows the original audio to be discarded.
-            let segments: [TranscriptSegment]
-            do {
-                segments = try await engine.transcribe(audio)
-            } catch {
-                if let temporary { try? FileManager.default.removeItem(at: temporary) }
-                log(dir, "could not transcribe \(track.file): \(error)")
-                throw error
-            }
-            if let temporary { try? FileManager.default.removeItem(at: temporary) }
-            let offset = TimeInterval(track.offsetMs) / 1000
-            merged += segments.map {
-                Transcript.Segment(
-                    speaker: track.speaker,
-                    start_ms: Int(($0.start + offset) * 1000),
-                    end_ms: Int(($0.end + offset) * 1000),
-                    text: $0.text
-                )
-            }
-        }
-        return merged
-    }
-
-    /// One pass over mixed.m4a, speaker taken from the engine's diarization
-    /// and then renamed to me/them by matching each utterance back against the
-    /// source tracks. The mix already carries the start offsets, so its
-    /// timestamps need no shifting.
-    private func transcribeMixed(
-        _ dir: URL,
-        meta: SessionMeta,
-        engine: TranscriptionEngine
-    ) async throws -> [Transcript.Segment] {
-        let importedSource = meta.isSingleSource
-            ? meta.tracks.first.map { dir.appendingPathComponent($0.file) }
-            : nil
-        let sharedArchive = meta.tracks.count == 2
-            && meta.tracks.allSatisfy { $0.file == meta.tracks[0].file && $0.channel != nil }
-        let mixed = importedSource ?? (sharedArchive
-            ? dir.appendingPathComponent(meta.tracks[0].file)
-            : dir.appendingPathComponent(Self.mixedFile))
-        if importedSource == nil, !sharedArchive,
-           !FileManager.default.fileExists(atPath: mixed.path) {
-            log(dir, "mixing tracks → \(Self.mixedFile)")
-            try await AudioMixer.mix(
-                meta.tracks.map {
-                    AudioMixer.Track(
-                        url: dir.appendingPathComponent($0.file),
-                        offset: TimeInterval($0.offsetMs) / 1000
-                    )
-                },
-                to: mixed
-            )
-        }
-
-        log(dir, "transcribing \(Self.mixedFile) (\(engine.name))")
-        let segments = try await engine.transcribe(mixed)
-
-        let names = meta.track(for: "me").flatMap { mic in
-            meta.track(for: "them").flatMap { system in
-                SpeakerAttribution.resolve(
-                    segments: segments,
-                    mic: dir.appendingPathComponent(mic.file),
-                    micOffset: TimeInterval(mic.offsetMs) / 1000,
-                    system: dir.appendingPathComponent(system.file),
-                    systemOffset: TimeInterval(system.offsetMs) / 1000
-                )
-            }
-        }
-        if let names {
-            let counts = names.reduce(into: [String: Int]()) { $0[$1, default: 0] += 1 }
-            log(dir, "speakers: " + counts.sorted { $0.key < $1.key }
-                .map { "\($0.key) ×\($0.value)" }
-                .joined(separator: ", "))
-        } else {
-            log(dir, "couldn't attribute speakers to tracks — keeping diarization labels")
-        }
-
-        return segments.enumerated().map { index, segment in
-            Transcript.Segment(
-                speaker: names?[index] ?? segment.speaker ?? "speaker",
-                start_ms: Int(segment.start * 1000),
-                end_ms: Int(segment.end * 1000),
-                text: segment.text
-            )
-        }
-    }
-
-    private func preparedEngine(for session: URL) async throws -> TranscriptionEngine {
-        if let engine { return engine }
-        if let fixedEngine {
-            try await fixedEngine.prepare()
-            engine = fixedEngine
-            return fixedEngine
-        }
-        let configured = Self.configuredEngine(for: session)
-        if !Self.knownEngines.contains(configured) {
-            FileHandle.standardError.write(Data(
-                "warning: unknown transcription engine \"\(configured)\" — choosing automatically\n".utf8
-            ))
-        }
-        let provider = Self.cloudProvider(configured: configured)
-        let hasKey = Self.cloudKey(for: provider) != nil
-        if Config.localEngines.contains(configured), !Platform.supportsLocalModels, hasKey {
-            FileHandle.standardError.write(Data(
-                "warning: \(configured) needs Apple Silicon — transcribing with \(provider)\n".utf8
-            ))
-        }
-        let engine: TranscriptionEngine
-        switch Self.resolveEngine(
-            configured: configured,
-            hasKey: hasKey,
-            localModels: Platform.supportsLocalModels
-        ) {
-        case .cloud:
-            engine = try Self.cloudEngine(provider)
-        case .local:
-            let local = Config.localEngines.contains(configured)
-                ? configured : Config.transcriptionLocalEngine()
-            engine = Self.localEngine(named: local)
-        case .cloudOrLocal:
-            engine = await Self.bestAvailableEngine(
-                provider, local: Config.transcriptionLocalEngine())
-        case .unavailable:
-            throw EngineUnavailable.noLocalModels
-        }
-        try await engine.prepare()
-        self.engine = engine
+        TranscriptionScratch.remove(in: dir)
         return engine
     }
 
-    private static let knownEngines: Set<String> = Set(["auto"])
-        .union(Config.cloudEngines)
-        .union(Config.localEngines)
-
-    static func configuredEngine(for session: URL) -> String {
-        let requested = SessionState.value(
-            session, SessionState.Key.transcriptionEngine) as? String
-        return requested.flatMap { knownEngines.contains($0) ? $0 : nil }
-            ?? Config.transcriptionEngine()
-    }
-
-    /// Which cloud service a configuration means. A configured engine naming
-    /// a provider outright is that provider; anything else defers to the
-    /// `cloud` setting, which is what the setup window's two cards write.
-    static func cloudProvider(configured: String) -> String {
-        Config.cloudEngines.contains(configured)
-            ? configured
-            : Config.transcriptionCloudProvider()
-    }
-
-    private static func cloudKey(for provider: String) -> String? {
-        switch provider {
-        case "openai": return Config.openAIKey()
-        case "elevenlabs": return Config.elevenLabsKey()
-        default: return Config.assemblyAIKey()
+    /// Clean acoustic echo out of a copy of the microphone track, or nil when
+    /// that could not be done.
+    ///
+    /// Echo cancellation improves a transcript; it is not what makes one. It
+    /// is on by default, and a failure anywhere in it — a LocalVQE library
+    /// missing from the bundle or refusing to load, a model that fails its
+    /// checksum, a hop of non-finite audio, a copy that came out short — used
+    /// to fail the whole transcription, be retried three times and retire a
+    /// recording whose tracks were perfectly good. Now the tracks are
+    /// transcribed as recorded, the text-level echo filter does what it did
+    /// before offline cancellation existed, and meta.json and the log say
+    /// what was skipped and why.
+    private func cancelEcho(
+        in dir: URL, mic: SessionMeta.Track, system: SessionMeta.Track
+    ) async throws -> OfflineEchoAudio.Result? {
+        let microphone = OfflineEchoAudio.Source(
+            url: dir.appendingPathComponent(mic.file), channel: mic.channel ?? 0, offsetMs: mic.offsetMs)
+        let reference = OfflineEchoAudio.Source(
+            url: dir.appendingPathComponent(system.file), channel: system.channel ?? 0, offsetMs: system.offsetMs)
+        let factory = echoCanceller
+        log(dir, "removing acoustic echo from a microphone copy before transcription")
+        let worker = Task.detached(priority: .utility) {
+            try OfflineEchoAudio.prepare(
+                microphone: microphone, system: reference, in: dir, cancellerFactory: factory)
         }
-    }
-
-    private static func cloudEngine(_ provider: String) throws -> TranscriptionEngine {
-        switch provider {
-        case "openai": return try OpenAITranscriptionEngine()
-        case "elevenlabs": return try ElevenLabsEngine()
-        default: return try AssemblyAIEngine()
-        }
-    }
-
-    private static func localEngine(named name: String) -> TranscriptionEngine {
-        if name == "whisper" {
-            return WhisperEngine(language: Config.transcriptionLanguage())
-        }
-        if name == "gigaam" { return GigaAMEngine() }
-        return ParakeetEngine()
-    }
-
-    /// Which engine the configuration adds up to, before the network is
-    /// consulted. Pure so the whole matrix — including the Intel half of the
-    /// universal binary, which cannot run a local model at all — is testable
-    /// on whichever machine happens to be running the tests.
-    enum EngineChoice: Equatable {
-        /// Cloud, with no local rescue if it turns out to be unreachable.
-        case cloud
-        /// Local, no network involved.
-        case local
-        /// Cloud when it answers, local when it doesn't.
-        case cloudOrLocal
-        /// Neither: an Intel Mac with no API key. Nothing to run.
-        case unavailable
-    }
-
-    static func resolveEngine(
-        configured: String,
-        hasKey: Bool,
-        localModels: Bool
-    ) -> EngineChoice {
-        // An explicit provider keeps failing on a missing key rather than
-        // quietly transcribing locally: the person asked for diarization.
-        if Config.cloudEngines.contains(configured) { return .cloud }
-        // An explicit parakeet on a Mac that cannot run it is the one place
-        // we override a stated preference — the alternative is no transcript.
-        if Config.localEngines.contains(configured) {
-            if localModels { return .local }
-            return hasKey ? .cloud : .unavailable
-        }
-        guard hasKey else { return localModels ? .local : .unavailable }
-        return localModels ? .cloudOrLocal : .cloud
-    }
-
-    /// No engine this Mac can run. Not permanent — the missing half is an
-    /// API key, and adding one is a thing a person does after reading this.
-    enum EngineUnavailable: TranscriptionFailure, CustomStringConvertible {
-        case noLocalModels
-
-        var isPermanent: Bool { false }
-
-        var description: String {
-            "local transcription needs Apple Silicon, and this Mac has no key "
-                + "for a cloud engine — put an AssemblyAI one in "
-                + "\(Config.assemblyAIKeyPath.path) or an OpenAI one in "
-                + "\(Config.openAIKeyPath.path), or an ElevenLabs one in "
-                + "\(Config.elevenLabsKeyPath.path) (chmod 600), or set "
-                + "ASSEMBLYAI_API_KEY / OPENAI_API_KEY / ELEVENLABS_API_KEY"
-        }
-    }
-
-    /// Cloud when it's actually usable, local otherwise. Checked at the moment
-    /// there is work rather than at launch, because the answer changes: the
-    /// laptop that recorded a meeting on a train is transcribing it on a train.
-    private static func bestAvailableEngine(
-        _ provider: String,
-        local: String = Config.transcriptionLocalEngine()
-    ) async -> TranscriptionEngine {
-        guard await cloudReachable(provider) else {
-            FileHandle.standardError.write(Data(
-                "\(provider) unreachable — transcribing locally with \(local)\n".utf8
-            ))
-            return localEngine(named: local)
-        }
-        return (try? cloudEngine(provider)) ?? localEngine(named: local)
-    }
-
-    /// A short, cheap "is the API there" probe. Any HTTP answer counts,
-    /// including an unauthorized one: the question is whether the network is
-    /// up, not whether the key is good.
-    private static func cloudReachable(_ provider: String) async -> Bool {
-        let url: URL
-        switch provider {
-        case "openai": url = URL(string: "https://api.openai.com/v1/models")!
-        case "elevenlabs": url = URL(string: "https://api.elevenlabs.io/v1/user")!
-        default: url = URL(string: "https://api.assemblyai.com/v2/transcript")!
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "HEAD"
-        request.timeoutInterval = 5
+        let prepared: OfflineEchoAudio.Result
         do {
-            _ = try await URLSession.shared.data(for: request)
-            return true
+            prepared = try await withTaskCancellationHandler {
+                try await worker.value
+            } onCancel: { worker.cancel() }
+            try Task.checkCancellation()
         } catch {
-            return false
+            if error is CancellationError || Task.isCancelled { throw CancellationError() }
+            log(dir, "echo cancellation skipped — \(error); transcribing the tracks as recorded")
+            SessionState.update(dir, with: ["audio_echo_cancellation": [
+                "processor": LocalVQEAssets.processorVersion,
+                "skipped": "\(error)",
+            ]])
+            return nil
         }
-    }
-
-    /// Fires the configured on_stop shell command with the session directory
-    /// as its sole argument, after the transcript exists (or immediately after
-    /// recording when transcription is disabled).
-    private func runHook(for dir: URL) {
-        guard let cmd = onStop() else { return }
-        let task = Process()
-        task.launchPath = "/bin/sh"
-        task.arguments = ["-c", "\(cmd) \"$0\"", dir.path]
-        // The session it was fired for is the only sensible place to stand.
-        task.currentDirectoryURL = dir
-        do {
-            try task.run()
-        } catch {
-            log(dir, "on_stop hook failed to launch: \(error)")
-        }
+        SessionState.update(dir, with: ["audio_echo_cancellation": [
+            "processor": LocalVQEAssets.processorVersion,
+            "model_sha256": LocalVQEAssets.modelSHA256,
+            "sample_rate": EchoCanceller.sampleRate,
+            "frames": prepared.frames,
+            "cache_directory": prepared.directory.lastPathComponent,
+        ]])
+        log(dir, "audio echo cancellation complete; original tracks kept")
+        return prepared
     }
 
     private func log(_ dir: URL, _ message: String) {
@@ -842,215 +466,5 @@ actor TranscriptionCoordinator {
 
     private func publish(_ status: Status) {
         statusHandler?(status)
-    }
-}
-
-/// The slice of meta.json the coordinator needs: which files exist, who they
-/// represent, and how far each track started after the earliest one.
-private struct SessionMeta {
-    struct Track {
-        let file: String
-        let speaker: String
-        let offsetMs: Int
-        let channel: Int?
-    }
-
-    let tracks: [Track]
-    /// What the session knows about the meeting. All of it goes into the
-    /// summary prompt: knowing the subject, who was in the room and which app
-    /// the call ran in measurably improves what comes back — not least because
-    /// a summarizer given names can use them instead of "me" and "them".
-    let title: String?
-    let attendees: [String]
-    let app: String?
-
-    var isSingleSource: Bool {
-        tracks.count == 1 && tracks[0].speaker == "speaker"
-    }
-
-    func track(for speaker: String) -> Track? {
-        tracks.first { $0.speaker == speaker }
-    }
-
-    enum MetaError: Error, CustomStringConvertible {
-        case unreadable(URL)
-
-        var description: String {
-            switch self {
-            case .unreadable(let url): return "can't parse \(url.path)"
-            }
-        }
-    }
-
-    static func read(from dir: URL) throws -> SessionMeta {
-        let url = dir.appendingPathComponent("meta.json")
-        guard
-            let data = try? Data(contentsOf: url),
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let files = json["files"] as? [String: String]
-        else { throw MetaError.unreadable(url) }
-
-        // Sessions recorded before offsets were captured default to 0 —
-        // tracks start within tens of milliseconds of each other anyway.
-        let offsets = json["start_offset_ms"] as? [String: Int] ?? [:]
-        let channels = json["audio_channels"] as? [String: Int] ?? [:]
-        var tracks: [Track] = []
-        if let mic = files["mic"] {
-            tracks.append(Track(
-                file: mic,
-                speaker: "me",
-                offsetMs: offsets["mic"] ?? 0,
-                channel: channels["mic"]))
-        }
-        if let system = files["system"] {
-            tracks.append(Track(
-                file: system,
-                speaker: "them",
-                offsetMs: offsets["system"] ?? 0,
-                channel: channels["system"]))
-        }
-        if let source = files["source"] {
-            tracks.append(Track(
-                file: source,
-                speaker: "speaker",
-                offsetMs: offsets["source"] ?? 0,
-                channel: channels["source"]))
-        }
-        let calendar = json["calendar"] as? [String: Any]
-        return SessionMeta(
-            tracks: tracks,
-            title: (json["title"] as? String) ?? (calendar?["title"] as? String),
-            attendees: calendar?["attendees"] as? [String] ?? [],
-            app: json["app"] as? String
-        )
-    }
-}
-
-/// Canonical transcript. Property names are the JSON schema — this struct
-/// exists to be serialized.
-struct Transcript: Codable {
-    struct Segment: Codable {
-        let speaker: String
-        let start_ms: Int
-        let end_ms: Int
-        let text: String
-    }
-
-    let engine: String
-    let model: String
-    let created_at: String
-    let segments: [Segment]
-
-    /// Render transcript.md, then write transcript.json as the completion
-    /// marker. Both writes are atomic (temp file + rename), and writing the
-    /// JSON last is what makes the ordering matter: resumePending treats its
-    /// presence as "done", so writing it first meant a failed markdown write
-    /// retired the session permanently with half its artifacts.
-    func write(to dir: URL) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let json = try encoder.encode(self)
-
-        try writeMarkdown(to: dir, names: SpeakerNames.read(from: dir))
-        try json
-            .write(to: dir.appendingPathComponent("transcript.json"), options: .atomic)
-    }
-
-    /// Render transcript.md against whatever names are known, which is what
-    /// makes naming re-runnable: the JSON keeps the recognizer's own labels
-    /// for ever, and the readable file is regenerated from it whenever a name
-    /// is learned or corrected.
-    func writeMarkdown(to dir: URL, names: SpeakerNames?) throws {
-        try Data(rendered(title: dir.lastPathComponent, names: names).utf8)
-            .write(to: dir.appendingPathComponent("transcript.md"), options: .atomic)
-    }
-
-    /// A copy with each label replaced by its known name, for readers that
-    /// take the speaker straight off the segment — the summarizer, mainly,
-    /// which writes "Фёдор will send the contract" only if that is what it was
-    /// given to read.
-    func named(with names: SpeakerNames?) -> Transcript {
-        guard let names else { return self }
-        return Transcript(
-            engine: engine,
-            model: model,
-            created_at: created_at,
-            segments: segments.map {
-                Segment(
-                    speaker: names.name(for: $0.speaker),
-                    start_ms: $0.start_ms,
-                    end_ms: $0.end_ms,
-                    text: $0.text
-                )
-            }
-        )
-    }
-
-    func rendered(title: String, names: SpeakerNames?) -> String {
-        var lines = ["# \(title)", "", "engine: \(engine) (\(model))"]
-        // A roster only earns its place when it says something the body
-        // doesn't: which label a name stands for.
-        let named = (names?.speakers ?? [:]).compactMap { label, entry in
-            entry.name.map { "\(label) → \($0)" }
-        }.sorted()
-        if !named.isEmpty {
-            lines.append("speakers: " + named.joined(separator: ", "))
-        }
-        lines.append("")
-        if engine == "assemblyai" {
-            for paragraph in paragraphs(names: names) {
-                lines.append("**[\(Self.clock(paragraph.start_ms))] \(paragraph.speaker):** \(paragraph.text)")
-                lines.append("")
-            }
-        } else {
-            for segment in segments {
-                let who = names?.name(for: segment.speaker) ?? segment.speaker
-                lines.append("**[\(Self.clock(segment.start_ms))] \(who):** \(segment.text)")
-                lines.append("")
-            }
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    /// AssemblyAI can return one diarized utterance per word. Keep those
-    /// timestamps in transcript.json, but present continuous speech as a turn.
-    /// A brief interjection by another speaker does not split that turn.
-    private func paragraphs(names: SpeakerNames?) -> [Paragraph] {
-        var result: [Paragraph] = []
-        var lastBySpeaker: [String: Int] = [:]
-        for segment in segments {
-            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { continue }
-            let speaker = names?.name(for: segment.speaker) ?? segment.speaker
-            if let index = lastBySpeaker[speaker],
-               segment.start_ms - result[index].end_ms <= 1_500 {
-                let separator = text.first.map { ",.!?;:…)]}»".contains($0) } == true ? "" : " "
-                result[index].text += separator + text
-                result[index].end_ms = max(result[index].end_ms, segment.end_ms)
-            } else {
-                lastBySpeaker[speaker] = result.count
-                result.append(Paragraph(
-                    speaker: speaker,
-                    start_ms: segment.start_ms,
-                    end_ms: segment.end_ms,
-                    text: text))
-            }
-        }
-        return result
-    }
-
-    private struct Paragraph {
-        let speaker: String
-        let start_ms: Int
-        var end_ms: Int
-        var text: String
-    }
-
-    private static func clock(_ ms: Int) -> String {
-        let total = ms / 1000
-        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
-        return h > 0
-            ? String(format: "%d:%02d:%02d", h, m, s)
-            : String(format: "%d:%02d", m, s)
     }
 }

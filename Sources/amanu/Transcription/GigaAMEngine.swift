@@ -127,6 +127,10 @@ private final class GigaAMCPPRuntime: GigaAMRuntime, @unchecked Sendable {
     private var session: OpaquePointer?
 
     func prepare(model: URL) async throws {
+        try await DedicatedThread.run("gigaam load") { [self] in try load(model) }
+    }
+
+    private func load(_ model: URL) throws {
         try lock.withLock {
             if session != nil { return }
             var opened: OpaquePointer?
@@ -143,29 +147,33 @@ private final class GigaAMCPPRuntime: GigaAMRuntime, @unchecked Sendable {
     func transcribe(samples: [Float]) async throws -> String {
         let state = GigaAMRunState()
         return try await withTaskCancellationHandler {
-            try lock.withLock {
-                guard let session else { throw RuntimeError.notPrepared }
-                transcribe_set_abort_callback(session, { opaque in
-                    guard let opaque else { return false }
-                    return Unmanaged<GigaAMRunState>.fromOpaque(opaque)
-                        .takeUnretainedValue().cancelled
-                }, Unmanaged.passUnretained(state).toOpaque())
-                defer { transcribe_set_abort_callback(session, nil, nil) }
-                var params = transcribe_run_params()
-                transcribe_run_params_init(&params)
-                params.language = nil
-                let status = samples.withUnsafeBufferPointer {
-                    transcribe_run(session, $0.baseAddress, Int32($0.count), &params)
-                }
-                if status == TRANSCRIBE_ERR_ABORTED { throw CancellationError() }
-                guard status == TRANSCRIBE_OK else {
-                    throw RuntimeError.runFailed(Self.message(status))
-                }
-                guard let text = transcribe_full_text(session) else { return "" }
-                return String(cString: text)
-            }
+            try await DedicatedThread.run("gigaam") { [self] in try decode(samples, state) }
         } onCancel: {
             state.cancel()
+        }
+    }
+
+    private func decode(_ samples: [Float], _ state: GigaAMRunState) throws -> String {
+        try lock.withLock {
+            guard let session else { throw RuntimeError.notPrepared }
+            transcribe_set_abort_callback(session, { opaque in
+                guard let opaque else { return false }
+                return Unmanaged<GigaAMRunState>.fromOpaque(opaque)
+                    .takeUnretainedValue().cancelled
+            }, Unmanaged.passUnretained(state).toOpaque())
+            defer { transcribe_set_abort_callback(session, nil, nil) }
+            var params = transcribe_run_params()
+            transcribe_run_params_init(&params)
+            params.language = nil
+            let status = samples.withUnsafeBufferPointer {
+                transcribe_run(session, $0.baseAddress, Int32($0.count), &params)
+            }
+            if status == TRANSCRIBE_ERR_ABORTED { throw CancellationError() }
+            guard status == TRANSCRIBE_OK else {
+                throw RuntimeError.runFailed(Self.message(status))
+            }
+            guard let text = transcribe_full_text(session) else { return "" }
+            return String(cString: text)
         }
     }
 

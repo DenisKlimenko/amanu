@@ -18,20 +18,24 @@ import Foundation
 /// required for anything over 30 seconds — the API refuses outright without
 /// it, so it is always sent.
 ///
-/// Every response is cached next to the audio as `transcript.openai*.json`,
-/// so a retry after a crash re-renders from disk instead of re-uploading and
+/// Every response is cached next to the audio (see `ProviderCache`), so a
+/// retry after a crash re-renders from disk instead of re-uploading and
 /// paying again.
 actor OpenAITranscriptionEngine: TranscriptionEngine {
     enum EngineError: TranscriptionFailure, CustomStringConvertible {
         case noAPIKey
-        case http(Int, String)
         case empty
 
         /// Only "there was no speech in this audio" is permanent; a silent
-        /// recording will still be silent tomorrow. A missing key or an HTTP
-        /// error is worth another go — see the note on the protocol.
+        /// recording will still be silent tomorrow. HTTP answers are
+        /// classified by `CloudHTTP`.
         var isPermanent: Bool {
             if case .empty = self { return true }
+            return false
+        }
+
+        var isEnvironmental: Bool {
+            if case .noAPIKey = self { return true }
             return false
         }
 
@@ -40,8 +44,6 @@ actor OpenAITranscriptionEngine: TranscriptionEngine {
             case .noAPIKey:
                 return "no OpenAI API key — put one in \(Config.openAIKeyPath.path)"
                     + " (chmod 600) or set OPENAI_API_KEY"
-            case .http(let code, let body):
-                return "openai transcription failed: HTTP \(code) \(body.prefix(400))"
             case .empty:
                 return "openai returned no speech"
             }
@@ -67,15 +69,23 @@ actor OpenAITranscriptionEngine: TranscriptionEngine {
     /// against real audio and the real API without a meeting long enough to
     /// pass 25 MB — an hour of it, every time anyone wanted to check.
     private let requestLimit: Int64
+    private let http: CloudHTTP
 
     /// Throws rather than failing at transcribe time — a missing key should
     /// show up in the log the moment the engine is picked, not an upload later.
-    init(requestLimit: Int64 = OpenAITranscriptionEngine.defaultRequestLimit) throws {
-        guard let key = Config.openAIKey() else { throw EngineError.noAPIKey }
-        apiKey = key
+    init(
+        requestLimit: Int64 = OpenAITranscriptionEngine.defaultRequestLimit,
+        apiKey: String? = nil,
+        session: URLSession = .shared,
+        retry: CloudHTTP.RetryPolicy = .standard,
+        sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+    ) throws {
+        guard let key = apiKey ?? Config.openAIKey() else { throw EngineError.noAPIKey }
+        self.apiKey = key
         expected = MeetingLanguages.expected(primary: Config.transcriptionLanguage())
         model = Config.openAITranscriptionModel()
         self.requestLimit = requestLimit
+        http = CloudHTTP(service: .openAI, session: session, retry: retry, sleep: sleep)
     }
 
     func prepare() async throws {}
@@ -90,7 +100,7 @@ actor OpenAITranscriptionEngine: TranscriptionEngine {
 
         var segments: [TranscriptSegment] = []
         for (index, slice) in slices.enumerated() {
-            let cache = dir.appendingPathComponent(Self.cacheName(index, of: slices.count))
+            let cache = cacheURL(in: dir, audio: audio, piece: index, of: slices.count)
             let response: Response
             if let cached = try? Data(contentsOf: cache),
                let decoded = try? JSONDecoder().decode(Response.self, from: cached) {
@@ -98,7 +108,7 @@ actor OpenAITranscriptionEngine: TranscriptionEngine {
                 response = decoded
             } else {
                 let raw = try await send(slice.url)
-                response = try JSONDecoder().decode(Response.self, from: raw)
+                response = try http.decode(Response.self, from: raw, what: "transcription")
                 try? raw.write(to: cache, options: .atomic)
             }
             segments += Self.segments(
@@ -150,11 +160,8 @@ actor OpenAITranscriptionEngine: TranscriptionEngine {
 
     // MARK: - API
 
-    /// One transcription request. The multipart body is assembled on disk and
-    /// streamed from there: an hour of meeting is tens of megabytes, and the
-    /// daemon has no business holding that on the heap while it uploads.
+    /// One transcription request, streamed from a multipart body on disk.
     private func send(_ audio: URL) async throws -> Data {
-        let boundary = "amanu.\(UUID().uuidString)"
         var fields: [(String, String)] = [
             ("model", model),
             ("response_format", "diarized_json"),
@@ -165,81 +172,34 @@ actor OpenAITranscriptionEngine: TranscriptionEngine {
         if let language = Self.languageField(for: expected) {
             fields.append(("language", language))
         }
-
-        let body = FileManager.default.temporaryDirectory
-            .appendingPathComponent("amanu-openai-\(UUID().uuidString).multipart")
-        try Self.writeMultipart(fields: fields, file: audio, boundary: boundary, to: body)
-        defer { try? FileManager.default.removeItem(at: body) }
-
-        var request = URLRequest(url: Self.endpoint)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "authorization")
-        request.setValue(
-            "multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "content-type")
         // Uploading and transcribing an hour of audio outlasts the 60s default
         // several times over, and a timeout here costs the whole meeting.
-        request.timeoutInterval = 1800
-
-        let (data, response) = try await URLSession.shared.upload(for: request, fromFile: body)
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw EngineError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
-        }
-        return data
+        return try await http.sendMultipart(
+            to: Self.endpoint, fields: fields, file: audio, key: apiKey,
+            what: "transcription", timeout: 1800)
     }
 
     /// The `language` field for a request, or nil to let the model detect.
-    ///
-    /// `language` is a pin: it tells the model what it is listening to rather
-    /// than what it might be, and there is nothing beside it — no
-    /// `expected_languages`, no candidate list — to express an expectation
-    /// instead. So it is only sent when the expectation is a single language
-    /// and there is nothing for the pin to be wrong about, which today means
-    /// somebody who chose English.
-    ///
-    /// "Mostly Russian" is not that. It means Russian *and* English, and a
-    /// pin on either is how the other comes back as fluent nonsense — the
-    /// same failure the local engine's script filter used to cause, and the
-    /// same reason it matters: `keep_audio` is off by default, so that
-    /// transcript is the whole of what survives the meeting. Detection over
-    /// two candidates is a far smaller risk than a confident wrong answer.
+    /// The API has nothing beside it — no `expected_languages`, no candidate
+    /// list — to express an expectation instead, so it follows the rule every
+    /// such engine follows: `MeetingLanguages.pin(for:)`.
     static func languageField(for expected: [String]) -> String? {
-        expected.count == 1 ? expected.first : nil
-    }
-
-    private static func writeMultipart(
-        fields: [(String, String)],
-        file: URL,
-        boundary: String,
-        to destination: URL
-    ) throws {
-        var header = ""
-        for (name, value) in fields {
-            header += "--\(boundary)\r\n"
-            header += "Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n"
-            header += "\(value)\r\n"
-        }
-        header += "--\(boundary)\r\n"
-        header += "Content-Disposition: form-data; name=\"file\";"
-            + " filename=\"\(file.lastPathComponent)\"\r\n"
-        header += "Content-Type: audio/mp4\r\n\r\n"
-
-        FileManager.default.createFile(atPath: destination.path, contents: nil)
-        let handle = try FileHandle(forWritingTo: destination)
-        defer { try? handle.close() }
-        try handle.write(contentsOf: Data(header.utf8))
-
-        let source = try FileHandle(forReadingFrom: file)
-        defer { try? source.close() }
-        while let chunk = try source.read(upToCount: 1 << 20), !chunk.isEmpty {
-            try handle.write(contentsOf: chunk)
-        }
-        try handle.write(contentsOf: Data("\r\n--\(boundary)--\r\n".utf8))
+        MeetingLanguages.pin(for: expected)
     }
 
     // MARK: - shaping
 
-    static func cacheName(_ index: Int, of count: Int) -> String {
-        count > 1 ? "transcript.openai.\(index + 1).json" : "transcript.openai.json"
+    /// Where one piece's response is cached: named for the model, the
+    /// language sent, the request limit that decided the cut, and which piece
+    /// of how many it is.
+    func cacheURL(in dir: URL, audio: URL, piece index: Int, of count: Int) -> URL {
+        ProviderCache.url(
+            in: dir, provider: .openAI,
+            parts: [
+                audio.lastPathComponent, model, Self.languageField(for: expected) ?? "detect",
+                "\(requestLimit)", "\(count)",
+            ],
+            suffix: count > 1 ? "\(index + 1)" : nil)
     }
 
     /// The response as amanu's segments: times moved onto the session clock,

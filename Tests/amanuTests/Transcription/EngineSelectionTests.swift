@@ -10,8 +10,8 @@ import Testing
 struct EngineSelectionTests {
     private static func choice(
         _ configured: String, key: Bool, localModels: Bool
-    ) -> TranscriptionCoordinator.EngineChoice {
-        TranscriptionCoordinator.resolveEngine(
+    ) -> EngineResolver.EngineChoice {
+        EngineResolver.resolveEngine(
             configured: configured, hasKey: key, localModels: localModels)
     }
 
@@ -82,9 +82,9 @@ struct EngineSelectionTests {
     /// outright is that one — the branch that needs no config file to answer.
     @Test("A named cloud engine is its own provider")
     func providerFromEngineName() {
-        #expect(TranscriptionCoordinator.cloudProvider(configured: "openai") == "openai")
-        #expect(TranscriptionCoordinator.cloudProvider(configured: "assemblyai") == "assemblyai")
-        #expect(TranscriptionCoordinator.cloudProvider(configured: "elevenlabs") == "elevenlabs")
+        #expect(EngineResolver.cloudProvider(configured: "openai") == "openai")
+        #expect(EngineResolver.cloudProvider(configured: "assemblyai") == "assemblyai")
+        #expect(EngineResolver.cloudProvider(configured: "elevenlabs") == "elevenlabs")
     }
 
     @Test("An unrecognised engine name is treated as auto")

@@ -64,14 +64,16 @@ struct AssemblyAIEngineTests {
     }
 
     @Test("Multichannel responses never reuse a cache made from a mono mix")
-    func multichannelCacheHasItsOwnName() {
+    func multichannelCacheHasItsOwnName() async throws {
         let folder = URL(fileURLWithPath: "/tmp/meeting")
-        let cache = AssemblyAIEngine.cacheURL(
-            for: folder.appendingPathComponent("multichannel.m4a"))
+        let audio = folder.appendingPathComponent("multichannel.m4a")
+        let engine = try AssemblyAIEngine(apiKey: "test-key")
+        let cache = await engine.cacheURL(for: audio, multichannel: true)
         // What a session transcribed from a mono mix, before multichannel,
         // left behind — and what must never be read back as this one's answer.
         let legacy = folder.appendingPathComponent("transcript.assemblyai.json")
         #expect(cache.path != legacy.path)
+        #expect(cache != (await engine.cacheURL(for: audio, multichannel: false)))
         // Beside the audio it was made from, so it goes wherever the session goes.
         #expect(cache.deletingLastPathComponent().path == folder.path)
     }
@@ -96,7 +98,8 @@ struct AssemblyAIEngineTests {
     func everythingElseIsTemporary() {
         #expect(!AssemblyAIEngine.EngineError.transcriptFailed(
             "Transcoding failed. Please try again.").isPermanent)
-        #expect(!AssemblyAIEngine.EngineError.http("upload", 500, "").isPermanent)
+        #expect(!CloudHTTP.Failure.unavailable(
+            service: "assemblyai", what: "upload", status: 500, body: "").isPermanent)
         #expect(!AssemblyAIEngine.EngineError.timedOut.isPermanent)
         #expect(!AssemblyAIEngine.EngineError.noAPIKey.isPermanent)
     }

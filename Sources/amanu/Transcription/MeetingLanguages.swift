@@ -82,6 +82,21 @@ enum MeetingLanguages {
         return raw == "en" ? [raw] : [raw, "en"]
     }
 
+    /// The one language an engine may be told outright, or nil to let it
+    /// detect.
+    ///
+    /// A language parameter is a pin: it tells the model what it is listening
+    /// to rather than what it might be. So it is only worth sending when the
+    /// expectation is a single language and there is nothing for the pin to
+    /// be wrong about — today, somebody who chose English. "Mostly Russian"
+    /// means Russian *and* English, and a pin on either is how the other comes
+    /// back as fluent nonsense; with `keep_audio` off by default that
+    /// transcript is all that survives the meeting. Every engine without a way
+    /// to name a shortlist — OpenAI, Whisper — asks this one question.
+    static func pin(for expected: [String]) -> String? {
+        expected.count == 1 ? expected.first : nil
+    }
+
     /// The same set as a sentence, for the places that report what amanu is
     /// about to do rather than do it — `amanu doctor`, and the line under the
     /// setup window's menu.

@@ -475,7 +475,7 @@ enum DoctorReport {
             )
         }
         let configured = Config.transcriptionEngine()
-        let provider = TranscriptionCoordinator.cloudProvider(configured: configured)
+        let provider = EngineResolver.cloudProvider(configured: configured)
         if Config.cloudEngines.contains(configured) { return checkCloud(provider) }
         guard Platform.supportsLocalModels else { return checkWithoutLocalModels(provider) }
         return checkParakeet()

@@ -48,27 +48,34 @@ actor WhisperEngine: TranscriptionEngine {
         }
     }
 
-    nonisolated let name = "whisper.cpp"
+    /// The name the config file, the recordings window and analytics all
+    /// know this engine by. It used to be "whisper.cpp", the runtime's name,
+    /// which matched none of them: analytics reported every local Whisper
+    /// transcript as a custom engine.
+    nonisolated let name = "whisper"
     nonisolated let model: String
     nonisolated let input: TranscriptionInput = .perTrack
 
     private let modelStore: WhisperModelStore
     private let runtime: any WhisperRuntime
-    private let language: String?
+    /// The language whisper.cpp is told to hear, or nil to let it detect.
+    /// Only ever a language that cannot be the wrong one — see
+    /// `MeetingLanguages.pin(for:)`.
+    nonisolated let language: String?
     private let maximumSamples: Int
     private let progress: @Sendable (Progress) -> Void
 
     init(
         modelStore: WhisperModelStore = .init(),
         runtime: any WhisperRuntime = WhisperCPPRuntime(),
-        language: String? = nil,
+        expectedLanguages: [String] = MeetingLanguages.expected(
+            primary: Config.transcriptionLanguage()),
         chunkDuration: TimeInterval = 10 * 60,
         progress: @escaping @Sendable (Progress) -> Void = { _ in }
     ) {
         self.modelStore = modelStore
         self.runtime = runtime
-        let trimmed = language?.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.language = trimmed?.isEmpty == false ? trimmed : nil
+        language = MeetingLanguages.pin(for: expectedLanguages)
         maximumSamples = Int((chunkDuration * 16_000).rounded())
         self.progress = progress
         model = modelStore.manifest.id
@@ -237,12 +244,14 @@ private final class WhisperCPPRuntime: WhisperRuntime, @unchecked Sendable {
     private var context: OpaquePointer?
 
     func prepare(model: URL) async throws {
-        try contextLock.withLock {
-            if context != nil { return }
-            var params = whisper_context_default_params()
-            params.use_gpu = true
-            context = model.path.withCString { whisper_init_from_file_with_params($0, params) }
-            guard context != nil else { throw RuntimeError.modelLoadFailed(model) }
+        try await DedicatedThread.run("whisper load") { [self] in
+            try contextLock.withLock {
+                if context != nil { return }
+                var params = whisper_context_default_params()
+                params.use_gpu = true
+                context = model.path.withCString { whisper_init_from_file_with_params($0, params) }
+                guard context != nil else { throw RuntimeError.modelLoadFailed(model) }
+            }
         }
     }
 
@@ -253,59 +262,65 @@ private final class WhisperCPPRuntime: WhisperRuntime, @unchecked Sendable {
     ) async throws -> [WhisperRuntimeSegment] {
         let run = WhisperRunState(progress: progress)
         return try await withTaskCancellationHandler {
-            try contextLock.withLock {
-                guard let context else { throw RuntimeError.notPrepared }
-                var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
-                params.n_threads = Int32(max(1, min(8, ProcessInfo.processInfo.activeProcessorCount)))
-                params.translate = false
-                params.no_context = true
-                params.no_timestamps = false
-                params.single_segment = false
-                params.print_special = false
-                params.print_progress = false
-                params.print_realtime = false
-                params.print_timestamps = false
-                params.token_timestamps = false
-                params.progress_callback = { _, _, percentage, opaque in
-                    guard let opaque else { return }
-                    Unmanaged<WhisperRunState>.fromOpaque(opaque)
-                        .takeUnretainedValue().report(Double(percentage) / 100)
-                }
-                params.progress_callback_user_data = Unmanaged.passUnretained(run).toOpaque()
-                params.abort_callback = { opaque in
-                    guard let opaque else { return false }
-                    return Unmanaged<WhisperRunState>.fromOpaque(opaque)
-                        .takeUnretainedValue().isCancelled
-                }
-                params.abort_callback_user_data = Unmanaged.passUnretained(run).toOpaque()
+            try await DedicatedThread.run("whisper") { [self] in try decode(samples, language, run) }
+        } onCancel: {
+            run.cancel()
+        }
+    }
 
-                let code: Int32 = samples.withUnsafeBufferPointer { pcm in
-                    if let language {
-                        return language.withCString { value in
-                            params.language = value
-                            return whisper_full(context, params, pcm.baseAddress, Int32(pcm.count))
-                        }
-                    }
-                    return "auto".withCString { value in
+    private func decode(
+        _ samples: [Float], _ language: String?, _ run: WhisperRunState
+    ) throws -> [WhisperRuntimeSegment] {
+        try contextLock.withLock {
+            guard let context else { throw RuntimeError.notPrepared }
+            var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
+            params.n_threads = Int32(max(1, min(8, ProcessInfo.processInfo.activeProcessorCount)))
+            params.translate = false
+            params.no_context = true
+            params.no_timestamps = false
+            params.single_segment = false
+            params.print_special = false
+            params.print_progress = false
+            params.print_realtime = false
+            params.print_timestamps = false
+            params.token_timestamps = false
+            params.progress_callback = { _, _, percentage, opaque in
+                guard let opaque else { return }
+                Unmanaged<WhisperRunState>.fromOpaque(opaque)
+                    .takeUnretainedValue().report(Double(percentage) / 100)
+            }
+            params.progress_callback_user_data = Unmanaged.passUnretained(run).toOpaque()
+            params.abort_callback = { opaque in
+                guard let opaque else { return false }
+                return Unmanaged<WhisperRunState>.fromOpaque(opaque)
+                    .takeUnretainedValue().isCancelled
+            }
+            params.abort_callback_user_data = Unmanaged.passUnretained(run).toOpaque()
+
+            let code: Int32 = samples.withUnsafeBufferPointer { pcm in
+                if let language {
+                    return language.withCString { value in
                         params.language = value
                         return whisper_full(context, params, pcm.baseAddress, Int32(pcm.count))
                     }
                 }
-                try Task.checkCancellation()
-                guard code == 0 else { throw RuntimeError.inferenceFailed(code) }
-
-                return (0..<Int(whisper_full_n_segments(context))).compactMap { index in
-                    guard let bytes = whisper_full_get_segment_text(context, Int32(index)) else {
-                        return nil
-                    }
-                    return WhisperRuntimeSegment(
-                        start: Double(whisper_full_get_segment_t0(context, Int32(index))) / 100,
-                        end: Double(whisper_full_get_segment_t1(context, Int32(index))) / 100,
-                        text: String(cString: bytes))
+                return "auto".withCString { value in
+                    params.language = value
+                    return whisper_full(context, params, pcm.baseAddress, Int32(pcm.count))
                 }
             }
-        } onCancel: {
-            run.cancel()
+            if run.isCancelled { throw CancellationError() }
+            guard code == 0 else { throw RuntimeError.inferenceFailed(code) }
+
+            return (0..<Int(whisper_full_n_segments(context))).compactMap { index in
+                guard let bytes = whisper_full_get_segment_text(context, Int32(index)) else {
+                    return nil
+                }
+                return WhisperRuntimeSegment(
+                    start: Double(whisper_full_get_segment_t0(context, Int32(index))) / 100,
+                    end: Double(whisper_full_get_segment_t1(context, Int32(index))) / 100,
+                    text: String(cString: bytes))
+            }
         }
     }
 

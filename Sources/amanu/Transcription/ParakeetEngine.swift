@@ -24,9 +24,18 @@ import Foundation
 /// languages share an alphabet the filter is known up front; where they don't,
 /// the audio decides — `sharedScript(of:)` and `dominantScript(of:)` below.
 actor ParakeetEngine: TranscriptionEngine {
-    enum EngineError: Error, CustomStringConvertible {
+    enum EngineError: TranscriptionFailure, CustomStringConvertible {
         case notPrepared
         case unreadableAudio(URL, Error?)
+
+        /// The same answer Whisper and GigaAM give: audio that cannot be read
+        /// today will not be readable tomorrow. It used to be no answer at
+        /// all, so parakeet retried an unreadable file three times where the
+        /// other two local engines retired it at once.
+        var isPermanent: Bool {
+            if case .unreadableAudio = self { return true }
+            return false
+        }
 
         var description: String {
             switch self {
