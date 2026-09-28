@@ -424,6 +424,9 @@ actor TranscriptionCoordinator {
         guard merged.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
             throw EmptyTranscript()
         }
+        if !meta.isSingleSource {
+            merged = MeetSpeakers.apply(to: merged, session: dir) { log(dir, $0) }
+        }
 
         let transcript = Transcript(
             engine: engine.name,

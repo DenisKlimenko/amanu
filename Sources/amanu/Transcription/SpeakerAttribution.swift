@@ -142,7 +142,7 @@ enum SpeakerAttribution {
         }
     }
 
-    private static func suffix(_ index: Int) -> String {
+    static func suffix(_ index: Int) -> String {
         // A, B, … Z, then fall back to numbers rather than wrapping.
         index < 26
             ? String(UnicodeScalar(UInt8(65 + index)))

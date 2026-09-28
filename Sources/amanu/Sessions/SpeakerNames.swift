@@ -20,6 +20,10 @@ struct SpeakerNames: Codable {
         case config
         /// The naming pass.
         case model
+        /// Google Meet's own speaking indicator, recorded during the call by
+        /// the browser extension. A fact about who was talking rather than an
+        /// inference from what was said, so it outranks the model.
+        case meet
         /// Typed by a person. Outranks the model permanently — a re-run leaves
         /// it alone, because someone who corrected a name once should not have
         /// to correct it again after every retry.
@@ -33,6 +37,7 @@ struct SpeakerNames: Codable {
             case .account: return localised("account", "учётка")
             case .config: return localised("config", "конфиг")
             case .model: return localised("model", "модель")
+            case .meet: return "Meet"
             case .manual: return localised("manual", "вручную")
             }
         }

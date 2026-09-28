@@ -10,10 +10,22 @@ struct Amanu: ParsableCommand {
         subcommands: [
             Run.self, Setup.self, Doctor.self, Install.self, Sessions.self, FormatTranscripts.self,
             ProcessSession.self,
-            Record.self, AnalyticsCommand.self,
+            Record.self, AnalyticsCommand.self, MeetCommand.self,
         ],
         defaultSubcommand: Run.self
     )
+
+    /// A browser starts its native-messaging host with nothing but the
+    /// caller's origin on the command line, and a host manifest has nowhere to
+    /// put a subcommand. So an origin where a subcommand should be is the
+    /// Meet extension calling, and is routed to it.
+    static func main() {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        guard arguments.first?.hasPrefix("chrome-extension://") == true else {
+            return main(nil)
+        }
+        main(["meet", "host"] + arguments)
+    }
 }
 
 struct Run: ParsableCommand {

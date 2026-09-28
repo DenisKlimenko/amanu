@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "amanu — Meet speakers",
+  "version": "0.1.0",
+  "description": "Tells amanu who Google Meet shows as speaking, so meeting transcripts carry real names.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4a6IliUyhoCgw1ZRAawXBhwh6sWA1s1+Op+KlfPej6Pkyp7tOnj1ehZKnifT6wKSS4QDlUCDRKHQd46tHJrNQm1Y6ltUIrg6VzMbZ3xHi1H2hKxyFJqJBPVu/PQxfZOUuFu+1qrr4m6Pg9c3hRkTz7eqNzYpBGVdOvPZ2CM0Bvn6hwEHswa52EaCqaERF/s2yVuHfybUGmG7fxl1EbFzv2HkTKBiay0tA5AYzDWDQG7xHG1XI9iPFEtVOQ62H0jWtLN+lMDGi/Znrlc9QO/rpNpNgeqxKF14IlLMjqCYfBUKyQCwaloLuC2WhVf75eygGdbIx6kWjDgqT7fkmx8hBwIDAQAB",
+  "permissions": [
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://meet.google.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

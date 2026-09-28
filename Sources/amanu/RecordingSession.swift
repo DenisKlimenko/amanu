@@ -244,6 +244,13 @@ final class RecordingSession {
                 return "all"
             }(),
         ]
+        // The wall-clock moment the transcript's zero stands for. `started`
+        // is whole seconds and precedes the first buffer; lining the
+        // transcript up with anything else recorded during the call — the
+        // Meet speaker timeline — needs the millisecond it actually began.
+        if let origin = Self.originMs(mic: mic.firstBufferAt, system: system.firstBufferAt) {
+            meta["origin_ms"] = origin
+        }
         if let title { meta["title"] = title }
         meta.merge(context.metaFields) { current, _ in current }
         if pausedFor > 0 { meta["paused_seconds"] = Int(pausedFor) }
@@ -493,6 +500,7 @@ final class RecordingSession {
                 "recovered": true,
             ]
             if let title = manifest["title"] as? String { meta["title"] = title }
+            if let origin = manifest["origin_ms"] as? Int { meta["origin_ms"] = origin }
             if let app = manifest["app"] as? String { meta["app"] = app }
             if let calendar = manifest["calendar"] as? [String: Any] {
                 meta["calendar"] = calendar
@@ -593,6 +601,8 @@ final class RecordingSession {
         if mic.firstBufferAt != nil || system.firstBufferAt != nil {
             manifest["start_offset_ms"] = Self.startOffsets(
                 mic: mic.firstBufferAt, system: system.firstBufferAt)
+            manifest["origin_ms"] = Self.originMs(
+                mic: mic.firstBufferAt, system: system.firstBufferAt)
         }
         do {
             try writeFile(Self.json(manifest), dir.appendingPathComponent(Self.manifestFile))
@@ -618,6 +628,12 @@ final class RecordingSession {
             start.map { Int($0.timeIntervalSince(earliest) * 1000) } ?? 0
         }
         return ["mic": offset(mic), "system": offset(system)]
+    }
+
+    /// The wall-clock millisecond the offsets above are measured from, or
+    /// nil when neither track delivered a buffer.
+    nonisolated static func originMs(mic: Date?, system: Date?) -> Int? {
+        [mic, system].compactMap { $0 }.min().map { Int($0.timeIntervalSince1970 * 1000) }
     }
 
     nonisolated static func json(_ object: [String: Any]) throws -> Data {
