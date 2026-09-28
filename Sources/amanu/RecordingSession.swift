@@ -213,7 +213,12 @@ final class RecordingSession {
     }
 
     /// Stop both tracks, write meta.json, and drop the in-progress manifest.
-    func stop(reason: String = "manual") {
+    ///
+    /// Returns whether meta.json was written — whether the folder is now a
+    /// finished session, rather than one that the next launch's recovery
+    /// has to finish from its manifest. Only a finished one can be queued.
+    @discardableResult
+    func stop(reason: String = "manual") -> Bool {
         watchdog?.invalidate()
         watchdog = nil
         if pausedSince != nil { resume() }
@@ -259,12 +264,15 @@ final class RecordingSession {
         // that refuses meta.json keeps the manifest, rewritten without our
         // pid so that the next recovery adopts it instead of taking it for a
         // recording still in progress.
+        let finished: Bool
         do {
             try writeFile(Self.json(meta), dir.appendingPathComponent("meta.json"))
             try? FileManager.default.removeItem(at: dir.appendingPathComponent(Self.manifestFile))
+            finished = true
         } catch {
             Self.reportMetaFailure(error, in: dir)
             writeManifest(stopped: meta)
+            finished = false
         }
 
         let length = ended.timeIntervalSince(startedAt)
@@ -280,6 +288,7 @@ final class RecordingSession {
                 .durationBucket: Analytics.durationBucket(seconds: length),
             ])
         }
+        return finished
     }
 
     /// Attach/detach optional live-ASR consumers without touching the durable

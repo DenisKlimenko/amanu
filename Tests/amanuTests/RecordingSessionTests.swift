@@ -130,7 +130,7 @@ struct RecordingSessionTests {
         try session.start(systemAudioScope: "all")
         #expect(exists(session.dir.appendingPathComponent(".recording.json")))
 
-        session.stop(reason: "manual")
+        #expect(session.stop(reason: "manual"))
 
         #expect(try meta(in: session.dir)["stop_reason"] as? String == "manual")
         #expect(!exists(session.dir.appendingPathComponent(".recording.json")))
@@ -178,7 +178,8 @@ struct RecordingSessionTests {
             })
         try session.start(systemAudioScope: "all")
 
-        session.stop(reason: "call-ended")
+        #expect(!session.stop(reason: "call-ended"),
+                "a folder without meta.json was reported finished, and would be queued")
 
         #expect(!exists(session.dir.appendingPathComponent("meta.json")))
         let kept = try manifest(in: session.dir)

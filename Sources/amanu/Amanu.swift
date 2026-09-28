@@ -808,7 +808,7 @@ final class AppController {
         }
         guard let session else { return }
         session.installLiveAudioSinks(mic: nil, system: nil)
-        session.stop(reason: reason)
+        let finished = session.stop(reason: reason)
         let duration = Date().timeIntervalSince(session.startedAt)
         FileHandle.standardError.write(Data(
             "○ stopped (\(reason)) · \(Self.format(duration)) · \(session.dir.path)\n".utf8
@@ -842,12 +842,23 @@ final class AppController {
         }
 
         let dir = session.dir
-        Task { [liveTranscription, transcription] in
+        // A folder whose meta.json could not be written is not a session yet:
+        // queued, it failed at once for want of one and put a "transcription
+        // failed" banner over a recording that had not failed at all. Its
+        // manifest is kept, and the next launch's recovery finishes it and
+        // hands it to the queue.
+        let queue = finished ? transcription : nil
+        if !finished {
+            FileHandle.standardError.write(Data(
+                ("not queued: \(dir.lastPathComponent) has no meta.json yet — recovery "
+                    + "finishes it at the next launch\n").utf8))
+        }
+        Task { [liveTranscription] in
             // Drop the large streaming model before Parakeet begins its final,
             // canonical pass so the two heavyweight ASR pipelines don't
             // compete for memory or the Neural Engine.
             await liveTranscription.finishRecording()
-            await transcription.enqueue(dir)
+            await queue?.enqueue(dir)
         }
     }
 
