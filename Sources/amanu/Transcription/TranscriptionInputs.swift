@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 /// The three ways a session's audio is handed to an engine — one call per
@@ -102,6 +103,17 @@ struct TranscriptionInputs {
             guard FileManager.default.fileExists(atPath: storedAudio.path) else {
                 throw CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: storedAudio.path])
             }
+            // The recorders create their files when recording starts, so a
+            // side that never delivered a buffer — a system tap that was
+            // never granted, a microphone that died at once — leaves a track
+            // with a header and no audio. That is a silent side, not a broken
+            // recording: the engines call a file with no frames unreadable,
+            // and unreadable is permanent, so one empty track used to retire
+            // the whole meeting on its first attempt.
+            if track.channel == nil, Self.holdsNoAudio(storedAudio) {
+                log("\(track.file) holds no audio — \(track.speaker) is silent in this recording")
+                continue
+            }
 
             var file = storedAudio
             var temporary: URL?
@@ -146,6 +158,15 @@ struct TranscriptionInputs {
             }
         }
         return merged
+    }
+
+    /// A track that exists but has nothing in it: no bytes at all, or a
+    /// header and no frames.
+    static func holdsNoAudio(_ url: URL) -> Bool {
+        let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        if bytes == 0 { return true }
+        guard let file = try? AVAudioFile(forReading: url) else { return false }
+        return file.length == 0
     }
 
     /// One pass over mixed.m4a, speaker taken from the engine's diarization
