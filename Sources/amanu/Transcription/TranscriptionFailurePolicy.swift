@@ -136,8 +136,20 @@ enum TranscriptionFailurePolicy {
                     " — звук сохранён, подробности в transcribe.log"),
                 opening: dir
             )
-            TrackCompressor.compress(sessionDir: dir)
-            TranscriptionScratch.remove(in: dir)
+            // Under the session's claim, as every other compression is. The
+            // transcription that failed has let go of it by the time its
+            // failure is recorded, and in the minutes of encoding the
+            // recordings window or `amanu process` may reach for the same
+            // tracks to try again. Whoever has them then keeps them as they
+            // are; retired sessions are only compressed to save disk.
+            do {
+                try SessionClaim.acquire(dir, stage: .transcribe)
+                TrackCompressor.compress(sessionDir: dir)
+                TranscriptionScratch.remove(in: dir)
+                SessionClaim.release(dir)
+            } catch {
+                log("audio left uncompressed — \(error)")
+            }
             return .retired
         } else {
             SessionState.update(dir, with: fields)

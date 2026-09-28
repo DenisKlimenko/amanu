@@ -57,6 +57,30 @@ struct TranscriptionFailureTests {
         #expect(TranscriptionFailurePolicy.hasGivenUp(on: dir))
     }
 
+    /// The retired session's tracks are compressed after the failed
+    /// transcription has let go of its claim — and used to be compressed
+    /// without one, under whoever had picked the folder up in the meantime.
+    @Test("A retired session is compressed only under its own claim")
+    func retirementCompressesUnderTheClaim() throws {
+        let recordings = try TestRecordings()
+        defer { recordings.remove() }
+        let held = try recordings.session("2026-09-28-a")
+        let free = try recordings.session("2026-09-28-b")
+        try JSONSerialization.data(withJSONObject: [
+            "pid": ProcessInfo.processInfo.processIdentifier,
+            "started": "2026-09-28T09:00:00Z", "stage": "transcribe",
+        ]).write(to: SessionClaim.url(held))
+
+        #expect(TranscriptionFailurePolicy.record(Refused(), for: held, engine: nil) == .retired)
+        #expect(TranscriptionFailurePolicy.record(Refused(), for: free, engine: nil) == .retired)
+
+        #expect(FileManager.default.fileExists(atPath: held.appendingPathComponent("mic.caf").path),
+                "the tracks were compressed under somebody else's claim")
+        #expect(!FileManager.default.fileExists(atPath: held.appendingPathComponent("audio.m4a").path))
+        #expect(FileManager.default.fileExists(atPath: free.appendingPathComponent("audio.m4a").path))
+        #expect(!SessionClaim.isHeld(free))
+    }
+
     /// A model that would not download used to fail every meeting in the
     /// queue once each, restart the download from nothing for each of them,
     /// and retire all of them on the third launch.
