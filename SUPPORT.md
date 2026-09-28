@@ -23,9 +23,10 @@ logs to a public issue. Follow [SECURITY.md](SECURITY.md) for vulnerabilities.
 - If `~/.config/amanu/config.json` stops being valid JSON — a hand edit with
   a stray comma — Amanu keeps recording but holds transcription and
   summaries, sends no statistics, and refuses to save settings over the file.
-  The menu, the windows and `amanu doctor` say so. Fix the file, or move it
-  aside to start from the defaults; the held recordings are picked up as soon
-  as it can be read.
+  Everything else keeps to the settings it last read from the file (if it
+  never could, the defaults, with auto-record off). The menu, the windows and
+  `amanu doctor` say so. Fix the file, or move it aside to start from the
+  defaults; the held recordings are picked up as soon as it can be read.
 - Intel Macs require a cloud transcription key; local Parakeet transcription
   requires Apple Silicon. A universal binary is available, but physical Intel
   hardware has not been validated.

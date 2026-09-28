@@ -60,7 +60,9 @@ context such as its title and calendar participants; Ollama keeps that work on
 the Mac when it is configured with a localhost/loopback Base URL. The complete
 data-flow description is in the [privacy notice](PRIVACY.md).
 Work that cannot run without a network is marked as deferred and resumed later
-instead of being silently dropped.
+instead of being silently dropped. A summary or naming pass that keeps
+reaching a model without getting an answer stops after five tries, until its
+settings, keys or backends change.
 
 Anonymous product-usage reporting is enabled by default with a random install
 UUID. The last control in first-run setup, and the same control in Settings,
