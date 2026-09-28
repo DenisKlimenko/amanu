@@ -810,7 +810,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// it was, because a switch that says "on" while every transcript fails
     /// with HTTP 401 is a lie the person only finds out about after a meeting.
     @objc private func cloudToggled() {
-        if cloudSwitch.state == .on, !hasKey(for: provider) {
+        if cloudSwitch.state == .on, !Credentials.hasTranscriptionKey(for: provider) {
             pendingProvider = provider
             cloudSwitch.state = .off
             refresh()
@@ -825,7 +825,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// key also switches the cloud on. A card without one only opens the key
     /// field: what is in force stays in force until the new key is accepted.
     private func providerPicked(_ id: String) {
-        guard hasKey(for: id) else {
+        guard Credentials.hasTranscriptionKey(for: id) else {
             pendingProvider = id
             refresh()
             focusKeyField()
@@ -890,14 +890,6 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
             write(update.path, update.value)
         }
         refresh()
-    }
-
-    private func hasKey(for provider: String) -> Bool {
-        switch provider {
-        case "openai": return Config.openAIKey() != nil
-        case "elevenlabs": return Config.elevenLabsKey() != nil
-        default: return Config.assemblyAIKey() != nil
-        }
     }
 
     /// Whichever window is showing the form — the setup wizard or the
@@ -1367,11 +1359,11 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         let accepted: Bool
         switch target {
         case "openai": accepted = await SummaryKeyProbe.works(provider: .openAI, key: key)
-        case "elevenlabs": accepted = await Self.elevenLabsKeyWorks(key)
-        default: accepted = await Self.assemblyKeyWorks(key)
+        case "elevenlabs": accepted = await Credentials.elevenLabsKeyWorks(key)
+        default: accepted = await Credentials.assemblyAIKeyWorks(key)
         }
         guard accepted else {
-            cloudKeyStatus.stringValue = hasKey(for: target)
+            cloudKeyStatus.stringValue = Credentials.hasTranscriptionKey(for: target)
                 ? localised(
                     "that key was refused — the saved one is untouched",
                     "этот ключ не приняли — сохранённый не тронут")
@@ -1385,7 +1377,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         default: path = Config.assemblyAIKeyPath
         }
         do {
-            try Self.writeSecret(key, to: path)
+            try Credentials.writeSecret(key, to: path)
         } catch {
             cloudKeyStatus.stringValue =
                 localised("couldn't save the key: ", "не удалось сохранить ключ: ") + "\(error)"
@@ -1423,7 +1415,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
             return
         }
         do {
-            try Self.writeSecret(key, to: path)
+            try Credentials.writeSecret(key, to: path)
         } catch {
             summaryKeyStatus.stringValue =
                 localised("couldn't save the key: ", "не удалось сохранить ключ: ") + "\(error)"
@@ -1433,54 +1425,6 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         summaryKeyStatus.stringValue = localised("key works", "ключ работает")
         Config.update(path: ["summary", "backend"], value: backend)
         refresh()
-    }
-
-    /// A key is a secret: it goes to a file only its owner can read, never
-    /// into the config file — which the settings window shows on screen. The
-    /// directory is amanu's own and mode 0700, so a key pasted here can't be
-    /// overwritten by some other tool that keeps its secrets in the same place.
-    private static func writeSecret(_ value: String, to path: URL) throws {
-        try FileManager.default.createDirectory(
-            at: path.deletingLastPathComponent(),
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        try Data(value.utf8).write(to: path, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
-    }
-
-    /// Ask AssemblyAI whether it knows this key, now, rather than finding out
-    /// after a meeting. The cheapest authenticated call it has.
-    private static func assemblyKeyWorks(_ key: String) async -> Bool {
-        var request = URLRequest(
-            url: URL(string: "https://api.assemblyai.com/v2/transcript?limit=1")!)
-        request.timeoutInterval = 15
-        request.setValue(key, forHTTPHeaderField: "authorization")
-        guard let (_, response) = try? await URLSession.shared.data(for: request) else {
-            return false
-        }
-        return (response as? HTTPURLResponse)?.statusCode == 200
-    }
-
-    private static func elevenLabsKeyWorks(_ key: String) async -> Bool {
-        // Restricted keys can transcribe without permission to read /v1/user.
-        // Submit no file to the STT endpoint: a permitted key gets validation
-        // error 422, an invalid key gets 401, and nothing is transcribed.
-        let boundary = "amanu-key-check"
-        var request = URLRequest(url: URL(string: "https://api.elevenlabs.io/v1/speech-to-text")!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 15
-        request.setValue(key, forHTTPHeaderField: "xi-api-key")
-        request.setValue(
-            "multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "content-type")
-        request.httpBody = Data(("--\(boundary)\r\n"
-            + "Content-Disposition: form-data; name=\"model_id\"\r\n\r\n"
-            + "scribe_v2\r\n--\(boundary)--\r\n").utf8)
-        guard let (_, response) = try? await URLSession.shared.data(for: request) else {
-            return false
-        }
-        guard let status = (response as? HTTPURLResponse)?.statusCode else { return false }
-        return status == 422
     }
 
     // MARK: - reading the machine
@@ -1701,7 +1645,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         let choice = transcriptionChoice
         provider = choice.provider
         pendingProvider = TranscriptionChoice.stillPending(pendingProvider) { [weak self] in
-            self?.hasKey(for: $0) ?? false
+            Credentials.hasTranscriptionKey(for: $0)
         }
 
         cloudSwitch.state = choice.cloud ? .on : .off
@@ -1710,7 +1654,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         providerCards.select(pendingProvider ?? provider)
 
         for card in providerCards.cards {
-            let known = hasKey(for: card.id)
+            let known = Credentials.hasTranscriptionKey(for: card.id)
             card.report(
                 known
                     ? localised("key works", "ключ работает")
@@ -1733,7 +1677,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         cloudStatus.stringValue = TranscriptionChoice.rowNeedsKey(
             pending: pendingProvider, cloudOn: choice.cloud)
             ? localised("needs a key", "нужен ключ") : ""
-        keyLine.isHidden = pendingProvider == nil && hasKey(for: provider)
+        keyLine.isHidden = pendingProvider == nil && Credentials.hasTranscriptionKey(for: provider)
 
         localSwitch.isEnabled = Platform.supportsLocalModels
         localSwitch.state = choice.local ? .on : .off
