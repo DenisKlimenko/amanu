@@ -68,6 +68,15 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         _ = try await AsrModels.downloadAndLoad(version: ParakeetEngine.configuredVersion())
     }
 
+    /// How a pasted key is put to the service it is for. A seam because the
+    /// answer decides what is written where, and a test has to be able to
+    /// say "that key works" without a network or a real key — which is the
+    /// only way to check that a key for one purpose lands in that purpose's
+    /// file and no other.
+    var checkKey: @MainActor (Credentials.Check) async -> Credentials.Verdict = { check in
+        await check.ask()
+    }
+
     /// The form itself, for a host to put in a scroll view.
     let view = FlippedStackView()
 
@@ -414,6 +423,8 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         providerCards.onChange = { [weak self] id in self?.providerPicked(id) }
 
         cloudKey.placeholderString = localised("paste key", "вставьте ключ")
+        cloudKey.identifier = NSUserInterfaceItemIdentifier("transcription.key")
+        cloudKeyStatus.identifier = NSUserInterfaceItemIdentifier("transcription.key.status")
         cloudKey.font = SetupLayout.detailFont
         cloudKey.delegate = self
         cloudKey.widthAnchor.constraint(equalToConstant: 220).isActive = true
@@ -601,6 +612,8 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         keyProvider.target = self
         keyProvider.action = #selector(keyProviderChanged)
         summaryKey.placeholderString = "sk-ant-…"
+        summaryKey.identifier = NSUserInterfaceItemIdentifier("summary.key")
+        summaryKeyStatus.identifier = NSUserInterfaceItemIdentifier("summary.key.status")
         summaryKey.font = SetupLayout.detailFont
         summaryKey.delegate = self
         summaryKeyStatus.font = SetupLayout.statusFont
@@ -977,6 +990,10 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     }
 
     @objc private func keyProviderChanged() {
+        // Only here, not in every redraw: a redraw follows the very write
+        // that says a key was saved, and used to wipe "key works" off the
+        // screen the moment it appeared.
+        summaryKeyStatus.stringValue = ""
         showKeyProvider()
         if summaryCards.selected == "api-key" {
             Config.update(path: ["summary", "backend"], value: selectedKeyBackend)
@@ -994,7 +1011,6 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     private func showKeyProvider() {
         summaryKey.placeholderString = selectedKeyBackend == "anthropic-api" ? "sk-ant-…" : "sk-…"
         summaryOpenAIOptions.isHidden = selectedKeyBackend != "openai-api"
-        summaryKeyStatus.stringValue = ""
         summaryKeyLink.identifier = NSUserInterfaceItemIdentifier(
             selectedKeyBackend == "anthropic-api"
                 ? "https://console.anthropic.com/settings/keys"
@@ -1350,41 +1366,40 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// into the field by accident used to replace a good key on disk, and the
     /// only sign was every later meeting failing to transcribe with HTTP 401.
     /// A key that isn't accepted never reaches the file.
-    private func saveCloudKey() async {
+    func saveCloudKey() async {
         let target = pendingProvider ?? provider
         let key = cloudKey.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return }
-        cloudKeyStatus.stringValue = Self.checkingKey
-
-        let accepted: Bool
-        switch target {
-        case "openai": accepted = await SummaryKeyProbe.works(provider: .openAI, key: key)
-        case "elevenlabs": accepted = await Credentials.elevenLabsKeyWorks(key)
-        default: accepted = await Credentials.assemblyAIKeyWorks(key)
-        }
-        guard accepted else {
-            cloudKeyStatus.stringValue = Credentials.hasTranscriptionKey(for: target)
-                ? localised(
-                    "that key was refused — the saved one is untouched",
-                    "этот ключ не приняли — сохранённый не тронут")
-                : localised("that key was refused", "этот ключ не приняли")
+        let slot = Credentials.transcriptionSlot(for: target, in: Config.raw())
+        guard slot.isAmanus else {
+            cloudKeyStatus.stringValue = Credentials.notOursToWrite(slot)
             return
         }
-        let path: URL
+        cloudKeyStatus.stringValue = Self.checkingKey
+
+        let service: Credentials.Check.Service
         switch target {
-        case "openai": path = Config.openAIKeyPath
-        case "elevenlabs": path = Config.elevenLabsKeyPath
-        default: path = Config.assemblyAIKeyPath
+        // Transcription only ever talks to OpenAI itself, whatever endpoint
+        // the summaries are pointed at.
+        case "openai": service = .openAI(baseURL: "https://api.openai.com/v1")
+        case "elevenlabs": service = .elevenLabs
+        default: service = .assemblyAI
+        }
+        let verdict = await checkKey(Credentials.Check(service: service, key: key))
+        guard verdict == .works else {
+            cloudKeyStatus.stringValue = verdict.sentence(
+                keepingSaved: Credentials.hasTranscriptionKey(for: target))
+            return
         }
         do {
-            try Credentials.writeSecret(key, to: path)
+            try Credentials.writeSecret(key, to: slot.path)
         } catch {
             cloudKeyStatus.stringValue =
                 localised("couldn't save the key: ", "не удалось сохранить ключ: ") + "\(error)"
             return
         }
         cloudKey.stringValue = ""
-        cloudKeyStatus.stringValue = localised("key works", "ключ работает")
+        cloudKeyStatus.stringValue = verdict.sentence(keepingSaved: true)
         // A key that works is the answer to the question the switch asked, so
         // it turns the cloud on rather than making the person click twice.
         provider = target
@@ -1393,36 +1408,37 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         commitTranscription()
     }
 
-    private func saveSummaryKey() async {
+    /// The same order as the cloud key, into the slot the summary actually
+    /// reads — which for an OpenAI-compatible endpoint is not OpenAI's.
+    func saveSummaryKey() async {
         let key = summaryKey.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return }
         let backend = selectedKeyBackend
-        let provider: SummaryKeyProbe.Provider = backend == "anthropic-api" ? .anthropic : .openAI
-        let path = backend == "anthropic-api"
-            ? Config.anthropicKeyPath
-            : Config.openAIKeyPath
-        summaryKeyStatus.stringValue = Self.checkingKey
-        let openAIBaseURL: String
-        switch provider {
-        case .openAI: openAIBaseURL = Config.summary().openAIBaseURL
-        case .anthropic: openAIBaseURL = "https://api.openai.com/v1"
+        let config = Config.raw()
+        let slot = Credentials.summarySlot(for: backend, in: config)
+        guard slot.isAmanus else {
+            summaryKeyStatus.stringValue = Credentials.notOursToWrite(slot)
+            return
         }
-        guard await SummaryKeyProbe.works(
-            provider: provider, key: key, openAIBaseURL: openAIBaseURL) else {
-            summaryKeyStatus.stringValue = localised(
-                "that key was refused — nothing was overwritten",
-                "этот ключ не приняли — ничего не перезаписано")
+        summaryKeyStatus.stringValue = Self.checkingKey
+        let service: Credentials.Check.Service = backend == "anthropic-api"
+            ? .anthropic
+            : .openAI(baseURL: Config.summary(in: config).openAIBaseURL)
+        let verdict = await checkKey(Credentials.Check(service: service, key: key))
+        guard verdict == .works else {
+            summaryKeyStatus.stringValue = verdict.sentence(
+                keepingSaved: Config.secret(at: slot.path) != nil)
             return
         }
         do {
-            try Credentials.writeSecret(key, to: path)
+            try Credentials.writeSecret(key, to: slot.path)
         } catch {
             summaryKeyStatus.stringValue =
                 localised("couldn't save the key: ", "не удалось сохранить ключ: ") + "\(error)"
             return
         }
         summaryKey.stringValue = ""
-        summaryKeyStatus.stringValue = localised("key works", "ключ работает")
+        summaryKeyStatus.stringValue = verdict.sentence(keepingSaved: true)
         Config.update(path: ["summary", "backend"], value: backend)
         refresh()
     }
@@ -1528,7 +1544,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
             return summaryToolRuns[looked] == false
         case "api-key":
             return summary.backend == "openai-api"
-                ? Config.openAIKey() == nil
+                ? Credentials.summaryOpenAIKey() == nil
                 : Config.anthropicKey() == nil
         default:
             return false

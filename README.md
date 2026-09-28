@@ -275,7 +275,10 @@ only values that differ from the defaults. A compact example:
   `openai_model`, `openai_base_url`, `ollama_model`, `ollama_base_url`,
   `template`, `api_key_path`, and `openai_api_key_path`. The two Base URLs
   allow OpenAI-compatible servers and a non-default Ollama host; only a
-  loopback Ollama URL keeps the transcript on this Mac. `template` contains
+  loopback Ollama URL keeps the transcript on this Mac. A key pasted in Setup
+  for an OpenAI-compatible server is kept in
+  `~/.config/amanu/keys/openai-compatible`, apart from the OpenAI key that
+  transcription uses. `template` contains
   the complete summary instructions and starts with Amanu's built-in default.
 - `mic_voice_processing` enables Apple's capture-time voice processing;
   `offline_echo_cancellation` (on by default) instead cleans a copy of the mic

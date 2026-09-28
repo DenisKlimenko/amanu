@@ -142,7 +142,7 @@ enum DoctorReport {
         }
         if hasSummaryBackend(
             anthropicKey: Config.anthropicKey(),
-            openAIKey: Config.openAIKey(),
+            openAIKey: Credentials.summaryOpenAIKey(),
             claudeRuns: Tooling.probe("claude")?.runs == true,
             codexRuns: Tooling.probe("codex")?.runs == true
         ) {

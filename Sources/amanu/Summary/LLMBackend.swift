@@ -47,7 +47,9 @@ struct LLMBackend: Sendable {
         let claude = cliPath("claude")
         let codex = cliPath("codex")
         let anthropicKey = Config.anthropicKey()
-        let openAIKey = Config.openAIKey()
+        // Not simply the OpenAI key: an OpenAI-compatible endpoint has a key
+        // of its own — see `Credentials.summaryOpenAIKey`.
+        let openAIKey = Credentials.summaryOpenAIKey()
 
         switch preference {
         case "claude-cli":
