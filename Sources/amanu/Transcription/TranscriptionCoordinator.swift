@@ -713,10 +713,8 @@ actor TranscriptionCoordinator {
         }
     }
 
-    private static func localEngine(named name: String) -> TranscriptionEngine {
-        if name == "whisper" {
-            return WhisperEngine(language: Config.transcriptionLanguage())
-        }
+    static func localEngine(named name: String) -> TranscriptionEngine {
+        if name == "whisper" { return WhisperEngine() }
         if name == "gigaam" { return GigaAMEngine() }
         return ParakeetEngine()
     }

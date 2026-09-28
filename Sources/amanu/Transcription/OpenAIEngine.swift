@@ -188,22 +188,11 @@ actor OpenAITranscriptionEngine: TranscriptionEngine {
     }
 
     /// The `language` field for a request, or nil to let the model detect.
-    ///
-    /// `language` is a pin: it tells the model what it is listening to rather
-    /// than what it might be, and there is nothing beside it — no
-    /// `expected_languages`, no candidate list — to express an expectation
-    /// instead. So it is only sent when the expectation is a single language
-    /// and there is nothing for the pin to be wrong about, which today means
-    /// somebody who chose English.
-    ///
-    /// "Mostly Russian" is not that. It means Russian *and* English, and a
-    /// pin on either is how the other comes back as fluent nonsense — the
-    /// same failure the local engine's script filter used to cause, and the
-    /// same reason it matters: `keep_audio` is off by default, so that
-    /// transcript is the whole of what survives the meeting. Detection over
-    /// two candidates is a far smaller risk than a confident wrong answer.
+    /// The API has nothing beside it — no `expected_languages`, no candidate
+    /// list — to express an expectation instead, so it follows the rule every
+    /// such engine follows: `MeetingLanguages.pin(for:)`.
     static func languageField(for expected: [String]) -> String? {
-        expected.count == 1 ? expected.first : nil
+        MeetingLanguages.pin(for: expected)
     }
 
     private static func writeMultipart(

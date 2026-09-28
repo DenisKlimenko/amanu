@@ -58,21 +58,24 @@ actor WhisperEngine: TranscriptionEngine {
 
     private let modelStore: WhisperModelStore
     private let runtime: any WhisperRuntime
-    private let language: String?
+    /// The language whisper.cpp is told to hear, or nil to let it detect.
+    /// Only ever a language that cannot be the wrong one — see
+    /// `MeetingLanguages.pin(for:)`.
+    nonisolated let language: String?
     private let maximumSamples: Int
     private let progress: @Sendable (Progress) -> Void
 
     init(
         modelStore: WhisperModelStore = .init(),
         runtime: any WhisperRuntime = WhisperCPPRuntime(),
-        language: String? = nil,
+        expectedLanguages: [String] = MeetingLanguages.expected(
+            primary: Config.transcriptionLanguage()),
         chunkDuration: TimeInterval = 10 * 60,
         progress: @escaping @Sendable (Progress) -> Void = { _ in }
     ) {
         self.modelStore = modelStore
         self.runtime = runtime
-        let trimmed = language?.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.language = trimmed?.isEmpty == false ? trimmed : nil
+        language = MeetingLanguages.pin(for: expectedLanguages)
         maximumSamples = Int((chunkDuration * 16_000).rounded())
         self.progress = progress
         model = modelStore.manifest.id

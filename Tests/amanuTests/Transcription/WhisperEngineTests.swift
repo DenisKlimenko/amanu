@@ -19,7 +19,7 @@ struct WhisperEngineTests {
         #expect(abs(settled.reduce(0, +) / Float(settled.count) - 0.25) < 0.02)
     }
 
-    @Test("Chunk timestamps are relative to the original audio and language reaches whisper.cpp")
+    @Test("Chunk timestamps are relative to the original audio and a lone language reaches whisper.cpp")
     func engineOffsetsSegmentsAndPassesLanguage() async throws {
         let audio = try makeAudio(seconds: 1.25, sampleRate: 16_000, channels: 1)
         let store = try fixtureStore()
@@ -27,7 +27,7 @@ struct WhisperEngineTests {
         let engine = WhisperEngine(
             modelStore: store,
             runtime: runtime,
-            language: "ru",
+            expectedLanguages: ["en"],
             chunkDuration: 0.5)
 
         try await engine.prepare()
@@ -37,11 +37,32 @@ struct WhisperEngineTests {
         #expect(engine.model == "fixture")
         #expect(WhisperEngine().model == "large-v3-turbo-q5_0")
         #expect(engine.input.metadataName == "per-track")
-        #expect(await runtime.languages == ["ru", "ru", "ru"])
+        #expect(await runtime.languages == ["en", "en", "en"])
         #expect(await runtime.sampleCounts == [8_000, 8_000, 4_000])
         #expect(segments.map(\.start) == [0, 0.5, 1.0])
         #expect(segments.map(\.end) == [0.5, 1.0, 1.25])
         #expect(segments.allSatisfy { $0.speaker == nil })
+    }
+
+    /// "Mostly Russian" is Russian and English, and a pin on Russian is how
+    /// the English half of a meeting comes back as Cyrillic nonsense. The
+    /// cloud engines already left the language to detection here; Whisper
+    /// was handed the configured language as a hard pin.
+    @Test(
+        "A configured language with English beside it is not pinned",
+        .freshHome(config: #"{"transcription": {"language": "ru"}}"#))
+    func mostlyRussianIsDetectedNotPinned() async throws {
+        let audio = try makeAudio(seconds: 0.25, sampleRate: 16_000, channels: 1)
+        let runtime = RecordingWhisperRuntime()
+        let engine = WhisperEngine(modelStore: try fixtureStore(), runtime: runtime)
+
+        try await engine.prepare()
+        _ = try await engine.transcribe(audio)
+
+        #expect(await runtime.languages == [nil])
+        let queued = try #require(
+            TranscriptionCoordinator.localEngine(named: "whisper") as? WhisperEngine)
+        #expect(queued.language == nil)
     }
 
     @Test("A runtime failure stays retryable instead of being mislabeled as bad audio")
