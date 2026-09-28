@@ -85,13 +85,60 @@ struct MediaImportTests {
         let first = URL(fileURLWithPath: "/tmp/first.wav")
         let second = URL(fileURLWithPath: "/tmp/second.mov")
         let third = URL(fileURLWithPath: "/tmp/third.mp3")
-        var queue = MediaImportPendingQueue()
+        var queue = ImportQueue()
 
-        queue.enqueue([first, second])
-        queue.enqueue([third])
+        let started = queue.add([first, second])
+        let startedAgain = queue.add([third])
+        let batch = queue.nextBatch()
+        let another = queue.nextBatch()
+        let restarted = queue.runEnded()
 
-        #expect(queue.takeAll() == [first, second, third])
-        #expect(queue.isEmpty)
+        #expect(started)
+        #expect(!startedAgain, "a second run was started beside the first")
+        #expect(batch == [first, second, third])
+        #expect(another == nil)
+        #expect(!restarted)
+    }
+
+    /// The race: a cancelled run takes a moment to wind down, files dropped
+    /// in that moment joined it, and it threw them away on its way out.
+    @Test("Files dropped while a cancelled import winds down are imported afterwards")
+    func filesDuringACancelAreKept() {
+        let cancelled = URL(fileURLWithPath: "/tmp/cancelled.wav")
+        let waiting = URL(fileURLWithPath: "/tmp/waiting.wav")
+        let late = URL(fileURLWithPath: "/tmp/late.wav")
+        var queue = ImportQueue()
+
+        _ = queue.add([cancelled])
+        let first = queue.nextBatch()
+        _ = queue.add([waiting])
+        queue.cancel()
+        let lateStarted = queue.add([late])
+        let afterCancel = queue.nextBatch()
+        let restarted = queue.runEnded()
+        let next = queue.nextBatch()
+        let restartedAgain = queue.runEnded()
+
+        #expect(first == [cancelled])
+        #expect(!lateStarted, "the run winding down is still the only run")
+        #expect(afterCancel == nil, "a cancelled run went on to the next batch")
+        #expect(restarted, "the files dropped during the cancel were thrown away")
+        #expect(next == [late], "what was waiting at the cancel is cancelled with it")
+        #expect(!restartedAgain)
+    }
+
+    @Test("A queue closed for quitting starts nothing again")
+    func closedQueueStartsNothing() {
+        var queue = ImportQueue()
+        _ = queue.add([URL(fileURLWithPath: "/tmp/a.wav")])
+        queue.close()
+        let started = queue.add([URL(fileURLWithPath: "/tmp/b.wav")])
+        let batch = queue.nextBatch()
+        let restarted = queue.runEnded()
+
+        #expect(!started)
+        #expect(batch == nil)
+        #expect(!restarted)
     }
 
     @Test("An exact duplicate reuses the existing imported session")

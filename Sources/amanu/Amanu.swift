@@ -304,7 +304,10 @@ final class AppController {
     private var recordingActivity: NSObjectProtocol?
     private var automaticFeaturesStarted = false
     private var mediaImportTask: Task<Void, Never>?
-    private var pendingImports = MediaImportPendingQueue()
+    private var imports = ImportQueue()
+    /// The request to stop the importer mid-file, kept so that a run started
+    /// after it can wait for it: arriving late, it would stop the new run.
+    private var importStop: Task<Void, Never>?
 
     init(root: URL) {
         self.root = root
@@ -500,14 +503,18 @@ final class AppController {
     /// publishes complete filesystem sessions; only then are they handed to
     /// the ordinary transcription queue, exactly like a recording just ended.
     func importFiles(_ files: [URL]) {
-        guard !files.isEmpty else { return }
-        pendingImports.enqueue(files)
-        guard mediaImportTask == nil else { return }
+        if imports.add(files) { startImportRun() }
+    }
+
+    /// One run of the importer: batch after batch until nothing is waiting
+    /// or somebody cancels, then one summary for the whole run.
+    private func startImportRun() {
+        let stop = importStop
         mediaImportTask = Task { [weak self, mediaImport, transcription] in
+            await stop?.value
             guard let self else { return }
             var combined = MediaImportCoordinator.Result()
-            while !pendingImports.isEmpty, !Task.isCancelled {
-                let batch = pendingImports.takeAll()
+            while let batch = imports.nextBatch() {
                 let result = await mediaImport.importFiles(batch) { [weak self] update in
                     Task { @MainActor [weak self] in self?.showImport(update) }
                 }
@@ -521,16 +528,22 @@ final class AppController {
                 if result.cancelled { break }
             }
             if Task.isCancelled { combined.cancelled = true }
-            pendingImports.removeAll()
             finishImport(combined)
             mediaImportTask = nil
+            // Files dropped while this run was stopping are a new request,
+            // not part of the one that was cancelled.
+            if imports.runEnded() { startImportRun() }
         }
     }
 
     func cancelImport() {
-        pendingImports.removeAll()
+        imports.cancel()
         mediaImportTask?.cancel()
-        Task { [mediaImport] in await mediaImport.cancel() }
+        let previous = importStop
+        importStop = Task { [mediaImport] in
+            await previous?.value
+            await mediaImport.cancel()
+        }
     }
 
     /// AppKit can defer quit, so use that time to wait for the import actor's
@@ -538,7 +551,7 @@ final class AppController {
     /// half-written `.import-*` folder behind.
     func prepareForTermination(completion: @escaping () -> Void) -> Bool {
         guard let running = mediaImportTask else { return false }
-        pendingImports.removeAll()
+        imports.close()
         running.cancel()
         Task { [mediaImport] in
             await mediaImport.cancel()
