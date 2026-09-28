@@ -151,54 +151,13 @@ struct RetranscriptionTests {
     /// which is exactly what the recordings window leaves behind when somebody
     /// asks for a re-transcription and then quits the app.
     private static func rawSession(seconds: Double = 2) throws -> URL {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("amanu-again-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try tone(dir.appendingPathComponent("mic.caf"), seconds: seconds, frequency: 220)
-        try tone(dir.appendingPathComponent("system.caf"), seconds: seconds, frequency: 660)
-        try JSONSerialization.data(withJSONObject: [
-            "files": ["mic": "mic.caf", "system": "system.caf"],
-            "start_offset_ms": ["mic": 0, "system": 0],
-            "duration_seconds": Int(seconds),
-            // Naming and summarizing have already given up on this session, so
-            // finishing it reaches for no language model. This test is about
-            // the transcript and nothing else.
-            SessionState.Key.speakersStatus: "failed",
-            SessionState.Key.summaryStatus: "failed",
-        ]).write(to: dir.appendingPathComponent("meta.json"))
-
-        return dir
+        try TestAudio.rawSession(seconds: seconds, prefix: "amanu-again")
     }
 
     private static func settledSession(seconds: Double = 2) throws -> URL {
         let dir = try rawSession(seconds: seconds)
         TrackCompressor.compress(sessionDir: dir)
         return dir
-    }
-
-    private static func tone(_ url: URL, seconds: Double, frequency: Double) throws {
-        let rate = 48000.0
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32, sampleRate: rate,
-            channels: 1, interleaved: false)!
-        let file = try AVAudioFile(
-            forWriting: url,
-            settings: AudioFormats.pcmSettings(sampleRate: rate, channels: 1),
-            commonFormat: format.commonFormat,
-            interleaved: format.isInterleaved)
-        var written = 0
-        let total = Int(seconds * rate)
-        while written < total {
-            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4800)!
-            let count = min(4800, total - written)
-            buffer.frameLength = AVAudioFrameCount(count)
-            let samples = buffer.floatChannelData![0]
-            for i in 0..<count {
-                samples[i] = 0.4 * Float(sin(2 * .pi * frequency * Double(written + i) / rate))
-            }
-            try file.write(from: buffer)
-            written += count
-        }
     }
 
     private static let noPostProcessing = PostProcessor.Policy(names: false, summary: false)

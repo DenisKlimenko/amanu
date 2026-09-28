@@ -11,35 +11,48 @@ enum TestAudio {
         to url: URL, seconds: Double, frequency: Double,
         amplitude: Float = 0.4, sampleRate: Double = 48_000
     ) throws {
-        try write(to: url, seconds: seconds, sampleRate: sampleRate) { index in
-            amplitude * Float(sin(2 * .pi * frequency * Double(index) / sampleRate))
+        try write(to: url, seconds: seconds, sampleRate: sampleRate) { _, frame in
+            amplitude * Float(sin(2 * .pi * frequency * Double(frame) / sampleRate))
         }
     }
 
-    /// Mono samples of any shape, `sample(i)` for the i-th frame.
+    /// Samples of any shape — `sample(channel, frame)` — written in chunks,
+    /// the way the recorders write. PCM in amanu's track format unless
+    /// `settings` says otherwise (an AAC track, say).
     static func write(
         to url: URL, seconds: Double, sampleRate: Double = 48_000,
-        sample: (Int) -> Float
+        channels: AVAudioChannelCount = 1, settings: [String: Any]? = nil,
+        sample: (_ channel: Int, _ frame: Int) -> Float
     ) throws {
         let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
-            channels: 1, interleaved: false)!
+            channels: channels, interleaved: false)!
         let file = try AVAudioFile(
             forWriting: url,
-            settings: AudioFormats.pcmSettings(sampleRate: sampleRate, channels: 1),
+            settings: settings ?? AudioFormats.pcmSettings(sampleRate: sampleRate, channels: channels),
             commonFormat: format.commonFormat,
             interleaved: format.isInterleaved)
         var written = 0
-        let total = Int(seconds * sampleRate)
+        let total = Int((seconds * sampleRate).rounded())
         while written < total {
             let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4800)!
             let count = min(4800, total - written)
             buffer.frameLength = AVAudioFrameCount(count)
-            let samples = buffer.floatChannelData![0]
-            for i in 0..<count { samples[i] = sample(written + i) }
+            for channel in 0..<Int(channels) {
+                let samples = buffer.floatChannelData![channel]
+                for i in 0..<count { samples[i] = sample(channel, written + i) }
+            }
             try file.write(from: buffer)
             written += count
         }
+    }
+
+    /// Exactly these samples, one array per channel, all the same length.
+    static func write(to url: URL, sampleRate: Double, samples: [[Float]]) throws {
+        try write(
+            to: url, seconds: Double(samples[0].count) / sampleRate, sampleRate: sampleRate,
+            channels: AVAudioChannelCount(samples.count)
+        ) { channel, frame in samples[channel][frame] }
     }
 
     /// A finished recording with no transcript: two tone tracks and the

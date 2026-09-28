@@ -106,21 +106,28 @@ struct SetupTests {
         ))
     }
 
-    @Test("Far-end silence is warning-worthy for both system-audio scopes")
-    func farEndSilenceCoversGlobalCapture() {
+    /// The warning is for a conversation with one side missing: you have
+    /// spoken lately and the far end has said nothing for five minutes. The
+    /// scope is passed but decides nothing — both kinds of tap can lose their
+    /// permission silently — so it is not what this varies; the timings are.
+    @Test("Far-end silence warns only when you are talking and the far end has not for five minutes")
+    func farEndSilenceWarning() {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let started = now.addingTimeInterval(-601)
-        let spoke = now.addingTimeInterval(-20)
-
-        for scope in [SystemAudioRecorder.Scope.apps(["us.zoom.xos"]), .everything] {
-            #expect(RecordingSession.shouldWarnAboutFarEndSilence(
-                scope: scope,
-                recordingStartedAt: started,
-                micLastSoundAt: spoke,
-                systemLastSoundAt: nil,
-                now: now
-            ))
+        func warns(started: TimeInterval, spoke: TimeInterval?, heard: TimeInterval?) -> Bool {
+            RecordingSession.shouldWarnAboutFarEndSilence(
+                scope: .everything,
+                recordingStartedAt: now.addingTimeInterval(-started),
+                micLastSoundAt: spoke.map { now.addingTimeInterval(-$0) },
+                systemLastSoundAt: heard.map { now.addingTimeInterval(-$0) },
+                now: now)
         }
+
+        #expect(warns(started: 601, spoke: 20, heard: nil))
+        #expect(warns(started: 3600, spoke: 20, heard: 301))
+        #expect(!warns(started: 299, spoke: 20, heard: nil), "too early to call it silence")
+        #expect(!warns(started: 3600, spoke: 20, heard: 60), "the far end spoke a minute ago")
+        #expect(!warns(started: 3600, spoke: 180, heard: nil), "nobody is talking at all")
+        #expect(!warns(started: 3600, spoke: nil, heard: nil))
     }
 
     @Test("First-run setup bypasses a denied microphone, not a broken recordings folder")

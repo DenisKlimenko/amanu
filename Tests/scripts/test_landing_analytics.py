@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -8,7 +10,21 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "landing" / "script.js"
 
 
+# The page's script runs in Node here. A machine without it cannot run the
+# test, which is a skip and says so rather than a FileNotFoundError from deep
+# inside subprocess. CI, which sets CI and installs Node, may not skip it: a
+# check that quietly stopped running there would look exactly like one that
+# passed.
+NODE = shutil.which("node")
+
+
 class LandingAnalyticsTests(unittest.TestCase):
+    def setUp(self):
+        if NODE is None:
+            if os.environ.get("CI"):
+                self.fail("Node.js is required on CI for the landing-page analytics test")
+            self.skipTest("Node.js is not installed; the landing-page script cannot be run")
+
     def test_page_view_and_download_click_use_the_first_party_pixel(self):
         harness = r"""
 const fs = require('fs');
@@ -41,7 +57,7 @@ links[0].handler();
 console.log(JSON.stringify(sent));
 """
         result = subprocess.run(
-            ["node", "-e", harness, str(SCRIPT)],
+            [NODE, "-e", harness, str(SCRIPT)],
             check=False,
             text=True,
             capture_output=True,

@@ -104,11 +104,15 @@ struct OpenAIEngineTests {
             for: MeetingLanguages.expected(primary: "en")) == "en")
     }
 
-    @Test("Cached responses are named per piece only when there is more than one")
+    /// A response is only reused for the audio it came from: every piece of a
+    /// sliced meeting has its own, and none of them is the whole meeting's —
+    /// a first piece answered from the whole meeting's cache would carry an
+    /// hour of text for three minutes of audio.
+    @Test("Every piece of a sliced meeting has its own cached response")
     func cacheNames() {
-        #expect(OpenAITranscriptionEngine.cacheName(0, of: 1) == "transcript.openai.json")
-        #expect(OpenAITranscriptionEngine.cacheName(0, of: 3) == "transcript.openai.1.json")
-        #expect(OpenAITranscriptionEngine.cacheName(2, of: 3) == "transcript.openai.3.json")
+        let pieces = (0..<3).map { OpenAITranscriptionEngine.cacheName($0, of: 3) }
+        #expect(Set(pieces).count == 3)
+        #expect(!pieces.contains(OpenAITranscriptionEngine.cacheName(0, of: 1)))
     }
 
     /// 25 MB is the API's ceiling; the pieces have to come in under it with

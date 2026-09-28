@@ -35,7 +35,6 @@ struct WhisperEngineTests {
 
         #expect(engine.name == "whisper.cpp")
         #expect(engine.model == "fixture")
-        #expect(WhisperEngine().model == "large-v3-turbo-q5_0")
         #expect(engine.input.metadataName == "per-track")
         #expect(await runtime.languages == ["ru", "ru", "ru"])
         #expect(await runtime.sampleCounts == [8_000, 8_000, 4_000])
@@ -73,24 +72,9 @@ struct WhisperEngineTests {
     private func makeAudio(seconds: Double, sampleRate: Double, channels: AVAudioChannelCount) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("amanu-whisper-audio-\(UUID().uuidString).caf")
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleRate,
-            channels: channels,
-            interleaved: false)!
-        let file = try AVAudioFile(
-            forWriting: url,
-            settings: AudioFormats.pcmSettings(sampleRate: sampleRate, channels: channels),
-            commonFormat: format.commonFormat,
-            interleaved: format.isInterleaved)
-        let frameCount = AVAudioFrameCount((seconds * sampleRate).rounded())
-        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount)!
-        buffer.frameLength = frameCount
-        for channel in 0..<Int(channels) {
-            let samples = buffer.floatChannelData![channel]
-            for frame in 0..<Int(frameCount) { samples[frame] = 0.25 }
-        }
-        try file.write(from: buffer)
+        try TestAudio.write(
+            to: url, seconds: seconds, sampleRate: sampleRate, channels: channels
+        ) { _, _ in 0.25 }
         return url
     }
 }

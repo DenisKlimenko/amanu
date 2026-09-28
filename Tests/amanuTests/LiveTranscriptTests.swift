@@ -469,11 +469,14 @@ struct LiveTranscriptTests {
         ) == .init(showsTranscript: false, showsRevealLink: false))
     }
 
-    @Test("The downloaded model runs both shared live streams end to end")
+    /// Opt-in, because it needs the downloaded model and a recording of
+    /// speech. Skipped rather than passed when it is not asked for: a guard
+    /// that returned early reported this as a pass on every run that never
+    /// touched the model.
+    @Test(
+        "The downloaded model runs both shared live streams end to end",
+        .enabled(if: ProcessInfo.processInfo.environment["AMANU_RUN_LIVE_MODEL_TEST"] == "1"))
     func downloadedModelDualStreamIntegration() async throws {
-        guard ProcessInfo.processInfo.environment["AMANU_RUN_LIVE_MODEL_TEST"] == "1" else {
-            return
-        }
         let audioPath = try #require(
             ProcessInfo.processInfo.environment["AMANU_LIVE_TEST_AUDIO"])
         let store = LiveTranscriptionModelStore()
