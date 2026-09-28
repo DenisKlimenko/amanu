@@ -79,14 +79,33 @@ actor TranscriptionCoordinator {
             return
         }
         requeueHeldBack()
-        if !queue.contains(sessionDir) { queue.append(sessionDir) }
+        add(sessionDir)
         drainIfIdle()
     }
 
     private func requeueHeldBack() {
         guard !draining else { return }
-        queue = heldBack.filter { !queue.contains($0) } + queue
+        let held = heldBack
         heldBack = []
+        queue = held.filter { !isQueued($0) } + queue
+    }
+
+    /// Queue a folder unless it is already queued under any spelling of its
+    /// path. The importer hands over a path with its symlinks resolved and a
+    /// rescan of the root does not, so under /var — which is /private/var —
+    /// one session was two entries, and was transcribed and paid for twice.
+    private func add(_ dir: URL) {
+        guard !isQueued(dir) else { return }
+        queue.append(dir)
+    }
+
+    private func isQueued(_ dir: URL) -> Bool {
+        let key = Self.identity(of: dir)
+        return queue.contains { Self.identity(of: $0) == key }
+    }
+
+    private static func identity(of dir: URL) -> String {
+        dir.standardizedFileURL.resolvingSymlinksInPath().path
     }
 
     /// With no transcript the audio is the only copy of the meeting. Archive
@@ -108,9 +127,7 @@ actor TranscriptionCoordinator {
         guard Config.unreadableReason == nil, Config.transcriptionEnabled() else { return }
         requeueHeldBack()
         let pending = Self.pendingSessions(in: root)
-        for dir in pending where !queue.contains(dir) {
-            queue.append(dir)
-        }
+        for dir in pending { add(dir) }
         if !pending.isEmpty {
             FileHandle.standardError.write(Data(
                 "resuming \(pending.count) untranscribed session(s)\n".utf8
@@ -166,6 +183,9 @@ actor TranscriptionCoordinator {
                 // simply left where it is: the filesystem is the queue, and the
                 // next `resumePending` offers it again once the owner is done.
                 log(dir, "\(busy)")
+            } catch is AlreadyTranscribed {
+                // Somebody finished it while it waited here — nothing to do,
+                // and nothing to announce twice.
             } catch let held as Config.Unreadable {
                 // Not this session's failure either, and not only this one's:
                 // everything behind it would be held for the same reason. The
@@ -214,6 +234,8 @@ actor TranscriptionCoordinator {
             log(dir, "\(held)")
             await releaseEngine()
             throw held
+        } catch is AlreadyTranscribed {
+            // The transcript asked for exists: whoever wrote it did the work.
         } catch {
             log(dir, "transcription failed: \(error)")
             TranscriptionFailurePolicy.record(error, for: dir, engine: current)
@@ -234,6 +256,8 @@ actor TranscriptionCoordinator {
         let engine: TranscriptionEngine
         do {
             engine = try await transcribe(dir)
+        } catch let done as AlreadyTranscribed {
+            throw done
         } catch {
             // The network can go away between the reachability probe and the
             // upload. One retry on the local engine, so a dropped connection
@@ -281,6 +305,9 @@ actor TranscriptionCoordinator {
         await engines.release()
     }
 
+    /// The session had its transcript by the time its claim was taken.
+    private struct AlreadyTranscribed: Error {}
+
     private struct EmptyTranscript: TranscriptionFailure, CustomStringConvertible {
         var isPermanent: Bool { true }
         var description: String { "No speech was recognized; audio kept for a manual retry." }
@@ -300,6 +327,15 @@ actor TranscriptionCoordinator {
         // the folder back as surely as the success does.
         try SessionClaim.acquire(dir, stage: .transcribe)
         defer { SessionClaim.release(dir) }
+        // Asked again now that the folder is ours. A session can wait in the
+        // queue while somebody else — `amanu process`, another entry for the
+        // same folder — transcribes it, and the claim is what makes the
+        // answer to "is there a transcript" stay true until we are done.
+        if FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent("transcript.json").path) {
+            log(dir, "already transcribed — nothing to do")
+            throw AlreadyTranscribed()
+        }
 
         var meta = try SessionMeta.read(from: dir)
         let engine: TranscriptionEngine
