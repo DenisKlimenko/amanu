@@ -63,12 +63,15 @@ enum AudioLevel {
             return peak
         }
         if let data = buffer.int16ChannelData {
-            var peak: Int16 = 0
+            // Measured as a magnitude, never through `abs`: the absolute value
+            // of `Int16.min` does not fit in an `Int16`, and the trap would
+            // land in the capture callback on the first clipped sample.
+            var peak: UInt16 = 0
             for channel in 0..<channels {
                 let samples = data[channel]
-                for i in 0..<frames { peak = max(peak, abs(samples[i])) }
+                for i in 0..<frames { peak = max(peak, samples[i].magnitude) }
             }
-            return Float(peak) / Float(Int16.max)
+            return min(1, Float(peak) / Float(Int16.max))
         }
         return nil
     }
