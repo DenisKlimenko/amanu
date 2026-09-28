@@ -77,13 +77,16 @@ enum SpeakerNamer {
         // follows the summary unless it was given a backend of its own, and
         // with summaries off it asks nobody.
         guard let route = MeetingEgress.route(for: .speakerNames) else {
-            log("naming — no model may read this meeting (summaries are off and "
-                + "speaker_names.backend is unset), so only your own name is applied")
+            log("naming — no model may read this meeting (summaries are off, or "
+                + "speaker_names.backend is none), so only your own name is applied")
             return finish(resolved, transcript: transcript, dir: dir, log: log)
         }
         let backends = LLMBackend.available(
             preference: route.preference, anthropicModel: route.anthropicModel
         )
+        if backends.isEmpty {
+            log("naming — \(route.preference) is not available on this Mac")
+        }
         // Deferred if any backend failed in a way that passes, for the same
         // reason as the summary: a bad answer from one reachable backend must
         // not write off the one that was merely offline.
