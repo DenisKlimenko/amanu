@@ -60,7 +60,7 @@ struct WhisperEngineTests {
 
         #expect(await runtime.languages == [nil])
         let queued = try #require(
-            TranscriptionCoordinator.localEngine(named: "whisper") as? WhisperEngine)
+            EngineResolver.localEngine(named: "whisper") as? WhisperEngine)
         #expect(queued.language == nil)
     }
 

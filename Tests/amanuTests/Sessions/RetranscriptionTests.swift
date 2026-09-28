@@ -510,7 +510,7 @@ struct RetranscriptionTests {
         RecordingsWindow.markForRetranscription(dir, engine: "whisper")
         #expect(SessionState.value(dir, SessionState.Key.transcriptionEngine) as? String
             == "whisper")
-        #expect(TranscriptionCoordinator.configuredEngine(for: dir) == "whisper")
+        #expect(EngineResolver.configuredEngine(for: dir) == "whisper")
     }
 
     @Test("A recording whose audio was discarded is refused in the window too")
