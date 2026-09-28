@@ -101,7 +101,7 @@ enum AnalyticsCatalogue {
             "engine": engines, "from_engine": engines, "to_engine": engines,
             "transcription_engine": engines,
             "backend": backends, "summary_backend": backends, "speaker_names_backend": backends,
-            "transcription_cloud_provider": ["assemblyai", "openai", "elevenlabs"],
+            "transcription_cloud_provider": ["assemblyai", "openai", "elevenlabs", "gemini"],
             "trigger": ["manual", "mic-activity", "calendar"],
         ]
         for (key, choices) in allowed where result[key] != nil {
@@ -142,6 +142,9 @@ enum AnalyticsCatalogue {
             return model == "universal" ? "universal" : "custom"
         case "elevenlabs":
             return provenance == "scribe_v2" ? "scribe_v2" : "custom"
+        case "gemini":
+            // One model under the two names its two ways in give it.
+            return provenance.hasPrefix("gemini-3.5-transcribe") ? "gemini-3.5-transcribe" : "custom"
         case "whisper":
             return provenance == WhisperModelStore.defaultManifest.id
                 ? "whisper-large-v3-turbo" : "custom"

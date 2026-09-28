@@ -139,6 +139,10 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     private var pendingProvider: String?
     /// The provider in force, read back from the config on every refresh.
     private var provider = "assemblyai"
+    /// Where gcloud is, which is half of Gemini's way in through Vertex.
+    /// Found by `detectTools` rather than by the redraw that needs it: the
+    /// search can start a login shell.
+    private var gcloud: String?
     private let localSwitch = NSSwitch()
     private let localEngineCards = ChoiceGroup()
     private var localDownloadButtons: [String: NSButton] = [:]
@@ -494,7 +498,16 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
             accessories: [link(
                 localised("Get a key", "Получить ключ"),
                 "https://elevenlabs.io/app/developers/api-keys")])
-        providerCards.adopt([assembly, openai, elevenlabs])
+        let gemini = ChoiceCard(
+            id: "gemini",
+            title: "Gemini",
+            detail: localised(
+                "$0.31 an hour on a paid key. Or Vertex AI through gcloud.",
+                "$0,31 за час с платным ключом. Или Vertex AI через gcloud."),
+            accessories: [link(
+                localised("Get a key", "Получить ключ"),
+                "https://aistudio.google.com/apikey")])
+        providerCards.adopt([assembly, openai, elevenlabs, gemini])
         providerCards.onChange = { [weak self] id in self?.providerPicked(id) }
 
         cloudKey.placeholderString = localised("paste key", "вставьте ключ")
@@ -915,7 +928,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// it was, because a switch that says "on" while every transcript fails
     /// with HTTP 401 is a lie the person only finds out about after a meeting.
     @objc private func cloudToggled() {
-        if cloudSwitch.state == .on, !Credentials.hasTranscriptionKey(for: provider) {
+        if cloudSwitch.state == .on, !hasKey(for: provider) {
             pendingProvider = provider
             cloudSwitch.state = .off
             refresh()
@@ -930,7 +943,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
     /// key also switches the cloud on. A card without one only opens the key
     /// field: what is in force stays in force until the new key is accepted.
     private func providerPicked(_ id: String) {
-        guard Credentials.hasTranscriptionKey(for: id) else {
+        guard hasKey(for: id) else {
             pendingProvider = id
             refresh()
             focusKeyField()
@@ -995,6 +1008,25 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
             write(update.path, update.value)
         }
         refresh()
+    }
+
+    /// Whether a provider has a way in, asked with the gcloud `detectTools`
+    /// found rather than looked for in a redraw — see
+    /// `Credentials.hasTranscriptionKey`.
+    private func hasKey(for provider: String) -> Bool {
+        Credentials.hasTranscriptionKey(for: provider, gcloud: gcloud)
+    }
+
+    /// What a provider card says about signing in. Gemini without a key is
+    /// not waiting for one when Vertex can take it through gcloud, and saying
+    /// "key works" there would send somebody looking for a key they never
+    /// made.
+    private func signInStatus(for provider: String) -> String {
+        guard hasKey(for: provider) else { return localised("no key yet", "ключа ещё нет") }
+        guard provider == "gemini", Config.geminiRoute(gcloud: gcloud) == .vertex else {
+            return localised("key works", "ключ работает")
+        }
+        return localised("Vertex AI through gcloud", "Vertex AI через gcloud")
     }
 
     /// Whichever window is showing the form — the setup wizard or the
@@ -1502,12 +1534,13 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         // the summaries are pointed at.
         case "openai": service = .openAI(baseURL: "https://api.openai.com/v1")
         case "elevenlabs": service = .elevenLabs
+        case "gemini": service = .gemini
         default: service = .assemblyAI
         }
         let verdict = await checkKey(Credentials.Check(service: service, key: key))
         guard verdict == .works else {
             cloudKeyStatus.stringValue = verdict.sentence(
-                keepingSaved: Credentials.hasTranscriptionKey(for: target))
+                keepingSaved: hasKey(for: target))
             return
         }
         do {
@@ -1577,6 +1610,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         let codex = await Task.detached { Tooling.probe("codex") }.value
         let ollama = await Task.detached { Tooling.probe("ollama") }.value
         let models = await Tooling.ollamaModels()
+        gcloud = await Task.detached { Tooling.path(for: "gcloud") }.value
 
         for (id, tool) in [("claude-cli", claude), ("codex-cli", codex)] {
             summaryCards.card(id)?.report(Self.describe(tool), good: tool?.version != nil)
@@ -1789,7 +1823,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         let choice = transcriptionChoice
         provider = choice.provider
         pendingProvider = TranscriptionChoice.stillPending(pendingProvider) {
-            Credentials.hasTranscriptionKey(for: $0)
+            self.hasKey(for: $0)
         }
 
         cloudSwitch.state = choice.cloud ? .on : .off
@@ -1798,12 +1832,8 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         providerCards.select(pendingProvider ?? provider)
 
         for card in providerCards.cards {
-            let known = Credentials.hasTranscriptionKey(for: card.id)
-            card.report(
-                known
-                    ? localised("key works", "ключ работает")
-                    : localised("no key yet", "ключа ещё нет"),
-                good: known)
+            let known = hasKey(for: card.id)
+            card.report(signInStatus(for: card.id), good: known)
             card.showLink(!known)
         }
         cloudKey.placeholderString = (pendingProvider ?? provider) == "openai"
@@ -1821,7 +1851,7 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         cloudStatus.stringValue = TranscriptionChoice.rowNeedsKey(
             pending: pendingProvider, cloudOn: choice.cloud)
             ? localised("needs a key", "нужен ключ") : ""
-        keyLine.isHidden = pendingProvider == nil && Credentials.hasTranscriptionKey(for: provider)
+        keyLine.isHidden = pendingProvider == nil && hasKey(for: provider)
 
         localSwitch.isEnabled = Platform.supportsLocalModels
         localSwitch.state = choice.local ? .on : .off

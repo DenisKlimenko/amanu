@@ -38,6 +38,15 @@ struct CredentialsTests {
         #expect(await Credentials.elevenLabs("key", session: elevenLabsWorks) == .works)
     }
 
+    /// Google answers a key it does not know with 400, not 401.
+    @Test("A key the Gemini API does not know is refused, not an unexpected answer")
+    func geminiRefusesWithABadRequest() async {
+        let unknown = StubbedService.session { _ in .success(400) }
+        #expect(await Credentials.gemini("key", session: unknown) == .refused)
+        let known = StubbedService.session { _ in .success(200) }
+        #expect(await Credentials.gemini("key", session: known) == .works)
+    }
+
     @Test("Only a refusal says refused")
     func verdictSentences() {
         let verdicts: [Credentials.Verdict] = [.works, .unreachable, .unexpected(status: 503)]

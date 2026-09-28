@@ -130,7 +130,7 @@ The section is four rows: Start at login, Microphone, System audio, Calendar.
 
 ## Transcription
 
-The section is two switches and a pair of provider cards, not a row of
+The section is two switches and four provider cards, not a row of
 mutually exclusive cards. Having both switches on *is* the fallback — the
 cloud when it answers, this Mac when it doesn't — so there is no third card
 for it any more.
@@ -141,9 +141,9 @@ for it any more.
 - Turn both off. Confirm `config.json` gains `transcription.enabled: false`
   and that `engine` is left alone, so turning one back on remembers the
   provider.
-- Confirm the **AssemblyAI** and **OpenAI** cards are on screen even while
-  **In the cloud** is off, each showing its price per hour, and that the card
-  for a key already on disk says **key works**.
+- Confirm the **AssemblyAI**, **OpenAI**, **ElevenLabs** and **Gemini** cards are
+  on screen even while **In the cloud** is off, each showing its price per hour,
+  and that the card for a key already on disk says **key works**.
 - With no key for the chosen provider, switch **In the cloud** on. Confirm the
   switch stays off, the key field takes focus, and the status says a key is
   needed. A switch that reads "on" while every transcript fails with HTTP 401
@@ -154,6 +154,15 @@ for it any more.
   `~/.config/assemblyai/token`, though it still reads it.
 - Paste a *wrong* key over a working one and confirm the saved key is
   untouched and the status says so.
+- Gemini has a second way in. With no Gemini key, but gcloud installed,
+  `gcloud auth application-default login` done and `transcription.gemini.project`
+  set in `config.json`, confirm the **Gemini** card says **Vertex AI through
+  gcloud** in green, and that picking it switches the cloud on without asking
+  for a key. With gcloud present and that login not done, the card says
+  **no key yet**: gcloud on the disk signs nothing in by itself. So it does
+  with the login done and no project in `config.json` — even when
+  `gcloud config get-value project` answers with one, because that project
+  was set for other work and amanu does not bill meetings to it.
 - Submit a key with **Return** rather than by clicking away, and confirm the
   window stays open long enough to say what happened — `checking…`, then
   `key works` or `that key was refused`. Return used to reach **Done**, which
@@ -166,8 +175,10 @@ for it any more.
   key — that clicking its card leaves the working provider in force and only
   opens the key field.
 - Confirm **Get a key** appears on a card without a key and points at
-  `https://www.assemblyai.com/dashboard/signup` and
-  `https://platform.openai.com/api-keys` respectively.
+  `https://www.assemblyai.com/dashboard/signup`,
+  `https://platform.openai.com/api-keys`,
+  `https://elevenlabs.io/app/developers/api-keys` and
+  `https://aistudio.google.com/apikey` respectively.
 - Switch **On this Mac** on with the model absent. Confirm the download starts
   from the switch alone — there is no Download button — and that the progress
   bar and the megabyte count both advance without freezing the window, and

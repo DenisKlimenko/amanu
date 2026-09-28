@@ -275,7 +275,13 @@ only values that differ from the defaults. A compact example:
   `transcription.cloud` or `transcription.engine` to use Scribe v2. It sends
   the microphone and system channels separately, with speaker diarization on
   each; a mono import uses the same diarization. Set `ELEVENLABS_API_KEY` or
-  save a key in `~/.config/amanu/keys/elevenlabs`. `live_transcription.enabled`
+  save a key in `~/.config/amanu/keys/elevenlabs`. Choose `gemini` to use
+  Gemini 3.5 Transcribe: with a key in `~/.config/amanu/keys/gemini` the audio
+  goes to the Gemini API, and without one to Vertex AI through
+  `gcloud auth application-default login`, billed to
+  `transcription.gemini.project` and never to the project gcloud happens to be
+  set to. `transcription.gemini.location` (`global` by default) and
+  `transcription.gemini.model` tune the way in. `live_transcription.enabled`
   controls the on-device preview.
 - `auto_record.*` covers `enabled`, `mic_activity`, `calendar`,
   `start_delay_seconds`, `stop_delay_seconds`, `min_duration_seconds`,

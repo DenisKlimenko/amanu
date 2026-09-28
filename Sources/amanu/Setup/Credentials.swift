@@ -7,11 +7,21 @@ import Foundation
 /// asks and draws; what it asks is answered here, where it can be checked
 /// without building one.
 enum Credentials {
-    /// Whether the cloud transcription provider has a key to work with.
-    static func hasTranscriptionKey(for provider: String) -> Bool {
+    /// Whether the cloud transcription provider has a key to work with — or,
+    /// for Gemini, any way in. The setup window, the doctor and auto's choice
+    /// of engine all ask here, so the three cannot disagree.
+    ///
+    /// `gcloud` is where the Google Cloud CLI is, and only Gemini asks for
+    /// it. The window hands in what it found earlier rather than looking in
+    /// the middle of a redraw, because looking can start a login shell.
+    static func hasTranscriptionKey(
+        for provider: String,
+        gcloud: @autoclosure () -> String? = Tooling.path(for: "gcloud")
+    ) -> Bool {
         switch provider {
         case "openai": return Config.openAIKey() != nil
         case "elevenlabs": return Config.elevenLabsKey() != nil
+        case "gemini": return Config.geminiRoute(gcloud: gcloud()) != nil
         default: return Config.assemblyAIKey() != nil
         }
     }
@@ -69,6 +79,9 @@ enum Credentials {
                 return Slot(path: named, isNamedInConfig: true)
             }
             return Slot(path: Config.elevenLabsKeyPath, isNamedInConfig: false)
+        case "gemini":
+            // amanu's own file and nowhere else — see `Config.geminiKey`.
+            return Slot(path: Config.geminiKeyPath, isNamedInConfig: false)
         default:
             if let named = pathSetting(.assemblyAIKeyPath, in: config) {
                 return Slot(path: named, isNamedInConfig: true)
@@ -242,6 +255,7 @@ enum Credentials {
         enum Service: Equatable, Sendable {
             case assemblyAI
             case elevenLabs
+            case gemini
             case anthropic
             case openAI(baseURL: String)
         }
@@ -253,6 +267,7 @@ enum Credentials {
             switch service {
             case .assemblyAI: return await Credentials.assemblyAI(key, session: session)
             case .elevenLabs: return await Credentials.elevenLabs(key, session: session)
+            case .gemini: return await Credentials.gemini(key, session: session)
             case .anthropic:
                 return await SummaryKeyProbe.check(provider: .anthropic, key: key, session: session)
             case .openAI(let baseURL):
@@ -287,6 +302,15 @@ enum Credentials {
             + "Content-Disposition: form-data; name=\"model_id\"\r\n\r\n"
             + "scribe_v2\r\n--\(boundary)--\r\n").utf8)
         return await ask(request, accepting: [422], session: session)
+    }
+
+    /// Ask the Gemini API about the model the key would transcribe with — see
+    /// `GeminiTranscriptionEngine.keyProbe`. A key it does not know is a 400
+    /// there rather than a 401, so a 400 is the refusal it reads as.
+    static func gemini(_ key: String, session: URLSession = .shared) async -> Verdict {
+        let verdict = await ask(
+            GeminiTranscriptionEngine.keyProbe(key, model: Config.gemini().model), session: session)
+        return verdict == .unexpected(status: 400) ? .refused : verdict
     }
 }
 

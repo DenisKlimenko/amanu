@@ -123,12 +123,12 @@ enum SettingsSchema {
                       localised(
                           "A cloud engine is the only one on an Intel Mac; parakeet needs Apple Silicon.",
                           "На маке с Intel есть только облачный движок: parakeet нужен Apple Silicon."),
-                      .choice(["auto", "assemblyai", "openai", "elevenlabs"]), default: "auto", askedInSetup: true),
+                      .choice(["auto", "assemblyai", "openai", "elevenlabs", "gemini"]), default: "auto", askedInSetup: true),
                 Entry(["transcription", "cloud"], localised("Cloud engine", "Облачный движок"),
                       localised(
                           "Which service auto uploads to when a key is available.",
                           "В какой сервис auto отправляет запись, когда есть ключ."),
-                      .choice(["assemblyai", "openai", "elevenlabs"]), default: "assemblyai", askedInSetup: true),
+                      .choice(["assemblyai", "openai", "elevenlabs", "gemini"]), default: "assemblyai", askedInSetup: true),
                 Entry(["transcription", "local_engine"],
                       localised("Local engine", "Локальный движок"),
                       localised(
@@ -158,12 +158,12 @@ enum SettingsSchema {
                   localised(
                       "auto: the cloud engine when there's a key and the network answers, parakeet otherwise.",
                       "auto — облачный движок, когда есть ключ и отвечает сеть, иначе parakeet."),
-                      .choice(["auto", "assemblyai", "openai", "elevenlabs", "parakeet", "whisper", "gigaam"]), default: "auto", askedInSetup: true),
+                      .choice(["auto", "assemblyai", "openai", "elevenlabs", "gemini", "parakeet", "whisper", "gigaam"]), default: "auto", askedInSetup: true),
             Entry(["transcription", "cloud"], localised("Cloud engine", "Облачный движок"),
                   localised(
                       "Which service auto uploads to when a key is available.",
                       "В какой сервис auto отправляет запись, когда есть ключ."),
-                  .choice(["assemblyai", "openai", "elevenlabs"]), default: "assemblyai", askedInSetup: true),
+                  .choice(["assemblyai", "openai", "elevenlabs", "gemini"]), default: "assemblyai", askedInSetup: true),
             Entry(["transcription", "local_engine"],
                   localised("Local engine", "Локальный движок"),
                   localised(
@@ -340,6 +340,25 @@ enum SettingsSchema {
                       "Where the ElevenLabs key is read from. ELEVENLABS_API_KEY wins over it.",
                       "Откуда читается ключ ElevenLabs. ELEVENLABS_API_KEY важнее."),
                   .text, describedAs: "~/.config/amanu/keys/elevenlabs"),
+            Entry(["transcription", "gemini", "project"],
+                  localised("Vertex AI project", "Проект Vertex AI"),
+                  localised(
+                      "Without a Gemini key, the Google Cloud project Vertex AI bills. Never the one gcloud is set to.",
+                      "Без ключа Gemini — проект Google Cloud, который оплачивает Vertex AI. "
+                          + "Никогда не тот, что выбран в gcloud."),
+                  .text, describedAs: localised("no Vertex AI", "без Vertex AI")),
+            Entry(["transcription", "gemini", "location"],
+                  localised("Vertex AI location", "Регион Vertex AI"),
+                  localised(
+                      "Where Vertex AI transcribes; global has no region in its host name.",
+                      "Где расшифровывает Vertex AI; у global в адресе нет региона."),
+                  .text, default: "global"),
+            Entry(["transcription", "gemini", "model"],
+                  localised("Gemini model", "Модель Gemini"),
+                  localised(
+                      "Empty picks each way in's own name for the model: Vertex AI has only the -preview.",
+                      "Пусто — модель под своим именем для каждого пути: у Vertex AI есть только -preview."),
+                  .text, describedAs: "gemini-3.5-transcribe"),
         ]),
 
         Section(title: localised("Summaries", "Саммари"), entries: [
