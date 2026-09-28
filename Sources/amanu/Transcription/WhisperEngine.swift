@@ -48,7 +48,11 @@ actor WhisperEngine: TranscriptionEngine {
         }
     }
 
-    nonisolated let name = "whisper.cpp"
+    /// The name the config file, the recordings window and analytics all
+    /// know this engine by. It used to be "whisper.cpp", the runtime's name,
+    /// which matched none of them: analytics reported every local Whisper
+    /// transcript as a custom engine.
+    nonisolated let name = "whisper"
     nonisolated let model: String
     nonisolated let input: TranscriptionInput = .perTrack
 

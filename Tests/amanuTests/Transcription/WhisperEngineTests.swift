@@ -33,7 +33,7 @@ struct WhisperEngineTests {
         try await engine.prepare()
         let segments = try await engine.transcribe(audio)
 
-        #expect(engine.name == "whisper.cpp")
+        #expect(engine.name == "whisper")
         #expect(engine.model == "fixture")
         #expect(WhisperEngine().model == "large-v3-turbo-q5_0")
         #expect(engine.input.metadataName == "per-track")
