@@ -355,8 +355,9 @@ enum SettingsSchema {
             Entry(["summary", "model"],
                   localised("Anthropic model", "Модель Anthropic"),
                   localised(
-                      "Used on the API path. The CLI uses whatever model Claude Code is set to.",
-                      "Для пути через API. CLI берёт ту модель, на которую настроен Claude Code."),
+                      "Used on the API path, and by the claude CLI once it is set here; left empty, the CLI uses whatever model Claude Code is set to.",
+                      "Для пути через API, а если задана здесь, то и для claude CLI; пусто — CLI берёт "
+                          + "ту модель, на которую настроен Claude Code."),
                   .text, default: "claude-opus-5"),
             Entry(["summary", "openai_model"],
                   localised("OpenAI model", "Модель OpenAI"),
@@ -367,8 +368,9 @@ enum SettingsSchema {
             Entry(["summary", "openai_base_url"],
                   localised("OpenAI-compatible Base URL", "Base URL OpenAI-compatible API"),
                   localised(
-                      "The API root, including /v1. Leave the default for OpenAI itself.",
-                      "Корень API вместе с /v1. Для самого OpenAI оставьте значение по умолчанию."),
+                      "The API root, including /v1. Leave the default for OpenAI itself. Anything not on this Mac must be https.",
+                      "Корень API вместе с /v1. Для самого OpenAI оставьте значение по умолчанию. "
+                          + "Всё, что не на этом маке, — только https."),
                   .text, default: "https://api.openai.com/v1"),
             Entry(["summary", "ollama_model"],
                   localised("Local model", "Местная модель"),
@@ -377,8 +379,9 @@ enum SettingsSchema {
             Entry(["summary", "ollama_base_url"],
                   localised("Ollama Base URL", "Base URL Ollama"),
                   localised(
-                      "Where Amanu reaches Ollama. A non-local address may send meeting content off this Mac.",
-                      "Где Amanu находит Ollama. При нелокальном адресе содержимое встречи может уйти с этого мака."),
+                      "Where Amanu reaches Ollama. Another machine sees the meeting, and must be reached over https — plain http is only accepted on this Mac.",
+                      "Где Amanu находит Ollama. Другая машина увидит содержимое встречи, и адрес у неё "
+                          + "должен быть https — простой http принимается только на этом маке."),
                   .text, default: "http://127.0.0.1:11434"),
             Entry(["summary", "language"],
                   localised("Summary language", "Язык саммари"),
@@ -434,10 +437,15 @@ enum SettingsSchema {
             Entry(["speaker_names", "backend"],
                   localised("Which model to ask", "У какой модели спрашивать"),
                   localised(
-                      "Same chain as summaries. auto walks it until one answers.",
-                      "Та же цепочка, что у саммари. auto идёт по ней, пока кто-нибудь не ответит."),
-                  .choice(["auto", "claude-cli", "anthropic-api", "codex-cli", "openai-api", "ollama"]),
-                  default: "auto"),
+                      "summary sends the transcript wherever summaries go, and nowhere when they are off — only your own name is filled in then. Anything else is a choice for naming alone; none asks no model.",
+                      "summary отправляет расшифровку туда же, куда и саммари, а если саммари выключены — "
+                          + "никуда, и подставляется только ваше имя. Любой другой вариант — выбор только "
+                          + "для имён; none — не спрашивать никакую модель."),
+                  .choice([
+                      "summary", "auto", "claude-cli", "anthropic-api", "codex-cli", "openai-api",
+                      "ollama", "none",
+                  ]),
+                  default: "summary"),
             Entry(["speaker_names", "model"],
                   localised("Anthropic model for naming", "Модель Anthropic для имён"),
                   localised(

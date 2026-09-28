@@ -22,14 +22,9 @@ import Foundation
 /// it comes from.
 enum SpeakerNamer {
     /// Room for the whole transcript in one call. Same size the summarizer
-    /// uses — comfortably inside every backend's context window.
-    private static let maxChars = 60_000
-    /// When the transcript doesn't fit, how much of the opening to keep. Names
-    /// cluster at the start, where people greet each other and introduce
-    /// themselves.
-    private static let openingChars = 24_000
-    /// And how much of the close, where they say goodbye by name.
-    private static let closingChars = 6_000
+    /// uses; a backend with less room says so in `promptLimit`, and the
+    /// transcript is trimmed to that instead.
+    static let maxChars = 60_000
     /// A quote shorter than this proves nothing — "да" appears everywhere.
     private static let minQuoteWords = 2
 
@@ -75,17 +70,28 @@ enum SpeakerNamer {
 
         guard !asking.isEmpty else {
             log("naming — every speaker already has a name")
-            let merged = existing?.merged(with: resolved) ?? resolved
-            return finish(merged, transcript: transcript, dir: dir, log: log)
+            return finish(resolved, transcript: transcript, dir: dir, log: log)
         }
 
-        // The naming model is configurable separately because this is an
-        // easier job than summarizing; unset, it inherits the summary's.
+        // Where the transcript may go is not this pass's decision: naming
+        // follows the summary unless it was given a backend of its own, and
+        // with summaries off it asks nobody.
+        guard let route = MeetingEgress.route(for: .speakerNames) else {
+            log("naming — no model may read this meeting (summaries are off, or "
+                + "speaker_names.backend is none), so only your own name is applied")
+            return finish(resolved, transcript: transcript, dir: dir, log: log)
+        }
         let backends = LLMBackend.available(
-            preference: settings.backend, anthropicModel: settings.model
+            preference: route.preference, anthropicModel: route.anthropicModel
         )
-        var allTransient = true
-        var lastBackend = settings.backend
+        if backends.isEmpty {
+            log("naming — \(route.preference) is not available on this Mac")
+        }
+        // Deferred if any backend failed in a way that passes, for the same
+        // reason as the summary: a bad answer from one reachable backend must
+        // not write off the one that was merely offline.
+        var anyTransient = false
+        var lastBackend = route.preference
         var lastModel: String?
         var lastReason = Analytics.Reason.unknown
 
@@ -99,7 +105,8 @@ enum SpeakerNamer {
                         labels: asking,
                         title: title,
                         attendees: attendees,
-                        app: app
+                        app: app,
+                        limit: min(maxChars, backend.promptLimit ?? maxChars)
                     )
                 )
                 let proposals = try parse(answer)
@@ -115,10 +122,9 @@ enum SpeakerNamer {
                     fresh.speakers[label] = SpeakerNames.Entry(name: nil, source: .model)
                 }
 
-                let merged = existing?.merged(with: fresh) ?? fresh
-                log("named \(merged.namedCount) of \(labels.count) speaker(s)")
-                let finished = finish(merged, transcript: transcript, dir: dir, log: log)
-                if finished != nil {
+                let finished = finish(fresh, transcript: transcript, dir: dir, log: log)
+                if let finished {
+                    log("named \(finished.namedCount) of \(labels.count) speaker(s)")
                     Analytics.track(.speakerNamesFinished, [
                         .backend: .text(backend.name),
                         .model: .text(AnalyticsCatalogue.summaryModel(
@@ -127,8 +133,7 @@ enum SpeakerNamer {
                 }
                 return finished
             } catch {
-                let transient = LLMError.isTransient(error)
-                allTransient = allTransient && transient
+                anyTransient = anyTransient || LLMError.isTransient(error)
                 lastBackend = backend.name
                 lastModel = backend.model
                 lastReason = Analytics.reason(for: error)
@@ -140,36 +145,53 @@ enum SpeakerNamer {
 
         SessionState.update(dir, with: [
             SessionState.Key.speakersStatus:
-                allTransient ? SessionState.deferred : "failed",
+                anyTransient ? SessionState.deferred : SessionState.failed,
+            SessionState.Key.speakersFailedFor:
+                anyTransient ? nil : MeetingEgress.fingerprint(for: .speakerNames),
         ])
         Analytics.track(.speakerNamesFailed, [
             .backend: .text(lastBackend),
             .model: .text(AnalyticsCatalogue.summaryModel(
                 backend: lastBackend, model: lastModel)),
             .reason: .text(lastReason.rawValue),
-            .outcome: .text((allTransient
+            .outcome: .text((anyTransient
                 ? Analytics.Outcome.deferred : .gaveUp).rawValue),
         ])
-        log(allTransient
-            ? "no backend could be reached — naming deferred, will be retried later"
-            : "every backend failed for good — giving up on speaker names")
+        log(anyTransient
+            ? "no backend answered, and at least one could not be reached — naming deferred, "
+                + "will be retried later"
+            : "every backend failed for good — giving up on speaker names until the "
+                + "naming settings, keys or backends change")
         return nil
     }
 
-    /// Write the file, re-render the markdown against it, and clear the
-    /// session's pending state. Naming is the only thing that rewrites
-    /// `transcript.md`, and it never touches `transcript.json`.
+    /// Merge a pass into whatever `speakers.json` says now, write it,
+    /// re-render the markdown against it, and clear the session's pending
+    /// state. Naming is the only thing that rewrites `transcript.md`, and it
+    /// never touches `transcript.json`.
+    ///
+    /// The file is read again here, under the session's lock, rather than
+    /// merged into the copy read before the model was asked: a person can
+    /// name a speaker in the recordings window during the minutes the model
+    /// takes, and merging into the older copy wrote their name away.
     private static func finish(
-        _ names: SpeakerNames,
+        _ fresh: SpeakerNames,
         transcript: Transcript,
         dir: URL,
         log: (String) -> Void
     ) -> SpeakerNames? {
         do {
-            try names.write(to: dir)
-            try transcript.writeMarkdown(to: dir, names: names)
-            SessionState.update(dir, with: [SessionState.Key.speakersStatus: nil])
-            return names
+            return try SessionLock.withLock(dir) {
+                let current = SpeakerNames.read(from: dir)
+                let merged = current?.merged(with: fresh) ?? fresh
+                try merged.write(to: dir)
+                try transcript.writeMarkdown(to: dir, names: merged)
+                SessionState.update(dir, with: [
+                    SessionState.Key.speakersStatus: nil,
+                    SessionState.Key.speakersFailedFor: nil,
+                ])
+                return merged
+            }
         } catch {
             // The transcript is intact either way — this only costs the names.
             log("couldn't write speaker names: \(error)")
@@ -232,6 +254,32 @@ enum SpeakerNamer {
         let confidence: String?
         let quote: String?
         let at_ms: Int?
+
+        private enum CodingKeys: String, CodingKey {
+            case label, name, confidence, quote, at_ms
+        }
+
+        /// Lenient about everything the gates don't depend on. Models hand
+        /// back `"at_ms": "194000"` or `194000.0` about as often as the
+        /// number asked for, and a strict decoder threw the whole mapping
+        /// away over the one field nothing checks — every name in it, however
+        /// well quoted, lost to the type of a timestamp.
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            label = try container.decode(String.self, forKey: .label)
+            name = try? container.decodeIfPresent(String.self, forKey: .name)
+            confidence = try? container.decodeIfPresent(String.self, forKey: .confidence)
+            quote = try? container.decodeIfPresent(String.self, forKey: .quote)
+            // Bounded before converting: `Int(_:)` traps on a double out of
+            // range, and a model can write any number it likes.
+            func milliseconds(_ number: Double?) -> Int? {
+                guard let number, number.isFinite, number.magnitude < 1e12 else { return nil }
+                return Int(number)
+            }
+            at_ms = milliseconds(try? container.decodeIfPresent(Double.self, forKey: .at_ms))
+                ?? milliseconds((try? container.decodeIfPresent(String.self, forKey: .at_ms))
+                    .flatMap { Double($0.trimmingCharacters(in: .whitespaces)) })
+        }
     }
 
     /// Apply the two gates. Anything that doesn't clear both becomes an entry
@@ -346,7 +394,8 @@ enum SpeakerNamer {
         labels: [String],
         title: String?,
         attendees: [String],
-        app: String?
+        app: String?,
+        limit: Int = maxChars
     ) -> String {
         var header: [String] = []
         if let title { header.append("Meeting: \(title)") }
@@ -362,7 +411,7 @@ enum SpeakerNamer {
         \(instructions)
 
         ---
-        \(body(of: transcript, attendees: attendees))
+        \(body(of: transcript, attendees: attendees, limit: limit))
         """
     }
 
@@ -373,12 +422,22 @@ enum SpeakerNamer {
     /// and adds every line that mentions an invitee: those are where names are
     /// actually said. A middle hour of a design argument contains no evidence
     /// about who anyone is.
-    static func body(of transcript: Transcript, attendees: [String]) -> String {
+    ///
+    /// Two fifths of `limit` go to the opening, where names cluster because
+    /// people greet each other and introduce themselves, a tenth to the
+    /// close, where they say goodbye by name, and what is left to the
+    /// mentions — so the whole never exceeds `limit`, which a small local
+    /// model with a fixed context would otherwise have cut from the front.
+    static func body(
+        of transcript: Transcript, attendees: [String], limit: Int = maxChars
+    ) -> String {
         let lines = transcript.segments.map {
             "[\($0.start_ms)] \($0.speaker): \($0.text)"
         }
         let whole = lines.joined(separator: "\n")
-        guard whole.count > maxChars else { return whole }
+        guard whole.count > limit else { return whole }
+        let openingChars = limit * 2 / 5
+        let closingChars = limit / 10
 
         var opening: [String] = []
         var size = 0
@@ -405,9 +464,17 @@ enum SpeakerNamer {
         }
 
         var parts = [opening.joined(separator: "\n")]
-        if !mentions.isEmpty {
+        // What the opening and the close left, less room for the two markers.
+        var room = limit - openingChars - closingChars - 120
+        var kept: [String] = []
+        for line in mentions.prefix(200) {
+            if line.count + 1 > room { break }
+            kept.append(line)
+            room -= line.count + 1
+        }
+        if !kept.isEmpty {
             parts.append("[… middle of the meeting, lines mentioning invitees …]")
-            parts.append(mentions.prefix(200).joined(separator: "\n"))
+            parts.append(kept.joined(separator: "\n"))
         }
         parts.append("[… end of the meeting …]")
         parts.append(closing.joined(separator: "\n"))

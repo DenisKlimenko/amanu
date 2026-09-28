@@ -85,7 +85,7 @@ enum TrackCompressor {
         let metaURL = dir.appendingPathComponent("meta.json")
         guard
             let data = try? Data(contentsOf: metaURL),
-            var meta = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let meta = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let files = meta["files"] as? [String: String]
         else {
             log("compression skipped — can't read meta.json")
@@ -141,28 +141,25 @@ enum TrackCompressor {
             return
         }
 
-        meta["files"] = ["mic": "audio.m4a", "system": "audio.m4a"]
-        // What the archive replaced, so a compression interrupted after this
-        // point can finish deleting it on the next pass.
-        meta["archived_from"] = files
-        meta["audio_channels"] = ["mic": 0, "system": 1]
-        if let original = meta["start_offset_ms"] {
-            meta["recorded_start_offset_ms"] = original
-        }
-        meta["start_offset_ms"] = ["mic": 0, "system": 0]
-        meta["compressed"] = true
-        guard let updated = try? JSONSerialization.data(
-            withJSONObject: meta, options: [.prettyPrinted, .sortedKeys]
-        ) else {
-            try? FileManager.default.removeItem(at: archive)
-            log("compression done but meta.json could not be rewritten — keeping the originals")
-            return
-        }
+        // Only the keys the archive changes are written, and under the
+        // session's lock: encoding takes minutes, and writing back the copy
+        // read before it would erase whatever naming or summarizing recorded
+        // in meta.json meanwhile.
+        //
         // The PCM is deleted only after meta.json points somewhere else, so an
         // interruption at any point leaves a session that still resolves to
         // files that exist.
         do {
-            try updated.write(to: metaURL, options: .atomic)
+            try SessionState.amend(dir, with: [
+                "files": ["mic": "audio.m4a", "system": "audio.m4a"],
+                // What the archive replaced, so a compression interrupted
+                // after this point can finish deleting it on the next pass.
+                "archived_from": files,
+                "audio_channels": ["mic": 0, "system": 1],
+                "recorded_start_offset_ms": meta["start_offset_ms"],
+                "start_offset_ms": ["mic": 0, "system": 0],
+                "compressed": true,
+            ])
         } catch {
             try? FileManager.default.removeItem(at: archive)
             log("couldn't rewrite meta.json (\(error)) — keeping the originals")

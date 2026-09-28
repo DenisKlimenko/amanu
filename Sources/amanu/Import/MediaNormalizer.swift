@@ -42,6 +42,21 @@ struct MediaNormalizer: MediaNormalizing, Sendable {
         }
     }
 
+    /// The rates Apple's AAC encoder accepts, and the only ones an imported
+    /// file is written at. A studio recording at 96 or 192 kHz, or a
+    /// camera's odd 37.8, used to be handed to the encoder as it came — the
+    /// rate was clamped from below only — and failed there.
+    private static let aacSampleRates: [Double] = [
+        8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000,
+    ]
+
+    /// The rate to write a source recorded at `rate`: the lowest AAC rate
+    /// that loses nothing of it, and 48 kHz for anything above — far more
+    /// than speech recognition uses.
+    static func outputSampleRate(for rate: Double) -> Double {
+        aacSampleRates.first { $0 >= rate } ?? aacSampleRates.last!
+    }
+
     func probe(_ source: URL) async throws -> Probe {
         let asset = AVURLAsset(url: source)
         let tracks: [AVAssetTrack]
@@ -75,9 +90,14 @@ struct MediaNormalizer: MediaNormalizing, Sendable {
         // and does not involve the media-library export services. Movie
         // containers cannot be opened this way and fall through to the asset
         // reader below, which extracts their first audio track.
+        // Only when the file can be written back at its own rate: anything
+        // else needs resampling, which the asset reader below does and this
+        // frame-by-frame copy does not.
         if let input = try? AVAudioFile(forReading: source),
            input.length > 0,
-           input.processingFormat.channelCount == 1 {
+           input.processingFormat.channelCount == 1,
+           Self.outputSampleRate(for: input.processingFormat.sampleRate)
+               == input.processingFormat.sampleRate {
             let worker = Task.detached(priority: .utility) {
                 try await Self.writeAudioFile(
                     input, to: destination, progress: progress)
@@ -114,7 +134,7 @@ struct MediaNormalizer: MediaNormalizing, Sendable {
         let descriptions = try await track.load(.formatDescriptions)
         let basic = descriptions.first
             .flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee }
-        let sampleRate = max(8_000, basic?.mSampleRate ?? 48_000)
+        let sampleRate = Self.outputSampleRate(for: basic?.mSampleRate ?? 48_000)
         // Imported media is one conversation source, not Amanu's paired
         // microphone/system tracks. Keeping ordinary stereo here would make
         // AssemblyAI interpret left and right as separate speakers through

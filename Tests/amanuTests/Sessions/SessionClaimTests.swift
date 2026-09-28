@@ -167,4 +167,111 @@ struct SessionClaimTests {
         SessionClaim.release(dir)
         #expect(FileManager.default.fileExists(atPath: url.path))
     }
+
+    /// Two claimants that both found the same dead owner. The slower one used
+    /// to delete the claim the faster one had just written and write its own,
+    /// and both went on to pay for the same transcript. Threads of this one
+    /// process stand in for the two processes: every one of them is the same
+    /// pid, so once one has the session the rest must see a live claim.
+    @Test("Of many claimants racing for a dead owner's session, exactly one gets it")
+    func racingClaimantsForAStaleClaim() throws {
+        for _ in 0..<20 {
+            let dir = try Self.session()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            _ = try Self.plant(dir, pid: Self.deadPid)
+
+            let winners = Counter()
+            DispatchQueue.concurrentPerform(iterations: 8) { _ in
+                if (try? SessionClaim.acquire(dir, stage: .transcribe)) != nil {
+                    winners.increment()
+                }
+            }
+            #expect(winners.value == 1)
+            #expect(SessionClaim.holder(dir)?.pid == ProcessInfo.processInfo.processIdentifier)
+            SessionClaim.release(dir)
+        }
+    }
+
+    @Test("Of many claimants racing for a free session, exactly one gets it")
+    func racingClaimantsForAFreeSession() throws {
+        let dir = try Self.session()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let winners = Counter()
+        DispatchQueue.concurrentPerform(iterations: 8) { _ in
+            if (try? SessionClaim.acquire(dir, stage: .finish)) != nil { winners.increment() }
+        }
+        #expect(winners.value == 1)
+        SessionClaim.release(dir)
+        #expect(!FileManager.default.fileExists(atPath: SessionClaim.url(dir).path))
+    }
+
+    /// A full disk between creating the claim and filling it used to leave an
+    /// empty file, which reads as a claim nobody can be asked about and so
+    /// held the session for good.
+    @Test("A claim that cannot be written leaves nothing behind")
+    func aFailedWriteLeavesNoClaim() throws {
+        let dir = try Self.session()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        struct DiskFull: Error {}
+
+        #expect(throws: SessionClaim.ClaimError.self) {
+            _ = try SessionClaim.create(
+                SessionClaim.url(dir), stage: .transcribe, write: { _, _ in throw DiskFull() })
+        }
+        #expect(!FileManager.default.fileExists(atPath: SessionClaim.url(dir).path))
+        let left = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        #expect(left == ["meta.json"], "Staging litter: \(left)")
+        #expect(!SessionClaim.isHeld(dir))
+    }
+
+    @Test("An unreadable claim nobody has touched for a while is litter and is reclaimed")
+    func anAbandonedUnreadableClaimIsReclaimed() throws {
+        let dir = try Self.session()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = SessionClaim.url(dir)
+        try Data().write(to: url)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-10 * 60)], ofItemAtPath: url.path)
+
+        #expect(!SessionClaim.isHeld(dir))
+        try SessionClaim.acquire(dir, stage: .finish)
+        defer { SessionClaim.release(dir) }
+        #expect(SessionClaim.holder(dir)?.pid == ProcessInfo.processInfo.processIdentifier)
+    }
+
+    /// Our own claim, taken over after we were wrongly thought gone: the
+    /// release in our `defer` must leave the new owner's file where it is.
+    @Test("Releasing after somebody else has reclaimed the session leaves their claim alone")
+    func releaseAfterAReclaimLeavesTheNewOwner() throws {
+        let dir = try Self.session()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let other = Process()
+        other.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        other.arguments = ["30"]
+        try other.run()
+        defer { other.terminate() }
+
+        try SessionClaim.acquire(dir, stage: .transcribe)
+        _ = try Self.plant(dir, pid: other.processIdentifier)
+        SessionClaim.release(dir)
+
+        #expect(SessionClaim.holder(dir)?.pid == other.processIdentifier)
+    }
+
+    /// `kill(pid, 0)` answers `EPERM` for a process that exists and belongs to
+    /// somebody we may not signal — alive, not gone.
+    @Test("An owner we may not signal is alive, not gone")
+    func anOwnerWeMayNotSignalIsAlive() {
+        // launchd is pid 1 and never ours to signal.
+        #expect(SessionClaim.Holder(pid: 1, started: nil, stage: "transcribe").isAlive)
+    }
+}
+
+/// A count several threads can add to.
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() { lock.withLock { count += 1 } }
+    var value: Int { lock.withLock { count } }
 }

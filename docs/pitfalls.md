@@ -365,6 +365,23 @@ Settings and coming back, which cannot happen without the run loop turning.
 The exception is this program changing one itself — registering a login item,
 or a TCC prompt it raised — and those call `ThisTurn.forget()`.
 
+## Where a meeting may go is decided once
+
+Naming and summarizing both show a model the transcript, and until September
+2026 they decided separately where to send it: naming defaulted to `auto`
+whatever the summary said, so somebody who chose Ollama so that nothing left
+the Mac still had the `claude` CLI read every meeting to find names in it.
+`MeetingEgress` now routes both, and anything new that hands a model meeting
+content asks it first rather than calling `LLMBackend.available` with a
+preference of its own. Nothing fails if you forget; the promise in the setup
+window simply stops being true.
+
+The `claude` CLI is asked as a completion, not as an agent — no tools, none of
+the person's settings or hooks, no MCP servers, no session history — because
+the transcript is whatever anybody on the call chose to say.
+`LLMBackend.claudeArguments` is pinned by a test; a flag dropped from it is a
+meeting that can talk a coding agent into reading the disk.
+
 # What has never been verified
 
 Not defects, and not oversights: places where the code is believed correct on
@@ -393,6 +410,14 @@ reasoning alone. Worth knowing before trusting any of them in front of someone.
 - **Stopping on sleep.** The recording ends on `willSleepNotification`, which
   macOS delivers with a little time to spare. That the files and meta.json
   are complete when the lid opens again has not been checked on a real lid.
+- **The hardened `claude` invocation against a real account.** The flags in
+  `LLMBackend.claudeArguments` were checked against `claude --help` of 2.1.240,
+  and the prompt now arrives on stdin with `--print` and `--system-prompt`
+  rather than as the positional argument; no prompt has been run through it
+  since. An older CLI that lacks one of the flags exits with "unknown option",
+  which counts as a permanent failure and falls through to the next backend.
+  Likewise "API Error: Connection error." as the CLI's offline answer is what
+  it printed before, not something captured with this version offline.
 - **The system tap has no restart.** Unlike the mic, a tap that dies mid-call
   is only reported — by the stall watchdog and the far-end warning — and never
   rebuilt. `AVAudioFile` cannot append, so a rebuilt tap would need a second

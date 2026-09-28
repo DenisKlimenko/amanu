@@ -17,6 +17,9 @@ depends on the transcription, speaker-naming, and summary backends you choose.
   meeting context: title, call application, and calendar participants. Those
   CLI tools or APIs may send the material to their provider under the terms of
   the account you use.
+- Speaker naming goes wherever summaries go. With summaries turned off it asks
+  no model at all and fills in only your own name, unless
+  `speaker_names.backend` names a backend for it.
 - API keys stay on the Mac and are sent only to the provider they authenticate.
 
 Calendar access is optional. Amanu reads events to identify a meeting, name its
