@@ -20,12 +20,14 @@ final class SettingsApplier {
         var liveTranscription: Bool
         var menuBarIcon: Bool
         var dockIcon: Bool
+        var recordingsRoot: URL
 
         static func read() -> Snapshot {
             Snapshot(
                 liveTranscription: Config.liveTranscriptionEnabled(),
                 menuBarIcon: Config.menuBarIcon(),
-                dockIcon: Config.dockIcon())
+                dockIcon: Config.dockIcon(),
+                recordingsRoot: Config.resolveRoot(cliOverride: nil).standardizedFileURL)
         }
     }
 
@@ -33,6 +35,7 @@ final class SettingsApplier {
     enum Change: Equatable {
         case liveTranscription(Bool)
         case icons
+        case recordingsRoot(URL)
     }
 
     /// What changed between two looks, in the order it is best applied.
@@ -43,6 +46,9 @@ final class SettingsApplier {
         }
         if old.menuBarIcon != new.menuBarIcon || old.dockIcon != new.dockIcon {
             found.append(.icons)
+        }
+        if old.recordingsRoot != new.recordingsRoot {
+            found.append(.recordingsRoot(new.recordingsRoot))
         }
         return found
     }

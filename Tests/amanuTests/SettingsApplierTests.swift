@@ -11,7 +11,8 @@ struct SettingsApplierTests {
     @Test("Only what moved is taken up, once")
     func changesAreTheDifference() {
         let before = SettingsApplier.Snapshot(
-            liveTranscription: false, menuBarIcon: true, dockIcon: true)
+            liveTranscription: false, menuBarIcon: true, dockIcon: true,
+            recordingsRoot: URL(fileURLWithPath: "/tmp/Recordings"))
         var after = before
         #expect(SettingsApplier.changes(from: before, to: after).isEmpty)
 
@@ -44,5 +45,19 @@ struct SettingsApplierTests {
         NotificationCenter.default.post(name: Config.didChange, object: nil)
         #expect(taken.isEmpty, "nothing moved, and something was taken up anyway")
         #expect(looks == 3)
+    }
+
+    /// Choosing a folder in Setup wrote `recordings_dir` and changed nothing
+    /// until the next launch, silently. The applier is what hears it now.
+    @Test("A recordings folder chosen in Setup is taken up as the folder it names", .freshHome)
+    func recordingsFolderIsTakenUp() {
+        var taken: [SettingsApplier.Change] = []
+        let applier = SettingsApplier(apply: { taken.append($0) })
+        defer { withExtendedLifetime(applier) {} }
+
+        Config.update(path: ["recordings_dir"], value: "~/Meetings")
+
+        let expected = Home.current.url.appendingPathComponent("Meetings", isDirectory: true)
+        #expect(taken == [.recordingsRoot(expected.standardizedFileURL)])
     }
 }

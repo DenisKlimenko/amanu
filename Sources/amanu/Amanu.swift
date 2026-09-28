@@ -134,7 +134,7 @@ struct Run: ParsableCommand {
         // menu bar is not a dependable place for the only control surface of a
         // recorder — when it fills up macOS parks the status item off-screen
         // and it stays clickable but invisible. The Dock can't be crowded out.
-        let controller = AppController(root: root)
+        let controller = AppController(root: root, followsConfiguredRoot: out == nil)
 
         // NSApp holds its delegate weakly, and a Dock icon is useless if
         // clicking it does nothing.
@@ -221,7 +221,13 @@ struct Doctor: ParsableCommand {
 /// ticker. All state transitions happen on the main actor.
 @MainActor
 final class AppController {
-    private let root: URL
+    /// Where recordings go. It follows `recordings_dir` while amanu runs —
+    /// see `adoptPendingRoot` — unless `--out` named a folder for this run.
+    private var root: URL
+    private let followsConfiguredRoot: Bool
+    /// A folder chosen while something was still being written into the old
+    /// one, waiting for that to finish.
+    private var pendingRoot: URL?
     private let menuBar = MenuBarController(visible: Config.menuBarIcon())
     private let window = StatusWindow()
     /// Built on first use. It is thirty-odd controls, and amanu spends nearly
@@ -251,7 +257,7 @@ final class AppController {
         gate: UpdateGate(isRecording: { [weak self] in self?.isRecording == true })
     )
     private let transcription = TranscriptionCoordinator()
-    private let mediaImport: MediaImportCoordinator
+    private var mediaImport: MediaImportCoordinator
     private let liveTranscription = LiveTranscriptionCoordinator()
     private let calendar: CalendarWatcher?
     private let autoRecord: AutoRecordController
@@ -268,7 +274,9 @@ final class AppController {
         session.map { Date().timeIntervalSince($0.startedAt) }
     }
     private var ticker: Timer?
+    private var recordingsBuilt = false
     private lazy var recordings: RecordingsWindow = {
+        recordingsBuilt = true
         let window = RecordingsWindow(root: root)
         window.onImportFiles = { [weak self] files in self?.importFiles(files) }
         window.onCancelImport = { [weak self] in self?.cancelImport() }
@@ -309,8 +317,9 @@ final class AppController {
     /// after it can wait for it: arriving late, it would stop the new run.
     private var importStop: Task<Void, Never>?
 
-    init(root: URL) {
+    init(root: URL, followsConfiguredRoot: Bool = true) {
         self.root = root
+        self.followsConfiguredRoot = followsConfiguredRoot
         mediaImport = MediaImportCoordinator(root: root)
 
         let settings = Config.autoRecord()
@@ -467,8 +476,11 @@ final class AppController {
         // A backlog deferred for want of a model is only half-solved by
         // recording the fact — something has to come back for it when the
         // network does.
-        let monitor = NetworkMonitor { [root] in
-            Task { await PostProcessor.sweep(root: root) }
+        let monitor = NetworkMonitor { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let root = self?.root else { return }
+                await PostProcessor.sweep(root: root)
+            }
         }
         monitor.start()
         network = monitor
@@ -532,7 +544,11 @@ final class AppController {
             mediaImportTask = nil
             // Files dropped while this run was stopping are a new request,
             // not part of the one that was cancelled.
-            if imports.runEnded() { startImportRun() }
+            if imports.runEnded() {
+                startImportRun()
+            } else {
+                adoptPendingRoot()
+            }
         }
     }
 
@@ -650,7 +666,43 @@ final class AppController {
             rewireLive(enabled)
         case .icons:
             applyIconPreferences()
+        case .recordingsRoot(let folder):
+            guard followsConfiguredRoot else { return }
+            pendingRoot = folder
+            adoptPendingRoot()
         }
+    }
+
+    /// Move to the recordings folder the config now names, if nothing is
+    /// being written into the old one.
+    ///
+    /// Choosing a folder in Setup used to change nothing until the next
+    /// launch, and said nothing about it: the next meeting went on landing
+    /// in the old folder while the window showed the new one. Now the next
+    /// recording or import goes to the new folder, and the recordings window
+    /// shows what is in it. A recording or an import under way finishes where
+    /// it started — a session is one folder — and the move waits for it.
+    private func adoptPendingRoot() {
+        guard let folder = pendingRoot, session == nil, mediaImportTask == nil else { return }
+        pendingRoot = nil
+        guard folder != root.standardizedFileURL else { return }
+        root = folder
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        // For the same reason `Run` sits in the recordings folder at launch:
+        // an agent CLI started anywhere else goes looking around it.
+        FileManager.default.changeCurrentDirectoryPath(folder.path)
+        mediaImport = MediaImportCoordinator(root: folder)
+        FileHandle.standardError.write(Data("recordings → \(folder.path)\n".utf8))
+        // The new folder may be an old one, with its own leftovers: a crash
+        // to adopt, sessions nobody transcribed.
+        RecordingSession.recoverInterrupted(root: folder)
+        if automaticFeaturesStarted {
+            Task { [transcription] in
+                await transcription.resumePending(root: folder)
+                await PostProcessor.sweep(root: folder)
+            }
+        }
+        if recordingsBuilt { recordings.setRoot(folder) }
     }
 
     /// Start or stop the live transcript under a recording already running.
@@ -764,6 +816,7 @@ final class AppController {
         ))
         self.session = nil
         present(.idle, elapsed: nil)
+        adoptPendingRoot()
         // If Sparkle was told to wait for this recording, it has waited.
         updates.recordingDidFinish()
 
@@ -942,7 +995,8 @@ final class AppController {
     private func showRecordings() {
         // A session put back in the queue should start transcribing now, not
         // at the next launch — the person asking for it is watching.
-        recordings.onRetranscribe = { [transcription, root] _ in
+        recordings.onRetranscribe = { [weak self, transcription] _ in
+            guard let root = self?.root else { return }
             Task { await transcription.resumePending(root: root) }
         }
         NSApp.activate(ignoringOtherApps: true)

@@ -27,7 +27,7 @@ final class RecordingsWindow: NSObject {
     var onImportFiles: (([URL]) -> Void)?
     var onCancelImport: (() -> Void)?
     var onChooseImport: (() -> Void)?
-    private let root: URL
+    private var root: URL
     private let panel: NSWindow
     private let table = NSTableView()
     private let scroll = NSScrollView()
@@ -229,6 +229,13 @@ final class RecordingsWindow: NSObject {
             detailScroll.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -28),
         ])
         return container
+    }
+
+    /// Show another recordings folder: the one Setup has just moved amanu to.
+    func setRoot(_ folder: URL) {
+        root = folder
+        table.deselectAll(nil)
+        reload()
     }
 
     func updateImport(_ update: MediaImportCoordinator.Update) {

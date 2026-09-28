@@ -114,6 +114,11 @@ The section is four rows: Start at login, Microphone, System audio, Calendar.
 - Confirm the recordings folder row shows the current path in a monospaced
   font, and that **Choose…** writes the new path into `config.json` as
   `recordings_dir` (with `~` when the folder is under the home directory).
+- With nothing recording, choose a new folder and open **Recordings**: it
+  lists the new folder at once, and the next recording lands there without
+  restarting amanu. Choose one again *during* a recording: the line under
+  the path says the recording in progress stays in the old folder, it does,
+  and the one after it goes to the new one.
 - **By hand:** confirm a folder chosen inside Documents or Desktop still
   records — make a short test recording afterwards and check the files land
   there.

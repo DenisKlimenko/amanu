@@ -580,18 +580,25 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         recordingsPath.font = SetupLayout.monoFont
         recordingsPath.lineBreakMode = .byTruncatingMiddle
 
+        folderDetail.stringValue = Self.folderAdvice
         return SetupLayout.row(
             symbol: "folder",
             title: recordingsPath,
-            detail: SetupLayout.detail(
-                localised(
-                    "Outside Documents and Desktop, so macOS never has to ask.",
-                    "Вне Документов и Рабочего стола — macOS не будет спрашивать."),
-                lines: 1),
+            detail: folderDetail,
             trailing: [SetupLayout.actionButton(
                 localised("Choose…", "Выбрать…"),
                 target: self, action: #selector(chooseFolder))])
     }
+
+    /// What the line under the folder says, until a folder is chosen during
+    /// a recording and it has something more pressing to say.
+    private static var folderAdvice: String {
+        localised(
+            "Outside Documents and Desktop, so macOS never has to ask.",
+            "Вне Документов и Рабочего стола — macOS не будет спрашивать.")
+    }
+
+    private let folderDetail = SetupLayout.detail("", lines: 2)
 
     @objc private func chooseFolder() {
         let panel = NSOpenPanel()
@@ -606,6 +613,14 @@ final class SetupForm: NSObject, NSTextFieldDelegate {
         // Store it the way a person would write it: a path under the home
         // directory stays readable, and stays right if the account is renamed.
         Config.update(path: ["recordings_dir"], value: Home.current.abbreviating(chosen.path))
+        // Taken up at once when nothing is recording; a recording running now
+        // finishes in the folder it started in, and that is worth saying
+        // before somebody goes looking for it in the new one.
+        folderDetail.stringValue = isRecording?() == true
+            ? localised(
+                "The recording in progress stays in the old folder; the next one goes here.",
+                "Идущая запись останется в старой папке, следующая ляжет сюда.")
+            : Self.folderAdvice
         refresh()
     }
 
