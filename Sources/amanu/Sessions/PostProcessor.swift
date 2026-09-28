@@ -387,6 +387,8 @@ enum PostProcessor {
             SessionState.Key.summaryStatus: nil,
             SessionState.Key.speakersFailedFor: nil,
             SessionState.Key.summaryFailedFor: nil,
+            SessionState.Key.speakersDeferrals: nil,
+            SessionState.Key.summaryDeferrals: nil,
         ])
         appendSessionLog("queued for re-transcription", to: dir)
     }

@@ -30,6 +30,10 @@ enum SessionState {
         /// fingerprint, written before there were any, stays written off.
         static let summaryFailedFor = "summary_failed_for"
         static let speakersFailedFor = "speakers_failed_for"
+        /// How many times each pass has been deferred after reaching a
+        /// backend — see `ChainAttempt`.
+        static let summaryDeferrals = "summary_deferrals"
+        static let speakersDeferrals = "speakers_deferrals"
     }
 
     static let failed = "failed"

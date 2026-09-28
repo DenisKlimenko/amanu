@@ -21,6 +21,17 @@ struct LLMBackend: Sendable {
     /// or split a transcript to fit rather than letting the backend drop the
     /// part it has no room for.
     var promptLimit: Int? = nil
+    /// Whether this backend is only in the chain because `auto` ends with
+    /// it, and nobody chose it or set it up — Ollama on a Mac that has never
+    /// been told about one.
+    ///
+    /// Such a backend refusing the connection says nothing will change: it
+    /// is not a server that is down for now, it is a server that is not
+    /// there. Counted as a failure that passes, it made every failure before
+    /// it pass too — a billed API answering nonsense, a CLI refusing an
+    /// option — and the whole transcript went back to every backend in the
+    /// chain at every launch and every change of network, for ever.
+    var isUnchosenFallback = false
     /// (system prompt, user prompt) → completion text.
     let call: @Sendable (String, String) async throws -> String
 
@@ -72,8 +83,17 @@ struct LLMBackend: Sendable {
         if let key = Credentials.summaryOpenAIKey() {
             candidates.append(openAI(key: key, model: openAIModelID, baseURL: settings.openAIBaseURL))
         }
-        candidates.append(ollama(model: settings.ollamaModel, baseURL: settings.ollamaBaseURL))
+        var local = ollama(model: settings.ollamaModel, baseURL: settings.ollamaBaseURL)
+        local.isUnchosenFallback = preference != local.name && !settings.ollamaConfigured
+        candidates.append(local)
         return chain(preference: preference, from: candidates)
+    }
+
+    /// Whether a failure of this backend is one that passes, in the sense
+    /// that decides whether a pass is deferred or given up on.
+    func failureIsTransient(_ error: Error) -> Bool {
+        guard LLMError.isTransient(error) else { return false }
+        return !(isUnchosenFallback && LLMError.isUnreachable(error))
     }
 
     /// Which of the backends present on this machine a preference allows, in
@@ -397,4 +417,35 @@ enum LLMError: Error, CustomStringConvertible {
     static func isUsageLimit(_ error: Error) -> Bool {
         (error as? LLMError)?.isUsageLimit ?? false
     }
+
+    /// Whether the request never reached anybody: no network, a name that
+    /// did not resolve, a connection refused. Narrower than `isTransient` —
+    /// a timeout, a reset or a server error happened after the meeting had
+    /// been sent — and what it answers is whether a failed attempt handed
+    /// the transcript to someone.
+    static func isUnreachable(_ error: Error) -> Bool {
+        if let llm = error as? LLMError {
+            guard case .exit(_, let output) = llm else { return false }
+            let haystack = output.lowercased()
+            return unreachableMarkers.contains { haystack.contains($0) }
+        }
+        if let url = error as? URLError {
+            return [
+                URLError.notConnectedToInternet, .cannotFindHost, .cannotConnectToHost,
+                .dnsLookupFailed, .internationalRoamingOff, .dataNotAllowed,
+            ].contains(url.code)
+        }
+        let posix = error as NSError
+        // ENETDOWN, ECONNREFUSED, EHOSTUNREACH.
+        return posix.domain == NSPOSIXErrorDomain && [50, 61, 65].contains(posix.code)
+    }
+
+    /// What a CLI prints when it could not get a request out at all. The
+    /// claude CLI's "API Error: Connection error." is its offline answer.
+    private static let unreachableMarkers = [
+        "connection refused", "could not connect", "network is unreachable",
+        "no route to host", "temporary failure in name resolution", "offline",
+        "econnrefused", "enotfound", "eai_again", "ehostunreach", "enetunreach",
+        "unable to connect", "connection error", "error sending request",
+    ]
 }

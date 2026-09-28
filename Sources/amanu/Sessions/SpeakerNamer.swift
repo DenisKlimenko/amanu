@@ -97,7 +97,7 @@ enum SpeakerNamer {
         // Deferred if any backend failed in a way that passes, for the same
         // reason as the summary: a bad answer from one reachable backend must
         // not write off the one that was merely offline.
-        var anyTransient = false
+        var attempt = ChainAttempt()
         var lastBackend = route.preference
         var lastModel: String?
         var lastReason = Analytics.Reason.unknown
@@ -140,7 +140,7 @@ enum SpeakerNamer {
                 }
                 return finished
             } catch {
-                anyTransient = anyTransient || LLMError.isTransient(error)
+                attempt.note(error, from: backend)
                 lastBackend = backend.name
                 lastModel = backend.model
                 lastReason = Analytics.reason(for: error)
@@ -150,25 +150,36 @@ enum SpeakerNamer {
             }
         }
 
-        SessionState.update(dir, with: [
-            SessionState.Key.speakersStatus:
-                anyTransient ? SessionState.deferred : SessionState.failed,
-            SessionState.Key.speakersFailedFor:
-                anyTransient ? nil : MeetingEgress.fingerprint(for: .speakerNames),
-        ])
+        let previous = SessionState.value(dir, SessionState.Key.speakersDeferrals) as? Int ?? 0
+        let verdict = attempt.verdict(after: previous)
+        SessionState.update(dir, with: ChainAttempt.fields(
+            for: verdict, previous: previous,
+            statusKey: SessionState.Key.speakersStatus,
+            fingerprintKey: SessionState.Key.speakersFailedFor,
+            countKey: SessionState.Key.speakersDeferrals,
+            fingerprint: MeetingEgress.fingerprint(for: .speakerNames)))
+        let deferred: Bool
+        switch verdict {
+        case .deferred:
+            deferred = true
+            log("no backend answered, and at least one could not be reached — naming deferred, "
+                + "will be retried later")
+        case .gaveUp(let deferrals?):
+            deferred = false
+            log("no backend has answered in \(deferrals) tries — giving up on speaker names "
+                + "until the naming settings, keys or backends change")
+        case .gaveUp(nil):
+            deferred = false
+            log("every backend failed for good — giving up on speaker names until the "
+                + "naming settings, keys or backends change")
+        }
         Analytics.track(.speakerNamesFailed, [
             .backend: .text(lastBackend),
             .model: .text(AnalyticsCatalogue.summaryModel(
                 backend: lastBackend, model: lastModel)),
             .reason: .text(lastReason.rawValue),
-            .outcome: .text((anyTransient
-                ? Analytics.Outcome.deferred : .gaveUp).rawValue),
+            .outcome: .text((deferred ? Analytics.Outcome.deferred : .gaveUp).rawValue),
         ])
-        log(anyTransient
-            ? "no backend answered, and at least one could not be reached — naming deferred, "
-                + "will be retried later"
-            : "every backend failed for good — giving up on speaker names until the "
-                + "naming settings, keys or backends change")
         return nil
     }
 
@@ -196,6 +207,7 @@ enum SpeakerNamer {
                 SessionState.update(dir, with: [
                     SessionState.Key.speakersStatus: nil,
                     SessionState.Key.speakersFailedFor: nil,
+                    SessionState.Key.speakersDeferrals: nil,
                 ])
                 return merged
             }

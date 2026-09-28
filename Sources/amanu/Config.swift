@@ -474,6 +474,10 @@ enum Config {
         var ollamaBaseURL = Config.defaultString(.summaryOllamaBaseURL)
         var template = Config.defaultString(.summaryTemplate)
         var apiKeyPath: URL?
+        /// Whether the file says anything about Ollama — a model or a server
+        /// of its own. Without either, the Ollama at the end of `auto` is a
+        /// guess nobody made; see `LLMBackend.isUnchosenFallback`.
+        var ollamaConfigured = false
     }
 
     static func summary() -> SummarySettings {
@@ -496,6 +500,8 @@ enum Config {
         settings.ollamaBaseURL = string(.summaryOllamaBaseURL, in: root).trimmed
         settings.template = string(.summaryTemplate, in: root)
         settings.apiKeyPath = text(.summaryKeyPath, in: root).map { Home.current.expanding($0) }
+        settings.ollamaConfigured = text(.summaryOllamaModel, in: root) != nil
+            || text(.summaryOllamaBaseURL, in: root) != nil
         return settings
     }
 
