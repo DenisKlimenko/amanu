@@ -37,3 +37,9 @@ change of speaker is logged there. amanu writes each connection's timeline to
 30 days. When a session is transcribed, `transcribe.log` in the session folder
 reports a line like `Meet named them A → …`, and `speakers.json` records those
 names with `"source": "meet"`.
+
+The timeline also carries the call's meeting code. A recording that starts
+during a call is named after the calendar event that links to that call, in
+whichever calendar it is, and never after an event that links to another
+call. `meta.json` then says `"matched_by": "meet"` under `calendar`, next to
+the calendar's name and account.

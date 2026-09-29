@@ -23,6 +23,22 @@ final class CalendarWatcher {
         /// True when the event has other people or a conference link — the
         /// difference between a meeting and "dentist, 15:00".
         let looksLikeCall: Bool
+        /// The Meet calls the event links to, by meeting code. Google puts an
+        /// invitation's Meet link in the event's notes, so they are read too.
+        var meetCodes: Set<String> = []
+        /// The calendar the event is in and the account that calendar belongs
+        /// to, which is what tells a work meeting from a personal one.
+        var calendarName: String?
+        var account: String?
+        /// How the event was chosen for a recording.
+        var matchedBy: MatchedBy = .time
+    }
+
+    enum MatchedBy: String {
+        /// The event links to the Meet call the browser extension says we are in.
+        case meet
+        /// The event is on at the time, and nothing more specific was known.
+        case time
     }
 
     private let store = EKEventStore()
@@ -61,10 +77,30 @@ final class CalendarWatcher {
 
     /// The event that best describes a recording started at `date` — used to
     /// name the session folder even when the recording began some other way.
-    /// Prefers something with other people in it over a solo block.
     func bestMatch(for date: Date) -> Meeting? {
-        let candidates = meetings(around: date, slack: 8 * 60)
-        return candidates.first { $0.looksLikeCall } ?? candidates.first
+        Self.pick(
+            from: meetings(around: date, slack: 8 * 60),
+            duringMeet: MeetSpeakers.callsInProgress(at: date))
+    }
+
+    /// Every calendar on the Mac is read, so the events around a recording
+    /// include other people's: a colleague's calendar, a family one. A Meet
+    /// call in progress settles which is ours — the event that links to it,
+    /// in whichever calendar — and rules out any that links to another call.
+    /// Without one, something with other people in it beats a solo block.
+    static func pick(from candidates: [Meeting], duringMeet calls: Set<String>) -> Meeting? {
+        if var event = candidates.first(where: { !$0.meetCodes.isDisjoint(with: calls) }) {
+            event.matchedBy = .meet
+            return event
+        }
+        let rest = calls.isEmpty ? candidates : candidates.filter { $0.meetCodes.isEmpty }
+        return rest.first { $0.looksLikeCall } ?? rest.first
+    }
+
+    /// Meeting codes of the Meet links in `text`: the path after
+    /// `meet.google.com/`, which is also how the extension names a call.
+    static func meetCodes(in text: String) -> Set<String> {
+        Set(text.lowercased().matches(of: #/meet\.google\.com/([a-z0-9-]+)/#).map { String($0.1) })
     }
 
     // MARK: -
@@ -111,7 +147,10 @@ final class CalendarWatcher {
             link: link,
             // Self counts as an attendee, so "other people" means more than one.
             looksLikeCall: attendees.count > 1
-                || Self.conferenceMarkers.contains { haystack.contains($0) }
+                || Self.conferenceMarkers.contains { haystack.contains($0) },
+            meetCodes: Self.meetCodes(in: haystack),
+            calendarName: event.calendar?.title,
+            account: event.calendar?.source?.title
         )
     }
 

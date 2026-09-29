@@ -27,13 +27,17 @@ enum MeetSpeakers {
         }
 
         let t: Int
+        /// The call this state belongs to: the meeting code from the tab's
+        /// address. One connection relays every Meet tab the browser has open.
+        let meeting: String?
         let speaking: [Speaker]
 
-        private enum CodingKeys: String, CodingKey { case t, speaking }
+        private enum CodingKeys: String, CodingKey { case t, meeting, speaking }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             t = try container.decode(Int.self, forKey: .t)
+            meeting = try container.decodeIfPresent(String.self, forKey: .meeting)
             // A "left the call" message carries no speakers at all, which is
             // exactly what it means.
             speaking = try container.decodeIfPresent([Speaker].self, forKey: .speaking) ?? []
@@ -76,33 +80,53 @@ enum MeetSpeakers {
     }
 
     /// Every turn recorded between two moments, across however many
-    /// connections the browser made — one per Meet tab, and a new one each
-    /// time the extension's worker was restarted.
+    /// connections the browser made — one per browser profile, carrying all
+    /// its Meet tabs, and a new one each time the extension's worker was
+    /// restarted.
     static func turns(in dir: URL = directory, from startMs: Int, to endMs: Int) -> [Turn] {
+        connections(in: dir, from: startMs, to: endMs).flatMap {
+            Self.turns(from: $0).filter { $0.endMs > startMs && $0.startMs < endMs }
+        }
+    }
+
+    /// The Meet calls this Mac is in at `now`, by meeting code: those the
+    /// extension has reported within `stale`. A recording starting now uses
+    /// them to find its own calendar event among everyone else's.
+    ///
+    /// A call left less than `stale` ago still counts, because the extension's
+    /// goodbye looks like a quiet heartbeat. If two calls back to back ever get
+    /// mixed up, the message needs a "left" of its own.
+    static func callsInProgress(in dir: URL = directory, at now: Date) -> Set<String> {
+        let nowMs = Int(now.timeIntervalSince1970 * 1000)
+        let recent = connections(in: dir, from: nowMs - stale, to: nowMs).joined()
+            .filter { $0.t > nowMs - stale && $0.t <= nowMs }
+        return Set(recent.compactMap { $0.meeting?.lowercased() }.filter { !$0.isEmpty })
+    }
+
+    /// The events of every connection that can hold something between two
+    /// moments, one list per connection, in the order they were written.
+    private static func connections(in dir: URL, from startMs: Int, to endMs: Int) -> [[Event]] {
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: [.contentModificationDateKey]
         ) else { return [] }
-        var turns: [Turn] = []
-        for file in files where file.pathExtension == "jsonl" {
+        let decoder = JSONDecoder()
+        return files.filter { $0.pathExtension == "jsonl" }.compactMap { file in
             // Named for the moment the connection opened, and last written when
             // it closed: a file outside those two moments holds none of the
             // meeting, and a month of calls is not worth parsing to learn that.
             if let opened = Int(file.deletingPathExtension().lastPathComponent), opened > endMs {
-                continue
+                return nil
             }
             if let written = try? file.resourceValues(forKeys: [.contentModificationDateKey])
                 .contentModificationDate,
                Int(written.timeIntervalSince1970 * 1000) < startMs {
-                continue
+                return nil
             }
-            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
-            let decoder = JSONDecoder()
-            let events = text.split(separator: "\n").compactMap {
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+            return text.split(separator: "\n").compactMap {
                 try? decoder.decode(Event.self, from: Data($0.utf8))
             }
-            turns += Self.turns(from: events).filter { $0.endMs > startMs && $0.startMs < endMs }
         }
-        return turns
     }
 
     /// Delete timelines past `retention`.
