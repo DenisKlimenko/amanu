@@ -29,6 +29,12 @@ struct MeetingContext {
     var link: String?
     var scheduledStart: Date?
     var scheduledEnd: Date?
+    /// Which calendar and account the event came from, and how it was picked
+    /// for this recording — enough to see afterwards why a folder has the
+    /// name it has.
+    var calendarName: String?
+    var account: String?
+    var matchedBy: CalendarWatcher.MatchedBy?
 
     static let empty = MeetingContext()
 
@@ -62,6 +68,9 @@ struct MeetingContext {
             scheduledStart: meeting?.start,
             scheduledEnd: meeting?.end
         )
+        calendarName = meeting?.calendarName
+        account = meeting?.account
+        matchedBy = meeting?.matchedBy
     }
 
     /// The part of a session folder's name that follows the timestamp, or nil
@@ -92,6 +101,9 @@ struct MeetingContext {
         let iso = ISO8601DateFormatter()
         if let scheduledStart { calendar["scheduled_start"] = iso.string(from: scheduledStart) }
         if let scheduledEnd { calendar["scheduled_end"] = iso.string(from: scheduledEnd) }
+        if let calendarName { calendar["calendar_name"] = calendarName }
+        if let account { calendar["account"] = account }
+        if let matchedBy { calendar["matched_by"] = matchedBy.rawValue }
         if !calendar.isEmpty { fields["calendar"] = calendar }
 
         return fields

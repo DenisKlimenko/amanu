@@ -451,6 +451,12 @@ reasoning alone. Worth knowing before trusting any of them in front of someone.
 - **Whisper and GigaAM decoding on their own threads.** The move off the
   cooperative pool is tested with a stand-in for the native call; neither
   runtime has been run that way against a real model, cancellation included.
+- **Finding a Meet call's calendar event by its meeting code.** The code comes
+  from the browser extension, and the event is expected to carry the Meet link
+  in its notes, where Google puts it in an invitation. Nobody has yet looked at
+  a Google event through EventKit to see that it does. Until someone has,
+  `"matched_by": "time"` in the meta.json of a Meet call with an invitation
+  means the link was not where it was expected.
 
 ## Bold in the release notes cannot cross a line wrap
 

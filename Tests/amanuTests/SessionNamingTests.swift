@@ -112,4 +112,83 @@ struct SessionNamingTests {
         #expect(calendar["link"] as? String == "https://zoom.us/j/123")
         #expect(calendar["title"] as? String == "Integration sync")
     }
+
+    @Test("meta.json says which calendar the event came from, and how it was picked")
+    func metaCarriesTheEventsCalendar() throws {
+        var event = Self.event("Interview", meet: ["pgo-onxr-iue"])
+        event.calendarName = "Personal"
+        event.account = "iCloud"
+        event.matchedBy = .meet
+        let fields = MeetingContext(meeting: event, app: "Dia").metaFields
+
+        let calendar = try #require(fields["calendar"] as? [String: Any])
+        #expect(calendar["calendar_name"] as? String == "Personal")
+        #expect(calendar["account"] as? String == "iCloud")
+        #expect(calendar["matched_by"] as? String == "meet")
+    }
+
+    // MARK: - which event a recording belongs to
+
+    private static func event(
+        _ title: String, meet: Set<String> = [], call: Bool = true
+    ) -> CalendarWatcher.Meeting {
+        let start = Date(timeIntervalSince1970: 1_790_000_000)
+        return CalendarWatcher.Meeting(
+            id: title, title: title, start: start, end: start.addingTimeInterval(1800),
+            attendees: call ? ["Denis", "Anna"] : [], link: nil, looksLikeCall: call,
+            meetCodes: meet)
+    }
+
+    @Test("In a Meet call, the event that links to that call wins, whichever comes first")
+    func meetCallPicksItsOwnEvent() throws {
+        let picked = try #require(CalendarWatcher.pick(
+            from: [
+                Self.event("Team sync", meet: ["aaa-bbbb-ccc"]),
+                Self.event("Interview", meet: ["pgo-onxr-iue"]),
+            ],
+            duringMeet: ["pgo-onxr-iue"]))
+        #expect(picked.title == "Interview")
+        #expect(picked.matchedBy == .meet)
+    }
+
+    /// A Meet call nobody put in a calendar still overlaps other people's
+    /// meetings. One that links to a different call is certainly not this one.
+    @Test("An event linking to another Meet call is never the one being recorded")
+    func otherMeetCallIsNotThisOne() throws {
+        let picked = try #require(CalendarWatcher.pick(
+            from: [
+                Self.event("Colleague's 1:1", meet: ["aaa-bbbb-ccc"]),
+                Self.event("Interview"),
+            ],
+            duringMeet: ["pgo-onxr-iue"]))
+        #expect(picked.title == "Interview")
+        #expect(picked.matchedBy == .time)
+
+        #expect(CalendarWatcher.pick(
+            from: [Self.event("Colleague's 1:1", meet: ["aaa-bbbb-ccc"])],
+            duringMeet: ["pgo-onxr-iue"]) == nil)
+    }
+
+    @Test("Without a Meet call to go by, a call still beats a solo block")
+    func noMeetCallKeepsTheCalendarsChoice() throws {
+        let picked = try #require(CalendarWatcher.pick(
+            from: [Self.event("Focus", call: false), Self.event("Sync", meet: ["aaa-bbbb-ccc"])],
+            duringMeet: []))
+        #expect(picked.title == "Sync")
+        #expect(picked.matchedBy == .time)
+    }
+
+    @Test("A Meet code is read out of Google's invitation text or a bare link")
+    func meetCodesFromEventText() {
+        let invitation = """
+        -::~:~::~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~::~:~::-
+        Join with Google Meet: https://meet.google.com/pgo-onxr-iue
+        Or dial: (US) +1 402-555-0133 PIN: 123456789#
+        Learn more about Meet at: https://support.google.com/a/users/answer/9282720
+        """
+        #expect(CalendarWatcher.meetCodes(in: invitation) == ["pgo-onxr-iue"])
+        #expect(CalendarWatcher.meetCodes(in: "https://meet.google.com/ABC-defg-hij?authuser=1")
+            == ["abc-defg-hij"])
+        #expect(CalendarWatcher.meetCodes(in: "https://zoom.us/j/123, room 4") == [])
+    }
 }

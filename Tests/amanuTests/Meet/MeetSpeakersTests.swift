@@ -141,6 +141,30 @@ struct MeetSpeakersTests {
         #expect(names.speakers["them B"]?.source == .manual)
     }
 
+    @Test("A call is in progress while the extension keeps reporting it, in any tab")
+    func callsInProgress() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-calls-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // One connection relays every Meet tab the browser has, so a single
+        // file can hold two calls.
+        try """
+        {"t":\(Self.origin),"meeting":"aaa-bbbb-ccc","speaking":[]}
+        {"t":\(Self.origin + 1000),"meeting":"pgo-onxr-iue","speaking":[{"id":"d","name":"Daniel"}]}
+        {"t":\(Self.origin + 20_000),"meeting":"pgo-onxr-iue","speaking":[]}
+        """.write(to: dir.appendingPathComponent("\(Self.origin).jsonl"),
+                  atomically: true, encoding: .utf8)
+        func at(_ ms: Int) -> Date {
+            Date(timeIntervalSince1970: Double(Self.origin + ms) / 1000)
+        }
+
+        #expect(MeetSpeakers.callsInProgress(in: dir, at: at(3000)) == ["aaa-bbbb-ccc", "pgo-onxr-iue"])
+        #expect(MeetSpeakers.callsInProgress(in: dir, at: at(22_000)) == ["pgo-onxr-iue"])
+        #expect(MeetSpeakers.callsInProgress(in: dir, at: at(20_000 + MeetSpeakers.stale + 1)) == [])
+    }
+
     @Test("The host writes each framed message as one line, and skips what isn't JSON")
     func hostFraming() throws {
         let dir = FileManager.default.temporaryDirectory
