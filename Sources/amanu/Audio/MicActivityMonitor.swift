@@ -83,6 +83,10 @@ enum MicActivityMonitor {
         "app.zen-browser.zen",
         "company.thebrowser.dia",
         "ai.perplexity.comet",
+        // Dia's own id is not the one on the mic. Its audio service is
+        // ArcCore's `Browser Helper`, `company.thebrowser.browser.helper`:
+        // lower case, so neither Dia's id nor Arc's above is its prefix.
+        "company.thebrowser.browser",
     ]
 
     struct Result {
