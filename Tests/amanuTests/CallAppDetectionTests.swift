@@ -81,6 +81,21 @@ struct CallAppDetectionTests {
         #expect(result.families == ["com.google.Chrome"])
     }
 
+    /// Dia's own process never opens the mic: its audio service is ArcCore's
+    /// helper, whose id starts in lower case, so neither Dia's id nor Arc's is
+    /// a prefix of it. Listed by the app's id alone, no Meet call in Dia ever
+    /// started a recording.
+    @Test("Dia's audio service is a call app, and the tap follows it")
+    func diaAudioServiceCounts() {
+        let result = MicActivityMonitor.evaluate(
+            processes: [process("company.thebrowser.browser.helper",
+                                name: "Browser Helper", input: true)],
+            callApps: MicActivityMonitor.defaultCallApps)
+
+        #expect(result.active)
+        #expect(result.families == ["company.thebrowser.browser"])
+    }
+
     @Test("An app that isn't a call app is seen but doesn't start anything")
     func unlistedAppIsVisibleButInert() {
         let result = MicActivityMonitor.evaluate(
