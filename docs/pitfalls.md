@@ -237,6 +237,18 @@ stopped, change dismissed as ours, mic silent until the next route change
 happened along. What the window is for is buying time to ask the only question
 that has an answer: five seconds after the attach, are buffers still arriving?
 
+**The configuration-change observer must not sit on the main queue.**
+`AVAudioEngine` posts `AVAudioEngineConfigurationChange` from a serial queue of
+its own, and an observer registered with a queue makes that post wait until
+the queue has run it. A restart releases the old engine on main, and
+`-[AVAudioEngine dealloc]` syncs onto the engine's queue. With `queue: .main`
+a second change arriving during a restart closes the circle: on 29 September
+2026 a call handed over from the iPhone had `avconferenced` tear down and
+rebuild its voice-processing device, and amanu stopped for good — menu
+frozen, mic track ended 18 seconds in, the system track still growing, and
+`SIGTERM` ignored because its handler runs on main. The observer takes the
+post on the posting thread and passes it to main asynchronously.
+
 ## The microphone has to be followed; it is not inherited
 
 `AVAudioEngine` binds to the default input when it starts and stays there.

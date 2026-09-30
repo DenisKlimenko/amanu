@@ -201,7 +201,7 @@ final class MicRecorder: @unchecked Sendable {
         set { state.withLock { $0.muted = newValue } }
     }
 
-    // Main-thread only: the observer is registered on the main queue and
+    // Main-thread only: the observer passes its changes to the main queue and
     // handleConfigChange runs there, so these need no lock.
     private var configObserver: NSObjectProtocol?
     private var restartPending = false
@@ -301,13 +301,30 @@ final class MicRecorder: @unchecked Sendable {
         // A call app (FaceTime, Zoom) grabbing the mic reconfigures the input
         // device and stops the engine mid-session; without this observer the
         // track just ends there (2026.07.28: 1.7s mic on a 19min call).
-        configObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main
-        ) { [weak self] note in
-            guard let self, (note.object as? AVAudioEngine) === self.engine else { return }
+        configObserver = Self.observeConfigurationChanges { [weak self] changed in
+            guard let self, changed === self.engine else { return }
             self.handleConfigChange()
         }
         listenForDefaultInputChanges()
+    }
+
+    /// Hand every engine's configuration change to `body` on the main queue.
+    ///
+    /// Taken on the posting thread and passed on, never observed with
+    /// `queue: .main`. The engine posts from a serial queue of its own, and a
+    /// queued observer makes that post wait for main — while a restart, which
+    /// releases the old engine on main, waits for the same queue in
+    /// `-[AVAudioEngine dealloc]`. A second change arriving mid-restart hung
+    /// amanu for good on 29 September 2026 (docs/pitfalls.md).
+    static func observeConfigurationChanges(
+        _ body: @escaping @Sendable (AVAudioEngine?) -> Void
+    ) -> NSObjectProtocol {
+        NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil
+        ) { note in
+            let engine = note.object as? AVAudioEngine
+            DispatchQueue.main.async { body(engine) }
+        }
     }
 
     /// Follow these call app families from now on. The route is re-examined
