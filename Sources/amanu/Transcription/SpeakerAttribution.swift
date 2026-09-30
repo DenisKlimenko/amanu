@@ -71,7 +71,14 @@ enum SpeakerAttribution {
         let sharedArchive = mic.standardizedFileURL == system.standardizedFileURL
         guard !segments.isEmpty,
               let micEnvelope = Envelope(url: mic, channel: sharedArchive ? 0 : nil),
-              let systemEnvelope = Envelope(url: system, channel: sharedArchive ? 1 : nil)
+              let systemEnvelope = Envelope(url: system, channel: sharedArchive ? 1 : nil),
+              // A silent mic still answers: the mix is only ever the two
+              // tracks, so whatever the engine heard came in through the
+              // system one. A silent system track does not. It is what a tap
+              // without its permission records (rca-002), and what an
+              // in-person meeting records too, so it cannot say whose voices
+              // the mic heard.
+              !systemEnvelope.isSilent
         else { return nil }
 
         // First pass: whichever track is louder over the utterance spoke it.
@@ -154,9 +161,15 @@ enum SpeakerAttribution {
     private struct Envelope {
         private let buckets: [Float]
         private let reference: Float
+        /// Digital zero nine tenths of the time and never loud enough to be
+        /// speech the rest of it: nothing anyone said reached this track.
+        /// Only the tracks as recorded can say so. In `audio.m4a` the
+        /// encoder's own noise stands in for the zeros, so a transcription
+        /// from the archive reads a dead track as a merely quiet one.
+        let isSilent: Bool
 
         /// Read the file once, streaming, and reduce it to per-bucket RMS.
-        /// nil if the file is missing, empty, or entirely silent.
+        /// nil if the file is missing or empty.
         init?(url: URL, channel selectedChannel: Int? = nil) {
             guard
                 FileManager.default.fileExists(atPath: url.path),
@@ -210,12 +223,24 @@ enum SpeakerAttribution {
 
             // Normalize against the track's own loud-speech level, not its
             // peak: a single door slam shouldn't rescale a whole meeting.
-            let sorted = out.sorted()
-            let p90 = sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.9))]
-            guard p90 > 0 else { return nil }
-
+            //
+            // A track that is digital zero nine tenths of the time has no
+            // such level at its 90th percentile — a far end that said one
+            // thing all meeting, a mic that went dead on a route change — so
+            // it is taken from the stretches that held speech. A track with
+            // none has no level at all, and loses every comparison anyway:
+            // no bucket of it clears the floor.
+            let p90 = Self.p90(of: out) ?? 0
+            let speech = out.filter { $0 >= SpeakerAttribution.speechFloor }
             buckets = out
-            reference = p90
+            isSilent = p90 == 0 && speech.isEmpty
+            reference = p90 > 0 ? p90 : Self.p90(of: speech) ?? 1
+        }
+
+        private static func p90(of levels: [Float]) -> Float? {
+            guard !levels.isEmpty else { return nil }
+            let sorted = levels.sorted()
+            return sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.9))]
         }
 
         /// Mean normalized loudness over a time range, in seconds. Ranges that
