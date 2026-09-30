@@ -61,6 +61,10 @@ enum MicActivityMonitor {
         "jp.naver.line.mac",
         "com.tencent.xinWeChat",
         "com.apple.FaceTime",
+        // A call handed over from the iPhone is shown by the Phone app, but
+        // `avconferenced` holds the mic and plays the far end: on 29 September
+        // 2026 it was on the mic for the whole call, and Phone never was.
+        "com.apple.avconferenced",
         "com.hnc.Discord",
 
         // Browsers. Web meeting apps and installed PWAs inherit one of these

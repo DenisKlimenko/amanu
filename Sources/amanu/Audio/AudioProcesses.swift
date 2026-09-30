@@ -19,6 +19,12 @@ enum AudioProcesses {
         let runningOutput: Bool
     }
 
+    /// Names for processes whose own name says nothing to the person reading
+    /// the menu or the recordings folder. `avconferenced` carries FaceTime's
+    /// calls and the ones handed over from the iPhone, whose banner on the Mac
+    /// is FaceTime's too.
+    private static let displayNames = ["com.apple.avconferenced": "FaceTime"]
+
     /// Every audio process except our own — our capture must never be evidence
     /// about anyone else, and tapping ourselves would be a feedback loop.
     static func all() -> [Process]? {
@@ -34,7 +40,8 @@ enum AudioProcesses {
             let bundleID = string(object, kAudioProcessPropertyBundleID)
                 ?? app?.bundleIdentifier
                 ?? ""
-            let name = app?.localizedName
+            let name = displayNames[bundleID]
+                ?? app?.localizedName
                 ?? executableName(pid: pid)
                 ?? bundleID.split(separator: ".").last.map(String.init)
                 ?? ""
