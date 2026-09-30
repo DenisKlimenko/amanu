@@ -210,15 +210,57 @@ struct SpeakerAttributionTests {
                 system: f.system, systemOffset: 0.5) == nil)
     }
 
-    @Test("A silent track refuses to attribute rather than guessing")
-    func silentTrackRefuses() throws {
+    /// A mic that recorded nothing is still an answer, because the mix is only
+    /// ever the two tracks: whatever the engine heard came in through the
+    /// system one. On 30 September 2026 the mic went dead on a route change
+    /// for a whole call, and refusing here left the far end as "spk:0".
+    @Test("A silent mic puts every voice on the far side")
+    func silentMicMeansTheFarSide() throws {
         let f = try Fixture()
         let silent = f.dir.appendingPathComponent("silent.caf")
         try Self.writeTrack(to: silent, seconds: 10, bursts: [], gain: 0)
         #expect(
             SpeakerAttribution.resolve(
-                segments: [Self.seg(0.1, 1.9, "A")],
-                mic: silent, micOffset: 0, system: f.system, systemOffset: 0.5) == nil)
+                segments: [Self.seg(3.1, 4.9, "A"), Self.seg(6.1, 7.9, "A")],
+                mic: silent, micOffset: 0, system: f.system, systemOffset: 0.5)
+                == ["them", "them"])
+    }
+
+    /// The other way round it would be a guess. A system track with nothing
+    /// on it is what a tap without its permission records (rca-002), and what
+    /// an in-person meeting records too, so it cannot say whose voices the mic
+    /// heard — and "me" for all of them could be wrong about everyone.
+    @Test("A silent system track refuses to attribute rather than guessing")
+    func silentSystemTrackRefuses() throws {
+        let f = try Fixture()
+        let silent = f.dir.appendingPathComponent("silent.caf")
+        try Self.writeTrack(to: silent, seconds: 10, bursts: [], gain: 0)
+        #expect(
+            SpeakerAttribution.resolve(
+                segments: [Self.seg(0.1, 1.9, "A"), Self.seg(6.1, 7.9, "B")],
+                mic: f.mic, micOffset: 0, system: silent, systemOffset: 0) == nil)
+    }
+
+    /// A track that is digital zero nine tenths of the time has nothing at its
+    /// 90th percentile to normalize against — a far end that said one thing
+    /// in a meeting, a mic that died on a route change and came back — and
+    /// that used to cost the whole meeting its sides.
+    @Test("A far end heard only for a moment is still the far end")
+    func aBriefFarEndIsStillAttributed() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-brief-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let mic = dir.appendingPathComponent("mic.caf")
+        let system = dir.appendingPathComponent("system.caf")
+        try Self.writeTrack(to: mic, seconds: 10, bursts: [(0, 8)], gain: 0.08)
+        try Self.writeTrack(to: system, seconds: 10, bursts: [(8.5, 9)], gain: 0.7)
+
+        #expect(
+            SpeakerAttribution.resolve(
+                segments: [Self.seg(0.1, 7.9, "A"), Self.seg(8.5, 9.0, "B")],
+                mic: mic, micOffset: 0, system: system, systemOffset: 0) == ["me", "them"])
     }
 
     @Test("No segments refuses to attribute")
