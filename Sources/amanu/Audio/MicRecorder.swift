@@ -571,14 +571,15 @@ final class MicRecorder: @unchecked Sendable {
         liveAudio.forward(outgoing)
     }
 
-    /// Raw path: tap at the device's native format and downmix to mono. Same
-    /// sample rate on both sides, so the one-shot convert applies.
+    /// Raw path: tap at the device's native format and keep its first channel
+    /// as the mono track. Same sample rate on both sides, so the one-shot
+    /// convert applies.
     private func installRawTap(
         on input: AVAudioInputNode,
         inputFormat: AVAudioFormat,
         monoFormat: AVAudioFormat
     ) throws {
-        guard let converter = AVAudioConverter(from: inputFormat, to: monoFormat) else {
+        guard let converter = Self.monoConverter(from: inputFormat, to: monoFormat) else {
             throw RecorderError.formatUnsupported(inputFormat)
         }
         let sameRate = inputFormat.sampleRate == monoFormat.sampleRate
@@ -606,6 +607,23 @@ final class MicRecorder: @unchecked Sendable {
             }
             self.writeTracked(mono, to: writer)
         }
+    }
+
+    /// A converter from the device's own format to the mono track that reads
+    /// the device's first channel.
+    ///
+    /// Said outright because the converter's own choice is silence whenever
+    /// the input's channels carry no position it can match to mono. The
+    /// built-in microphone becomes three such channels while another process
+    /// runs Apple's voice processing on it — `avconferenced`, for a call
+    /// handed over from the iPhone — and the default map is then `[-1]`:
+    /// every buffer converts to digital zeros, without an error. On 30
+    /// September 2026 that left a nine-minute call with only the far end in
+    /// it. Mono and stereo inputs map to channel 0 by default anyway.
+    static func monoConverter(from input: AVAudioFormat, to mono: AVAudioFormat) -> AVAudioConverter? {
+        let converter = AVAudioConverter(from: input, to: mono)
+        converter?.channelMap = [0]
+        return converter
     }
 
     /// Feed `buffer` through `converter` exactly once, for the rate-mismatched

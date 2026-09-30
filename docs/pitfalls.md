@@ -219,6 +219,19 @@ play, and on 20 August 2026 it did — the far end at −3 dB on our own track f
 35 minutes, loud enough to be voted onto our side of the meeting by speaker
 attribution. `.issues/rca-003`.
 
+**The device can come back in a shape the converter maps to nothing.** While
+another process runs Apple's voice processing on the built-in microphone, the
+microphone is three channels with no positions — `coreaudiod` logs it as
+`BuiltInMicrophoneDevice [general] 3 ch` — and a raw restart taps that. Left
+to itself, `AVAudioConverter` from those three to mono picks channel map `[-1]`
+and converts every buffer to digital zeros, `downmix` or not, and without an
+error. On 30 September 2026 a call handed over from the iPhone lost our whole
+side that way: `avconferenced` took the mic two seconds in, and the track was
+exact zeros until the call ended and the mic went back to one channel. The raw
+tap names channel 0 itself. That this channel carries the voice in the
+three-channel shape is believed, not yet heard: the next handed-over call
+should have our side in it.
+
 **The silence pad belongs after the attach, not before it.** Only the first
 buffer of the new engine knows how long the route was actually down; starting
 a device costs hundreds of milliseconds beyond the last buffer of the old one.

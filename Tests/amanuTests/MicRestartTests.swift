@@ -49,6 +49,35 @@ struct MicRestartTests {
         #expect(MicRecorder.silenceFrames(gap: -0.3, sampleRate: 48000) == 0)
     }
 
+    /// While `avconferenced` runs voice processing on the built-in microphone,
+    /// a restart finds it as three channels with no positions, and a converter
+    /// left to its own map turned them into digital zeros — the whole of our
+    /// side of a call handed over from the iPhone, on 30 September 2026.
+    @Test(arguments: [
+        kAudioChannelLayoutTag_DiscreteInOrder | 3,
+        kAudioChannelLayoutTag_Unknown | 3,
+    ])
+    func threeUnplacedChannelsStillMakeAMonoTrack(_ tag: AudioChannelLayoutTag) throws {
+        let layout = try #require(AVAudioChannelLayout(layoutTag: tag))
+        let three = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 48_000, interleaved: false,
+            channelLayout: layout)
+        let mono = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: 1, interleaved: false))
+        let converter = try #require(MicRecorder.monoConverter(from: three, to: mono))
+
+        let device = try #require(AVAudioPCMBuffer(pcmFormat: three, frameCapacity: 480))
+        device.frameLength = 480
+        for channel in 0..<3 {
+            for frame in 0..<480 { device.floatChannelData![channel][frame] = 0.1 * Float(channel + 1) }
+        }
+        let track = try #require(AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: 480))
+        try converter.convert(to: track, from: device)
+
+        #expect(track.frameLength == 480)
+        #expect(abs(track.floatChannelData![0][479] - 0.1) < 0.001)
+    }
+
     @Test func aRestartRecordsBothSidesOfTheRouteChange() {
         let iso = ISO8601DateFormatter()
         let at = Date(timeIntervalSince1970: 1_755_710_180)
