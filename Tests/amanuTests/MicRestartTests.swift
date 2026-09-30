@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import Testing
+import os
 
 @testable import amanu
 
@@ -254,5 +255,39 @@ struct MicRestartTests {
         let meta = restart.meta(iso: ISO8601DateFormatter())
         #expect(meta["gap_ms"] as? Int == 3_600_000)
         #expect(meta["padded_ms"] as? Int == 600_000)
+    }
+
+    /// The engine posts a configuration change from a queue of its own, and a
+    /// restart on main waits for that queue: `-[AVAudioEngine dealloc]` syncs
+    /// onto it. So the post must not wait for main in turn, and with the
+    /// observer on `queue: .main` it did — a change arriving mid-restart hung
+    /// amanu for good on 29 September 2026. Main is held here the same way.
+    @MainActor
+    @Test func aConfigurationChangeIsPostedWithoutWaitingForMain() async {
+        let ranOnMain = OSAllocatedUnfairLock<Bool?>(initialState: nil)
+        let observer = MicRecorder.observeConfigurationChanges { _ in
+            ranOnMain.withLock { $0 = Thread.isMainThread }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        #expect(Self.postHoldingThisThread(for: 2) == .success)
+
+        // The handler still runs on main, where the restart's state lives.
+        for _ in 0..<200 where ranOnMain.withLock({ $0 }) == nil {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(ranOnMain.withLock { $0 } == true)
+    }
+
+    /// Post a configuration change from another thread and block this one
+    /// until the post returns. Synchronous on purpose: blocking is the point,
+    /// and an async caller may not wait on a semaphore itself.
+    private static func postHoldingThisThread(for seconds: Double) -> DispatchTimeoutResult {
+        let posted = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: nil)
+            posted.signal()
+        }
+        return posted.wait(timeout: .now() + seconds)
     }
 }
