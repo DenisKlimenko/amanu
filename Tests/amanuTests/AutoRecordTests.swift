@@ -202,15 +202,21 @@ final class FakeAutoSession: AutoRecordedSession {
 final class FakeCalendar: MeetingCalendar {
     var meetings: [CalendarWatcher.Meeting] = []
 
+    /// What `bestMatch` answers whatever the time, when it is set. The real
+    /// one can name an event that is not on at the time at all — a weekly
+    /// room's meeting from another day, a slot the call ran past — and the
+    /// lookup by time below never would.
+    var match: CalendarWatcher.Match?
+
+    /// The real rule rather than a copy of it, so that these tests see the
+    /// trigger the controller runs on.
     func justStarted(now: Date, window: TimeInterval) -> [CalendarWatcher.Meeting] {
-        meetings.filter {
-            let since = now.timeIntervalSince($0.start)
-            return since >= -30 && since <= window && $0.looksLikeCall
-        }
+        CalendarWatcher.justStarted(meetings, now: now, window: window)
     }
 
-    func bestMatch(for date: Date) -> CalendarWatcher.Meeting? {
-        meetings.first { $0.start <= date && $0.end >= date }
+    func bestMatch(for date: Date) -> CalendarWatcher.Match? {
+        match ?? meetings.first { $0.start <= date && $0.end >= date }
+            .map(CalendarWatcher.Match.event)
     }
 
     static func meeting(id: String, start: Date, minutes: Double = 30) -> CalendarWatcher.Meeting {
@@ -384,6 +390,27 @@ struct AutoRecordLoopTests {
         #expect(h.stops.isEmpty, "The event is not over yet.")
         h.run(for: 4 * 60)
         #expect(h.stops == ["calendar-event-ended"])
+    }
+
+    /// A weekly room's meeting from another day names a call made in the room
+    /// today, and so does a slot the call has run past. Neither has an end
+    /// still to come, so neither can be the end of the recording. The stop for
+    /// a finished event fired on one idle tick of the mic and a minute of
+    /// quiet, and ended a call that was only a little quiet.
+    @Test("An event that is already over does not end the recording it names")
+    func overEventDoesNotEndTheRecording() {
+        let calendar = FakeCalendar()
+        let h = AutoRecordHarness(calendar: calendar) { $0.stopDelay = 60 * 60 }
+        calendar.match = .event(FakeCalendar.meeting(
+            id: "weekly", start: h.now.addingTimeInterval(-24 * 60 * 60)))
+        h.micActive = true
+        h.run(for: 20)
+        #expect(h.starts == [.micActivity])
+
+        h.run(for: 90)
+        h.micActive = false
+        h.run(for: 120 + AutoRecordController.calendarEndQuiet + 60)
+        #expect(h.stops.isEmpty, "A meeting that ended yesterday ended the recording.")
     }
 
     /// The event starts the recording on time; people join late. The mic

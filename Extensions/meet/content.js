@@ -1,10 +1,19 @@
-// Writes down who Google Meet shows as speaking, and when.
+// Writes down who Google Meet shows as speaking, and when, and which call it
+// is: the meeting code from the address and the tab's title, which Meet sets
+// to "Meet - " and the meeting's title.
 //
 // Meet outlines the tile of whoever is talking, or animates a small level
 // meter on it, and the tile carries the participant's id and name. This reads
 // those a few times a second and sends amanu every change, plus the current
 // state every few seconds, so that a timeline which stops means the tab
 // stopped rather than that somebody went on talking.
+//
+// The waiting room reports its call too, with nobody speaking: a recording
+// can start there, while the preview holds the microphone, and its folder is
+// named when it starts. What tells the waiting room from the page Meet leaves
+// after a call, which stays until the tab is closed, is whether the call's
+// tiles have appeared yet. That reads none of Meet's wording, so it works in
+// any language.
 //
 // Nothing here leans on Meet's class names, which change with every release:
 // tiles are found by `data-participant-id`, and "lit" means a coloured outline
@@ -14,8 +23,19 @@ const SCAN_MS = 250;
 // Shorter than amanu's `MeetSpeakers.stale`, with room for a throttled tab.
 const HEARTBEAT_MS = 4000;
 const TILE = "[data-participant-id]";
+// An id for this tab, made once for each page load. One connection relays
+// every Meet tab the browser has open, and a second tab can be on the same
+// call — the page Meet shows before joining, left open beside the joined one —
+// so the call's code alone does not tell amanu whose state a report is.
+const TAB = crypto.randomUUID();
 
 let inCall = false;
+// Whether this page's call has had tiles on screen. Until it has, the page is
+// the waiting room; once they have come and gone, the call is over.
+let joined = false;
+let page = location.pathname;
+// A meeting's own page: its code is the whole path.
+const MEETING_PAGE = /^\/[a-z]{3}-[a-z]{4}-[a-z]{3}$/i;
 let sentState = "";
 let sentAt = 0;
 
@@ -154,20 +174,32 @@ function send(speaking) {
   sentAt = now;
   // A rejected promise is a worker that is restarting; the next state gets through.
   Promise.resolve(
-    chrome.runtime.sendMessage({ t: now, meeting: location.pathname.slice(1), speaking }),
+    chrome.runtime.sendMessage({
+      t: now, meeting: location.pathname.slice(1), tab: TAB, title: document.title, speaking,
+    }),
   ).catch(() => {});
 }
 
 const timer = setInterval(() => {
   try {
+    // Meet moves from one meeting to another without loading a page.
+    if (location.pathname !== page) {
+      page = location.pathname;
+      joined = false;
+    }
     const { tiles, speaking } = scan();
     if (!tiles) {
-      // Out of the call — or never in it: the lobby has no tiles.
+      // Out of the call — or never in it: the lobby has no tiles. Two things
+      // here are reasoned, not seen: that the waiting room shows no tile that
+      // counts, and that the page Meet leaves after a call is not reloaded.
+      // Reloaded, it would report its call as a waiting room again.
       if (inCall) send([]);
       inCall = false;
+      if (!joined && MEETING_PAGE.test(page) && Date.now() - sentAt >= HEARTBEAT_MS) send([]);
       return;
     }
     inCall = true;
+    joined = true;
     const state = speaking.map((s) => s.id).sort().join("\n");
     if (state !== sentState || Date.now() - sentAt >= HEARTBEAT_MS) {
       if (state !== sentState) console.debug("amanu: speaking", speaking.map((s) => s.name));

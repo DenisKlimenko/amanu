@@ -42,6 +42,48 @@ struct MeetSpeakersTests {
         ])
     }
 
+    @Test("A state lasts until the next of its own call, however often another tab reports")
+    func anotherTabDoesNotCutAState() {
+        // One connection relays every Meet tab the browser has open, and a tab
+        // waiting in its lobby keeps reporting nobody speaking: here between
+        // every two reports of the call.
+        let turns = MeetSpeakers.turns(from: Self.events("""
+        {"t":1000,"meeting":"aaa-bbbb-ccc","speaking":[{"id":"a","name":"Ann"}]}
+        {"t":2000,"meeting":"ddd-eeee-fff","speaking":[]}
+        {"t":5000,"meeting":"aaa-bbbb-ccc","speaking":[{"id":"a","name":"Ann"}]}
+        {"t":6000,"meeting":"ddd-eeee-fff","speaking":[]}
+        {"t":9000,"meeting":"aaa-bbbb-ccc","speaking":[{"id":"b","name":"Bob"}]}
+        {"t":10000,"meeting":"ddd-eeee-fff","speaking":[]}
+        {"t":14000,"meeting":"ddd-eeee-fff","speaking":[]}
+        """))
+        // Ann's tile is lit from 1000 to 9000, whatever the other tab says in
+        // between. Bob's last report is not made longer by the other tab's
+        // later ones: it runs out at the heartbeat's limit.
+        #expect(turns == [
+            .init(id: "a", name: "Ann", startMs: 1000, endMs: 5000),
+            .init(id: "a", name: "Ann", startMs: 5000, endMs: 9000),
+            .init(id: "b", name: "Bob", startMs: 9000, endMs: 9000 + MeetSpeakers.stale),
+        ])
+    }
+
+    @Test("A state lasts until the next of its own tab, even when another is on the same call")
+    func aSecondTabOnTheSameCallDoesNotCutAState() {
+        // The pre-join page of a meeting can stay open beside the joined call,
+        // reporting the same meeting code with nobody speaking between every
+        // two reports of the call.
+        let turns = MeetSpeakers.turns(from: Self.events("""
+        {"t":1000,"meeting":"aaa-bbbb-ccc","tab":"call","speaking":[{"id":"a","name":"Ann"}]}
+        {"t":2000,"meeting":"aaa-bbbb-ccc","tab":"lobby","speaking":[]}
+        {"t":5000,"meeting":"aaa-bbbb-ccc","tab":"call","speaking":[{"id":"a","name":"Ann"}]}
+        {"t":6000,"meeting":"aaa-bbbb-ccc","tab":"lobby","speaking":[]}
+        {"t":9000,"meeting":"aaa-bbbb-ccc","tab":"call","speaking":[]}
+        """))
+        #expect(turns == [
+            .init(id: "a", name: "Ann", startMs: 1000, endMs: 5000),
+            .init(id: "a", name: "Ann", startMs: 5000, endMs: 9000),
+        ])
+    }
+
     @Test("Two far-end voices get a letter each and their Meet names; ours are left alone")
     func namesTheFarEnd() throws {
         let segments = [
@@ -160,9 +202,40 @@ struct MeetSpeakersTests {
             Date(timeIntervalSince1970: Double(Self.origin + ms) / 1000)
         }
 
-        #expect(MeetSpeakers.callsInProgress(in: dir, at: at(3000)) == ["aaa-bbbb-ccc", "pgo-onxr-iue"])
-        #expect(MeetSpeakers.callsInProgress(in: dir, at: at(22_000)) == ["pgo-onxr-iue"])
-        #expect(MeetSpeakers.callsInProgress(in: dir, at: at(20_000 + MeetSpeakers.stale + 1)) == [])
+        func codes(at ms: Int) -> Set<String> {
+            Set(MeetSpeakers.callsInProgress(in: dir, at: at(ms)).map(\.code))
+        }
+        #expect(codes(at: 3000) == ["aaa-bbbb-ccc", "pgo-onxr-iue"])
+        #expect(codes(at: 22_000) == ["pgo-onxr-iue"])
+        #expect(codes(at: 20_000 + MeetSpeakers.stale + 1) == [])
+    }
+
+    @Test("A call's title is Meet's, read from the tab, and never just its code")
+    func callTitles() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-titles-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try """
+        {"t":\(Self.origin),"meeting":"aaa-bbbb-ccc","title":"Meet - aaa-bbbb-ccc","speaking":[]}
+        {"t":\(Self.origin + 1000),"meeting":"pgo-onxr-iue","title":"Meet - Sprint demo","speaking":[]}
+        {"t":\(Self.origin + 2000),"meeting":"aaa-bbbb-ccc","title":"Meet - Team sync","speaking":[]}
+        """.write(to: dir.appendingPathComponent("\(Self.origin).jsonl"),
+                  atomically: true, encoding: .utf8)
+
+        // The most recent report first, and its title for the call.
+        #expect(MeetSpeakers.callsInProgress(
+            in: dir, at: Date(timeIntervalSince1970: Double(Self.origin + 3000) / 1000)) == [
+            .init(code: "aaa-bbbb-ccc", title: "Team sync"),
+            .init(code: "pgo-onxr-iue", title: "Sprint demo"),
+        ])
+        #expect(MeetSpeakers.title(fromTab: "Meet - Office hours", code: "pgo-onxr-iue")
+            == "Office hours")
+        #expect(MeetSpeakers.title(fromTab: "Meet - pgo-onxr-iue", code: "pgo-onxr-iue") == nil)
+        #expect(MeetSpeakers.title(fromTab: "Meet", code: "pgo-onxr-iue") == nil)
+        #expect(MeetSpeakers.title(fromTab: "Google Meet", code: "pgo-onxr-iue") == nil)
+        #expect(MeetSpeakers.title(fromTab: nil, code: "pgo-onxr-iue") == nil)
     }
 
     @Test("The host writes each framed message as one line, and skips what isn't JSON")

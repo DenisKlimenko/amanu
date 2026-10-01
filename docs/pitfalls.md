@@ -528,6 +528,10 @@ reasoning alone. Worth knowing before trusting any of them in front of someone.
   current user. Google appears not to hand declined events to the Mac at all —
   a declined invitation overlapping a recording on 30 September 2026 was not
   among the candidates — so on a Google calendar the check has never run.
+- **Meet's title.** A call no event links to is named after the tab's title
+  after `Meet - `, which was seen on one call on 1 October 2026. Whether Meet
+  writes it the same way in every language, or already in the waiting room,
+  is not known; a tab that does not start that way gives no title.
 
 ## Bold in the release notes cannot cross a line wrap
 

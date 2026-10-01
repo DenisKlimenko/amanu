@@ -35,6 +35,9 @@ struct MeetingContext {
     var calendarName: String?
     var account: String?
     var matchedBy: CalendarWatcher.MatchedBy?
+    /// Whether `title` is the one Meet showed for a call no event links to,
+    /// which has no event behind it to say how it was matched.
+    var titleFromMeet = false
 
     static let empty = MeetingContext()
 
@@ -73,6 +76,14 @@ struct MeetingContext {
         matchedBy = meeting?.matchedBy
     }
 
+    init(match: CalendarWatcher.Match?, app: String?, appFamilies: [String] = []) {
+        self.init(meeting: match?.event, app: app, appFamilies: appFamilies)
+        if case .meetTitle(let title)? = match {
+            self.title = title
+            titleFromMeet = true
+        }
+    }
+
     /// The part of a session folder's name that follows the timestamp, or nil
     /// when nothing is known. Title first because that's what you scan for;
     /// the app in brackets after it, and on its own when there's no title —
@@ -104,6 +115,7 @@ struct MeetingContext {
         if let calendarName { calendar["calendar_name"] = calendarName }
         if let account { calendar["account"] = account }
         if let matchedBy { calendar["matched_by"] = matchedBy.rawValue }
+        if titleFromMeet { calendar["title_from"] = "meet" }
         if !calendar.isEmpty { fields["calendar"] = calendar }
 
         return fields

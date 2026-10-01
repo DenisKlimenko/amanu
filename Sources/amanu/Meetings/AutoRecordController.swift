@@ -36,7 +36,7 @@ extension RecordingSession: AutoRecordedSession {}
 @MainActor
 protocol MeetingCalendar: AnyObject {
     func justStarted(now: Date, window: TimeInterval) -> [CalendarWatcher.Meeting]
-    func bestMatch(for date: Date) -> CalendarWatcher.Meeting?
+    func bestMatch(for date: Date) -> CalendarWatcher.Match?
 }
 
 extension CalendarWatcher: MeetingCalendar {}
@@ -234,7 +234,14 @@ final class AutoRecordController {
         phase = .standingDown(.manualStop)
         micActiveSince = nil
         currentEventEnd = nil
-        if let event = calendar?.bestMatch(for: now()) {
+        let now = now()
+        // A Meet call's room is looked for a week either way, and an
+        // occurrence marked handled is one the calendar never starts, so a
+        // call stopped today would cost next week's meeting its start. Only
+        // an event that has begun, or begins within the window, is the one
+        // being dealt with.
+        if let event = calendar?.bestMatch(for: now)?.event,
+           event.start < now.addingTimeInterval(CalendarWatcher.window) {
             markHandled(event)
         }
     }
@@ -384,10 +391,15 @@ final class AutoRecordController {
                 "\(mic.names.joined(separator: ", ")) держит микрофон \(Int(held)) с")
             return
         }
-        let event = calendar?.bestMatch(for: now)
-        let context = MeetingContext(meeting: event, app: mic.names.first, appFamilies: mic.families)
+        let match = calendar?.bestMatch(for: now)
+        let context = MeetingContext(match: match, app: mic.names.first, appFamilies: mic.families)
         if attemptStart(.micActivity, context, now: now) {
-            currentEventEnd = event?.end
+            // The event can already be over: a weekly room's meeting from
+            // another day names a call made in the room today, and so does a
+            // slot the call has run past. Its end is then no end of this call,
+            // and taken for one it stopped a live call at its first quiet
+            // minute, and threw the recording away if that came early enough.
+            currentEventEnd = match?.event.flatMap { $0.end > now ? $0.end : nil }
             lastDecision = localised(
                 "started from mic activity (\(mic.names.first ?? "call app"))",
                 "начала по микрофону (\(mic.names.first ?? "приложение звонка"))")

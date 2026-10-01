@@ -741,7 +741,7 @@ final class AppController {
             callApps: settings.callApps, ignoring: settings.ignoreApps
         )
         return MeetingContext(
-            meeting: calendar?.bestMatch(for: Date()),
+            match: calendar?.bestMatch(for: Date()),
             app: mic.names.first,
             appFamilies: mic.families
         )

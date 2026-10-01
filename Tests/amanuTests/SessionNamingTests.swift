@@ -152,7 +152,13 @@ struct SessionNamingTests {
     private static func pick(
         _ events: [CalendarWatcher.Meeting], at minutes: Double, meet codes: Set<String> = []
     ) -> CalendarWatcher.Meeting? {
-        CalendarWatcher.pick(from: events, duringMeet: codes, at: time(minutes))
+        match(events, at: minutes, meet: codes.map { MeetSpeakers.Call(code: $0, title: nil) })?.event
+    }
+
+    private static func match(
+        _ events: [CalendarWatcher.Meeting], at minutes: Double, meet calls: [MeetSpeakers.Call]
+    ) -> CalendarWatcher.Match? {
+        CalendarWatcher.pick(from: events, duringMeet: calls, at: time(minutes))
     }
 
     /// An out-of-office block covers the working day and has nobody else in
@@ -288,9 +294,9 @@ struct SessionNamingTests {
         ]
         func name(
             _ day: [CalendarWatcher.Meeting], at minutes: Double,
-            app: String? = nil, meet: Set<String> = []
+            app: String? = nil, meet calls: [MeetSpeakers.Call] = []
         ) -> String? {
-            MeetingContext(meeting: Self.pick(day, at: minutes, meet: meet), app: app).folderSuffix
+            MeetingContext(match: Self.match(day, at: minutes, meet: calls), app: app).folderSuffix
         }
         // Inside the out-of-office block, and a minute after it ended.
         #expect(name(thirtieth, at: -10) == nil)
@@ -298,12 +304,67 @@ struct SessionNamingTests {
         #expect(name(thirtieth, at: 5 * 60 + 26) == nil)
         #expect(name(thirtieth, at: 7 * 60 + 21, app: "FaceTime") == "FaceTime")
         // The one that was named right, by its Meet call.
-        #expect(name(thirtieth, at: 6 * 60 + 2, app: "Dia", meet: ["pgo-onxr-iue"])
+        #expect(name(thirtieth, at: 6 * 60 + 2, app: "Dia",
+                     meet: [.init(code: "pgo-onxr-iue", title: "Sprint demo")])
             == "Sprint demo (Dia)")
-        // Meet calls no event links to: one inside a focus block, one eight
+        // Meet calls no event links to: one whose tab showed only its code,
+        // inside a focus block, and one whose tab showed its title, eight
         // minutes before another.
-        #expect(name(first, at: 63, app: "Dia", meet: ["aaa-bbbb-ccc"]) == "Dia")
-        #expect(name(first, at: 3 * 60 + 52, app: "Dia", meet: ["ddd-eeee-fff"]) == "Dia")
+        #expect(name(first, at: 63, app: "Dia", meet: [.init(code: "aaa-bbbb-ccc", title: nil)])
+            == "Dia")
+        #expect(name(first, at: 3 * 60 + 52, app: "Dia",
+                     meet: [.init(code: "ddd-eeee-fff", title: "Office hours")])
+            == "Office hours (Dia)")
+    }
+
+    /// Google appears not to hand declined events to the Mac at all, so a
+    /// declined meeting joined after all has no event to be found by.
+    @Test("A Meet call no event links to takes the title Meet shows for it")
+    func meetTitleNamesWhatTheCalendarLacks() {
+        let match = Self.match(
+            [], at: 0, meet: [.init(code: "abc-defg-hij", title: "Office hours")])
+        guard case .meetTitle(let title)? = match else {
+            Issue.record("Meet's title was not used")
+            return
+        }
+        #expect(title == "Office hours")
+    }
+
+    @Test("Meet's title beats an event that time alone would choose")
+    func meetTitleBeatsTime() {
+        let match = Self.match(
+            [Self.event("Sprint demo")], at: 1,
+            meet: [.init(code: "abc-defg-hij", title: "Office hours")])
+        guard case .meetTitle? = match else {
+            Issue.record("a guess from the time beat what Meet says")
+            return
+        }
+    }
+
+    @Test("The event a Meet call links to beats Meet's own title for it")
+    func linkedEventBeatsMeetTitle() {
+        let match = Self.match(
+            [Self.event("Sprint demo", meet: ["pgo-onxr-iue"])], at: 1,
+            meet: [.init(code: "pgo-onxr-iue", title: "Sprint demo, renamed")])
+        #expect(match?.event?.title == "Sprint demo")
+        #expect(match?.event?.matchedBy == .meet)
+    }
+
+    @Test("A Meet call whose tab shows only its code leaves the choice to time")
+    func codeOnlyTitleLeavesTime() {
+        let match = Self.match(
+            [Self.event("Sprint demo")], at: 1, meet: [.init(code: "abc-defg-hij", title: nil)])
+        #expect(match?.event?.title == "Sprint demo")
+    }
+
+    @Test("A title from Meet names the folder, and meta.json says where it came from")
+    func meetTitleInFolderAndMeta() throws {
+        let context = MeetingContext(match: .meetTitle("Office hours"), app: "Dia")
+        #expect(context.folderSuffix == "Office hours (Dia)")
+        let calendar = try #require(context.metaFields["calendar"] as? [String: Any])
+        #expect(calendar["title"] as? String == "Office hours")
+        #expect(calendar["title_from"] as? String == "meet")
+        #expect(calendar["matched_by"] == nil)
     }
 
     @Test("A Meet code is read out of Google's invitation text or a bare link")

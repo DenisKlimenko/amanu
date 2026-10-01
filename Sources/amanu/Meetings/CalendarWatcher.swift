@@ -57,6 +57,19 @@ final class CalendarWatcher {
         case time
     }
 
+    /// What a recording is named after.
+    enum Match {
+        /// An event in the calendar.
+        case event(Meeting)
+        /// The title Meet shows for a call that no event on the Mac links to.
+        case meetTitle(String)
+
+        var event: Meeting? {
+            if case .event(let event) = self { return event }
+            return nil
+        }
+    }
+
     private let store = EKEventStore()
     private(set) var authorized = false
 
@@ -108,17 +121,18 @@ final class CalendarWatcher {
     /// the nearest occurrence of anything held weekly or fortnightly.
     static let roomReach: TimeInterval = 7 * 24 * 60 * 60
 
-    /// The event that best describes a recording started at `date` — used to
-    /// name the session folder even when the recording began some other way.
-    func bestMatch(for date: Date) -> Meeting? {
+    /// What best names a recording started at `date` — used to name the
+    /// session folder even when the recording began some other way.
+    func bestMatch(for date: Date) -> Match? {
         let calls = MeetSpeakers.callsInProgress(at: date)
         // Only a Meet call looks past the window, for its room's meeting.
         let reach = calls.isEmpty ? Self.window : Self.roomReach
         return Self.pick(from: meetings(around: date, slack: reach), duringMeet: calls, at: date)
     }
 
-    /// Which event a recording started at `date` belongs to, if any; section 3
-    /// of `docs/specs/2026-10-01-calendar-meetings-design.md` gives the rule.
+    /// What a recording started at `date` is named after, if anything;
+    /// section 3 of `docs/specs/2026-10-01-calendar-meetings-design.md` gives
+    /// the rule.
     ///
     /// A Meet call in progress is proof rather than a guess. The event that
     /// links to it is the one, in whichever calendar, declined or not, even
@@ -126,30 +140,40 @@ final class CalendarWatcher {
     /// nearest within `roomReach`. An event that links to another call is
     /// never the one.
     ///
-    /// Without proof, time decides, and only for an event that is `guessable`.
-    /// The recording must have begun no more than `early` before the event's
+    /// When no event links to the call, the title Meet shows for it is next,
+    /// ahead of any guess from the time, since it is Meet saying what this
+    /// call is. It names a declined Google meeting, which Google appears not
+    /// to hand the Mac, and a call whose invitation went to an account the
+    /// Mac lacks.
+    ///
+    /// Otherwise time decides, and only for an event that is `guessable`. The
+    /// recording must have begun no more than `early` before the event's
     /// start, no more than `window` after it, and before its end. The nearest
     /// start wins either way: taking the earliest used to hand recordings to
     /// the long block. When nothing matches, the folder is named after the app
     /// alone, since an honest "FaceTime" beats a wrong title.
     static func pick(
-        from events: [Meeting], duringMeet calls: Set<String>, at date: Date
-    ) -> Meeting? {
-        let linked = events.filter { !$0.meetCodes.isDisjoint(with: calls) }
+        from events: [Meeting], duringMeet calls: [MeetSpeakers.Call], at date: Date
+    ) -> Match? {
+        let codes = Set(calls.map(\.code))
+        let linked = events.filter { !$0.meetCodes.isDisjoint(with: codes) }
         let around = linked.filter {
             $0.end > date.addingTimeInterval(-window) && $0.start < date.addingTimeInterval(window)
         }
         if var event = nearest(around, to: date) ?? nearest(linked, to: date) {
             event.matchedBy = .meet
-            return event
+            return .event(event)
+        }
+        if let title = calls.lazy.compactMap(\.title).first {
+            return .meetTitle(title)
         }
         return nearest(events.filter {
             $0.guessable
-                && (calls.isEmpty || $0.meetCodes.isEmpty)
+                && (codes.isEmpty || $0.meetCodes.isEmpty)
                 && date >= $0.start.addingTimeInterval(-early)
                 && date <= $0.start.addingTimeInterval(window)
                 && date < $0.end
-        }, to: date)
+        }, to: date).map(Match.event)
     }
 
     private static func nearest(_ events: [Meeting], to date: Date) -> Meeting? {

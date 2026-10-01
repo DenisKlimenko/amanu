@@ -38,8 +38,21 @@ change of speaker is logged there. amanu writes each connection's timeline to
 reports a line like `Meet named them A → …`, and `speakers.json` records those
 names with `"source": "meet"`.
 
-The timeline also carries the call's meeting code. A recording that starts
-during a call is named after the calendar event that links to that call, in
-whichever calendar it is, and never after an event that links to another
-call. `meta.json` then says `"matched_by": "meet"` under `calendar`, next to
-the calendar's name and account.
+The timeline also carries the call's meeting code and the tab's title, from
+the waiting room on. A recording can start there, while the preview holds the
+microphone, and its folder is named when it starts. The extension reports a
+meeting page until the call's tiles first appear, then while they are on
+screen, and nothing once they have gone. The page Meet leaves after a call
+says nothing, however long it stays open.
+
+A recording that starts during a call is named after the calendar event that
+links to that call, in whichever calendar it is, and never after an event that
+links to another call. If none around the start does, it takes the nearest
+one within a week: a recurring meeting's room used on another day. `meta.json`
+then says `"matched_by": "meet"` under `calendar`, next to the calendar's name
+and account. When no event links to the call, the folder takes the title Meet
+shows for it, the tab's title after `Meet - `, and `meta.json` says
+`"title_from": "meet"` instead. A tab that shows only the meeting code gives
+no title, and time or the app names the recording. With both `calendar` and
+`auto_record.calendar` off, the calendar is not read, so neither a linked event
+nor Meet's title names a recording.

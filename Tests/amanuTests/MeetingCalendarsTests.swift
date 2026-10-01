@@ -62,8 +62,8 @@ struct MeetingCalendarsTests {
     func meetLooksPastTheChoice() {
         let picked = CalendarWatcher.pick(
             from: [Self.demo(chosen: false, meet: ["pgo-onxr-iue"])],
-            duringMeet: ["pgo-onxr-iue"], at: Self.start)
-        #expect(picked?.matchedBy == .meet)
+            duringMeet: [.init(code: "pgo-onxr-iue", title: nil)], at: Self.start)
+        #expect(picked?.event?.matchedBy == .meet)
     }
 
     @Test("Every box is ticked while the setting is absent, and only the listed ones after")

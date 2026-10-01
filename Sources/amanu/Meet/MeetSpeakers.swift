@@ -14,9 +14,10 @@ import Foundation
 /// second opinion about the same thing, not a better one.
 enum MeetSpeakers {
     /// One state of the call: who Meet showed as speaking from `t` on, until
-    /// the next state. The extension repeats the current state every few
-    /// seconds, so a gap longer than `stale` means it stopped reporting — a
-    /// closed tab, a crashed browser — rather than that someone kept talking.
+    /// the next state of the same call. The extension repeats the current
+    /// state every few seconds, so a gap longer than `stale` means it stopped
+    /// reporting — a closed tab, a crashed browser — rather than that someone
+    /// kept talking.
     struct Event: Decodable {
         struct Speaker: Decodable {
             let id: String
@@ -30,14 +31,26 @@ enum MeetSpeakers {
         /// The call this state belongs to: the meeting code from the tab's
         /// address. One connection relays every Meet tab the browser has open.
         let meeting: String?
+        /// The tab that reported it: an id the extension makes once for each
+        /// page load. Two tabs can be on one call — the page Meet shows
+        /// before joining can stay open beside the call it led to — and each
+        /// keeps reporting a state of its own. Absent from reports made
+        /// before the extension sent it, which all count as one tab.
+        let tab: String?
+        /// The tab's title, which is `Meet - ` and the meeting's title once
+        /// Meet knows it — see `title(fromTab:code:)`. Absent from reports
+        /// made before the extension sent it.
+        let title: String?
         let speaking: [Speaker]
 
-        private enum CodingKeys: String, CodingKey { case t, meeting, speaking }
+        private enum CodingKeys: String, CodingKey { case t, meeting, tab, title, speaking }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             t = try container.decode(Int.self, forKey: .t)
             meeting = try container.decodeIfPresent(String.self, forKey: .meeting)
+            tab = try container.decodeIfPresent(String.self, forKey: .tab)
+            title = try container.decodeIfPresent(String.self, forKey: .title)
             // A "left the call" message carries no speakers at all, which is
             // exactly what it means.
             speaking = try container.decodeIfPresent([Speaker].self, forKey: .speaking) ?? []
@@ -66,10 +79,22 @@ enum MeetSpeakers {
     // MARK: - the timeline
 
     /// Turns from one connection's events, in the order they were written.
+    ///
+    /// A state lasts until the next state from the same tab on the same call,
+    /// not from any other tab or call: one connection carries every Meet tab
+    /// the browser has open, and a tab waiting in its lobby keeps reporting
+    /// nobody speaking, which would otherwise end the turn of whoever is
+    /// talking in a call in another tab at each of its reports. That lobby can
+    /// be this very call's — the page Meet shows before joining, left open
+    /// beside it — so the call's code alone does not tell whose state a report
+    /// is. Reports that name no call, or no tab, all belong to one, and follow
+    /// one another as they always did.
     static func turns(from events: [Event]) -> [Turn] {
         var turns: [Turn] = []
         for (index, event) in events.enumerated() {
-            let next = index + 1 < events.count ? events[index + 1].t : event.t + stale
+            let next = events[(index + 1)...]
+                .first { $0.meeting == event.meeting && $0.tab == event.tab }?.t
+                ?? event.t + stale
             let end = min(next, event.t + stale)
             guard end > event.t else { continue }
             for speaker in event.speaking where speaker.`self` != true {
@@ -89,18 +114,48 @@ enum MeetSpeakers {
         }
     }
 
-    /// The Meet calls this Mac is in at `now`, by meeting code: those the
-    /// extension has reported within `stale`. A recording starting now uses
-    /// them to find its own calendar event among everyone else's.
+    /// A Meet call this Mac is in: its meeting code, and the title Meet shows
+    /// for it when it shows one.
+    struct Call: Hashable {
+        let code: String
+        let title: String?
+    }
+
+    /// The Meet calls this Mac is in at `now`, most recently reported first:
+    /// those the extension has reported within `stale`, from the call or from
+    /// its waiting room. A recording starting now uses them to find its own
+    /// calendar event among everyone else's, and Meet's title where the
+    /// calendar has none.
     ///
     /// A call left less than `stale` ago still counts, because the extension's
     /// goodbye looks like a quiet heartbeat. If two calls back to back ever get
     /// mixed up, the message needs a "left" of its own.
-    static func callsInProgress(in dir: URL = directory, at now: Date) -> Set<String> {
+    static func callsInProgress(in dir: URL = directory, at now: Date) -> [Call] {
         let nowMs = Int(now.timeIntervalSince1970 * 1000)
         let recent = connections(in: dir, from: nowMs - stale, to: nowMs).joined()
             .filter { $0.t > nowMs - stale && $0.t <= nowMs }
-        return Set(recent.compactMap { $0.meeting?.lowercased() }.filter { !$0.isEmpty })
+            .sorted { $0.t > $1.t }
+        var calls: [Call] = []
+        for event in recent {
+            guard let code = event.meeting?.lowercased(), !code.isEmpty,
+                  !calls.contains(where: { $0.code == code })
+            else { continue }
+            calls.append(Call(code: code, title: title(fromTab: event.title, code: code)))
+        }
+        return calls
+    }
+
+    /// The meeting's title from the tab's, which Meet writes as `Meet - ` and
+    /// the title (seen during a call on 1 October 2026). Nothing else counts
+    /// as a title. A tab showing only the meeting code, or just `Meet`, says
+    /// nothing the code does not, and a wrong name is worse than the app's.
+    /// Whether Meet writes the prefix the same way in every language is not
+    /// known — `docs/pitfalls.md`.
+    static func title(fromTab tab: String?, code: String) -> String? {
+        let prefix = "Meet - "
+        guard let tab, tab.hasPrefix(prefix) else { return nil }
+        let title = tab.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
+        return title.isEmpty || title.lowercased() == code.lowercased() ? nil : title
     }
 
     /// The events of every connection that can hold something between two
