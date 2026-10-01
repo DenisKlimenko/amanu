@@ -82,14 +82,21 @@ enum SpeakerAttribution {
         else { return nil }
 
         // First pass: whichever track is louder over the utterance spoke it.
-        // A stretch where both read as silence stays undecided for now.
+        //
+        // An utterance the far end said nothing over is ours, however little
+        // of it reached the mic: the mix is only ever the two tracks, so the
+        // engine heard it through the mic. On a FaceTime call the mic hears
+        // us at −54 to −62 dBFS, under the floor, and a lower floor would not
+        // help — the far end, coming back out of the speakers, reads louder
+        // there than we do (2026.10.01-1323). Only a mic that recorded
+        // nothing leaves such an utterance undecided.
         var sides: [Side?] = segments.map { segment in
             guard segment.end > segment.start else { return nil }
             let me = micEnvelope.level(
                 from: segment.start - micOffset, to: segment.end - micOffset)
             let them = systemEnvelope.level(
                 from: segment.start - systemOffset, to: segment.end - systemOffset)
-            guard me > 0 || them > 0 else { return nil }
+            guard them > 0 else { return micEnvelope.isSilent ? nil : .me }
             return me > them ? .me : .them
         }
         guard sides.contains(where: { $0 != nil }) else { return nil }
@@ -98,18 +105,33 @@ enum SpeakerAttribution {
         // on the side that won. Nobody changes tracks halfway through a
         // meeting; the minority readings are the room mic hearing the far end
         // through the speakers.
+        //
+        // A reading of "them" votes only where the far end's track held
+        // speech for at least half the utterance. The far end's own voice
+        // fills the utterances it speaks; one it spoke over only part of is
+        // as likely to be us, with the far end answering over us — and when
+        // the mic hears us under the floor, the far end is all it reads as.
+        // With the rule above alone, a call of 30 September 2026
+        // (2026.09.30-1526) kept our voice by four utterances to three. The
+        // voice is still counted in, so one heard only that way stays on the
+        // far side.
         var majority: [String: (me: Int, them: Int)] = [:]
         for (segment, side) in zip(segments, sides) {
             guard let side, let label = segment.speaker else { continue }
             var tally = majority[label] ?? (0, 0)
-            if side == .me { tally.me += 1 } else { tally.them += 1 }
+            if side == .me {
+                tally.me += 1
+            } else if systemEnvelope.share(
+                from: segment.start - systemOffset, to: segment.end - systemOffset) >= 0.5 {
+                tally.them += 1
+            }
             majority[label] = tally
         }
         let settled = majority.mapValues { $0.me > $0.them ? Side.me : Side.them }
 
         // Utterances the engine gave no label to have no voice to be settled
-        // with, so they keep their own reading — or, where both tracks were
-        // silent under speech, the side that spoke last. That is a dropout,
+        // with, so they keep their own reading — or, where neither track
+        // could have carried it, the side that spoke last. That is a dropout,
         // not a new speaker.
         var previous: Side = .them
         for i in sides.indices {
@@ -247,17 +269,28 @@ enum SpeakerAttribution {
         /// fall outside the track (it started later, or ended earlier) read as
         /// silence, which is exactly right — nothing of this speaker is there.
         func level(from start: TimeInterval, to end: TimeInterval) -> Double {
-            let first = max(0, Int(start / SpeakerAttribution.bucket))
-            let last = min(buckets.count - 1, Int(end / SpeakerAttribution.bucket))
-            guard first <= last, first < buckets.count else { return 0 }
+            guard let span = span(from: start, to: end) else { return 0 }
             var sum: Double = 0
             // Buckets under the absolute floor contribute nothing: a track
             // with only room noise under this utterance must lose to one with
             // speech, however the two normalize.
-            for i in first...last where buckets[i] >= SpeakerAttribution.speechFloor {
+            for i in span where buckets[i] >= SpeakerAttribution.speechFloor {
                 sum += Double(buckets[i])
             }
-            return sum / Double(last - first + 1) / Double(reference)
+            return sum / Double(span.count) / Double(reference)
+        }
+
+        /// How much of a time range held speech, from 0 to 1.
+        func share(from start: TimeInterval, to end: TimeInterval) -> Double {
+            guard let span = span(from: start, to: end) else { return 0 }
+            let speech = span.filter { buckets[$0] >= SpeakerAttribution.speechFloor }
+            return Double(speech.count) / Double(span.count)
+        }
+
+        private func span(from start: TimeInterval, to end: TimeInterval) -> ClosedRange<Int>? {
+            let first = max(0, Int(start / SpeakerAttribution.bucket))
+            let last = min(buckets.count - 1, Int(end / SpeakerAttribution.bucket))
+            return first <= last ? first...last : nil
         }
     }
 }

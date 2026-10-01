@@ -214,6 +214,9 @@ struct SpeakerAttributionTests {
     /// ever the two tracks: whatever the engine heard came in through the
     /// system one. On 30 September 2026 the mic went dead on a route change
     /// for a whole call, and refusing here left the far end as "spk:0".
+    ///
+    /// That holds where the far end was silent too. An utterance under
+    /// nothing at all did not come in through a mic that heard nothing.
     @Test("A silent mic puts every voice on the far side")
     func silentMicMeansTheFarSide() throws {
         let f = try Fixture()
@@ -221,9 +224,65 @@ struct SpeakerAttributionTests {
         try Self.writeTrack(to: silent, seconds: 10, bursts: [], gain: 0)
         #expect(
             SpeakerAttribution.resolve(
-                segments: [Self.seg(3.1, 4.9, "A"), Self.seg(6.1, 7.9, "A")],
+                segments: [
+                    Self.seg(3.1, 4.9, "A"), Self.seg(6.1, 7.9, "A"), Self.seg(8.2, 9.4, "A"),
+                ],
                 mic: silent, micOffset: 0, system: f.system, systemOffset: 0.5)
-                == ["them", "them"])
+                == ["them", "them", "them"])
+    }
+
+    /// A FaceTime call as its tracks record it: us at about −55 dBFS on the
+    /// mic, under the speech floor, and the far end at about −23 on its own
+    /// track, which is silent while we talk.
+    private static func faceTimeCall(
+        us: [(Double, Double)], farEnd: [(Double, Double)], _ segments: [TranscriptSegment]
+    ) throws -> [String]? {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-facetime-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let mic = dir.appendingPathComponent("mic.caf")
+        let system = dir.appendingPathComponent("system.caf")
+        try writeTrack(to: mic, seconds: 10, bursts: us, gain: 0.0025)
+        try writeTrack(to: system, seconds: 10, bursts: farEnd, gain: 0.1)
+        return SpeakerAttribution.resolve(
+            segments: segments, mic: mic, micOffset: 0, system: system, systemOffset: 0)
+    }
+
+    /// The mix is only ever the two tracks, so an utterance the far end said
+    /// nothing over came in through the mic, however quietly the mic heard
+    /// it. On 1 October 2026 (`2026.10.01-1323`) our voice read −54 to
+    /// −62 dBFS on the mic: of nine utterances, five cleared the floor on
+    /// neither track and went undecided, one read as ours, and the three the
+    /// far end spoke over read as theirs and put the whole voice on its side.
+    @Test("Our voice under the speech floor is still ours while the far end is silent")
+    func quietMicWhileTheFarEndIsSilent() throws {
+        let names = try Self.faceTimeCall(
+            us: [(0, 1.5), (6, 8), (8.5, 9.5)], farEnd: [(2, 5), (7, 7.4)],
+            [
+                Self.seg(0.1, 1.4, "A"), Self.seg(2.1, 4.9, "B"),
+                Self.seg(6.1, 7.9, "A"), Self.seg(8.6, 9.4, "A"),
+            ])
+        #expect(names == ["me", "them", "me", "me"])
+    }
+
+    /// An utterance the far end spoke over only part of reads as theirs when
+    /// the mic heard us under the floor, and a voice that answered over them
+    /// more often than it spoke alone was outvoted onto their side. The far
+    /// end's own utterances are the ones its track fills: on three calls of
+    /// 30 September and 1 October 2026 the system track held speech for 85–94%
+    /// of a far-end utterance, by the median, and for 1–40% of each of ours
+    /// that it spoke over.
+    @Test("The far end speaking over part of an utterance does not outvote the rest")
+    func talkingOverUsDoesNotOutvoteUs() throws {
+        let names = try Self.faceTimeCall(
+            us: [(0, 1.5), (6, 7.5), (8, 9.5)], farEnd: [(2, 5), (6.5, 6.8), (9, 9.3)],
+            [
+                Self.seg(0.1, 1.4, "A"), Self.seg(2.1, 4.9, "B"),
+                Self.seg(6.1, 7.4, "A"), Self.seg(8.1, 9.4, "A"),
+            ])
+        #expect(names == ["me", "them", "me", "me"])
     }
 
     /// The other way round it would be a guess. A system track with nothing
