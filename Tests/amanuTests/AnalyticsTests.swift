@@ -394,7 +394,7 @@ struct AnalyticsCatalogueSettingsTests {
             switch entry.kind {
             case .toggle, .choice:
                 #expect(reportable[key] != nil, "\(key) is a toggle or a choice but not reportable")
-            case .text, .multilineText, .number, .list:
+            case .text, .multilineText, .number, .list, .calendars:
                 #expect(reportable[key] == nil, "\(key) is free-form and must not be reportable")
             }
         }
@@ -412,6 +412,7 @@ struct AnalyticsCatalogueSettingsTests {
             (["summary", "api_key_path"], "~/.config/amanu/keys/anthropic"),
             (["transcription", "language"], "lv"),
             (["auto_record", "apps"], ["us.zoom.xos"]),
+            (["calendars"], ["Work/someone@example.com"]),
             (["auto_record", "start_delay_seconds"], 12),
         ]
         for (path, value) in freeForm {

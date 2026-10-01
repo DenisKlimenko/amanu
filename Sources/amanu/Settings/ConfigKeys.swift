@@ -55,6 +55,7 @@ extension Config {
         case autoRecordIgnoreApps = "auto_record.ignore_apps"
         case systemAudio = "system_audio"
         case calendar
+        case calendars
         case dockIcon = "dock_icon"
         case menuBarIcon = "menu_bar_icon"
         case window

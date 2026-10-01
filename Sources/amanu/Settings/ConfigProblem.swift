@@ -98,7 +98,7 @@ extension Config {
                 expected = (found as? String).map(options.contains) == true
                     ? nil
                     : localised("one of ", "одно из: ") + options.joined(separator: ", ")
-            case .list?:
+            case .list?, .calendars?:
                 expected = found as? [String] != nil
                     ? nil : localised("a list of strings", "список строк")
             case .text?, .multilineText?, nil:

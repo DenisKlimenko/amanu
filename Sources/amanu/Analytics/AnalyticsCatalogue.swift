@@ -35,7 +35,8 @@ enum AnalyticsCatalogue {
             switch entry.kind {
             case .toggle: reportable[key] = .toggle
             case .choice(let allowed): reportable[key] = .choice(allowed)
-            case .number, .text, .multilineText, .list: continue
+            // Calendars are named after accounts, which are email addresses.
+            case .number, .text, .multilineText, .list, .calendars: continue
             }
         }
         return reportable

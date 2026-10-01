@@ -467,7 +467,7 @@ struct SettingsSchemaTests {
                     let value = entry.defaultValue as? String
                     #expect(value != nil && options.contains(value!),
                             "\(entry.path) default isn't one of its options")
-                case .text, .multilineText, .list:
+                case .text, .multilineText, .list, .calendars:
                     #expect(entry.defaultValue is String,
                             "\(entry.path) default should be shown as text")
                 }
@@ -512,6 +512,8 @@ struct SettingsWindowTests {
                 #expect(popup?.itemTitles == options, "\(entry.path) is missing options")
             case .number, .text, .multilineText, .list:
                 #expect(control is NSTextField, "\(entry.path) should be a text field")
+            case .calendars:
+                #expect(control is CalendarChecklist, "\(entry.path) should be a checklist")
             }
         }
     }

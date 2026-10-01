@@ -319,6 +319,13 @@ only values that differ from the defaults. A compact example:
   `transcript_echo_filter` removes proven duplicate far-end speech later;
   `system_audio` is `app` or `all`; `calendar` controls meeting context; and
   `user_name` replaces “me” in named transcripts.
+- `calendars` lists the calendars a recording may be named after by the time
+  it starts, or started from with `auto_record.calendar`, each written as its
+  account and its name the way Calendar.app's sidebar groups them —
+  `"Work/me@example.com"`. Absent, every calendar counts; `[]` means none.
+  A calendar added to the Mac later stays out until it is ticked under
+  Settings → Advanced → Meeting calendars, and a Meet call finds its own
+  event in any calendar whatever the list says.
 - `interface_language` is `auto`, `en`, or `ru`. `dock_icon`, `menu_bar_icon`,
   and `window` control where Amanu appears.
 

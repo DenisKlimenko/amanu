@@ -21,6 +21,9 @@ enum SettingsSchema {
         case multilineText
         /// A comma-separated list, stored as an array of strings.
         case list
+        /// Calendars, rendered as a checkbox for each one on the Mac and
+        /// stored as an array of `MeetingCalendars.key` strings.
+        case calendars
 
         var isMultiline: Bool {
             if case .multilineText = self { return true }
@@ -452,6 +455,14 @@ enum SettingsSchema {
                       "Называет встречу по событию и запоминает участников. Это не то же самое, что "
                           + "начинать запись по событию."),
                   .toggle, default: true, needsRestart: true),
+            Entry(["calendars"],
+                  localised("Meeting calendars", "Календари встреч"),
+                  localised(
+                      "Which calendars can name a recording by the time it starts, or start one. A Meet call finds its own event in any calendar.",
+                      "События каких календарей могут назвать запись по времени её начала или начать её. Звонок в "
+                          + "Meet находит своё событие в любом календаре."),
+                  .calendars,
+                  describedAs: localised("every calendar", "все календари")),
             Entry(["speaker_names", "enabled"],
                   localised("Put names to speakers", "Подставлять имена говорящих"),
                   localised(
@@ -632,6 +643,8 @@ enum SettingsSchema {
         case choice(String)
         /// Whatever is in a text field, untrimmed.
         case text(String)
+        /// The calendars ticked, as `MeetingCalendars.key` writes them.
+        case calendars([String])
     }
 
     enum Resolution {
@@ -708,6 +721,11 @@ enum SettingsSchema {
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
             return items.isEmpty ? .clear : .set(items)
+
+        // Never cleared, even with every box ticked: a list of every calendar
+        // today is not the same answer as whatever calendars there will be.
+        case (.calendars(let ticked), .calendars):
+            return .set(ticked)
 
         default:
             return .invalid

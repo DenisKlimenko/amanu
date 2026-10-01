@@ -467,6 +467,13 @@ enum Config {
         flag(.calendar, in: load())
     }
 
+    /// The calendars a recording may be named after by its time, each written
+    /// the way `MeetingCalendars.key` writes it. Nil when the file names
+    /// none, which means every calendar; an empty list means none.
+    static func meetingCalendars() -> [String]? {
+        list(.calendars, in: load())
+    }
+
     /// Show amanu in the Dock (and in ⌘-Tab) rather than running as a
     /// menu-bar-only accessory. On by default: the menu bar hides its status
     /// item when it runs out of room, and a recorder whose only indicator can

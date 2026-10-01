@@ -34,15 +34,20 @@ final class CalendarWatcher {
         var matchedBy: MatchedBy = .time
         /// Whether the user has declined the invitation.
         var declined = false
+        /// Whether the event's calendar is one meetings come from — the
+        /// `calendars` setting. Only a guess heeds it: a Meet call finds its
+        /// event in any calendar.
+        var chosen = true
 
         /// Whether a recording may be named after the event, or started by
-        /// it, on its time alone. The event has to be a meeting the user has
-        /// not declined, with someone else in it or a call link.
+        /// it, on its time alone. The event has to be in a calendar that
+        /// counts and be a meeting the user has not declined, with someone
+        /// else in it or a call link.
         /// Out-of-office, focus-time and working-location blocks have no type
         /// in EventKit, but they are the user alone with no link, which is
         /// what keeps them out. An invitation not yet answered still counts,
         /// as it does in Granola.
-        var guessable: Bool { !declined && looksLikeCall }
+        var guessable: Bool { chosen && !declined && looksLikeCall }
     }
 
     enum MatchedBy: String {
@@ -169,13 +174,14 @@ final class CalendarWatcher {
             end: date.addingTimeInterval(slack),
             calendars: calendars
         )
+        let chosen = Config.meetingCalendars()
         return store.events(matching: predicate)
             .filter { !$0.isAllDay && $0.status != .canceled }
-            .map(Self.convert)
+            .map { Self.convert($0, chosen: chosen) }
             .sorted { $0.start < $1.start }
     }
 
-    private static func convert(_ event: EKEvent) -> Meeting {
+    private static func convert(_ event: EKEvent, chosen: [String]?) -> Meeting {
         let attendees = (event.attendees ?? []).compactMap { participant -> String? in
             participant.name
                 ?? participant.url.absoluteString.replacingOccurrences(of: "mailto:", with: "")
@@ -207,7 +213,11 @@ final class CalendarWatcher {
             account: event.calendar?.source?.title,
             // Google appears not to hand declined invitations to the Mac at
             // all, so on a Google calendar this has yet to find one.
-            declined: event.attendees?.first { $0.isCurrentUser }?.participantStatus == .declined
+            declined: event.attendees?.first { $0.isCurrentUser }?.participantStatus == .declined,
+            chosen: MeetingCalendars.counts(
+                MeetingCalendars.key(
+                    account: event.calendar?.source?.title, calendar: event.calendar?.title),
+                chosen: chosen)
         )
     }
 

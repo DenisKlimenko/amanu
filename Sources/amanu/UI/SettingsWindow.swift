@@ -52,6 +52,8 @@ final class SettingsWindow: NSObject, NSTextFieldDelegate {
     /// Setup tab is a `SetupForm` and listens on its own.
     private var configWatch: ConfigWatch.Token?
     private var rows: [Row] = []
+    /// The calendars on the Mac, for the Meeting calendars checklist.
+    private let calendarListing: () -> [MeetingCalendars.Account]?
     /// The local models as files: what they weigh and the button that gets
     /// the space back. The one thing on this tab that is not a setting, and
     /// the reason it is here anyway is in `modelsSection`.
@@ -81,7 +83,12 @@ final class SettingsWindow: NSObject, NSTextFieldDelegate {
         let control: NSControl
     }
 
-    override init() {
+    /// The window pictures pass made-up calendars, so that nobody's own end
+    /// up in a screenshot and every run draws the same rows.
+    init(calendarListing: @escaping () -> [MeetingCalendars.Account]? = {
+        MeetingCalendars.onThisMac()
+    }) {
+        self.calendarListing = calendarListing
         panel = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 700, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -536,7 +543,11 @@ final class SettingsWindow: NSObject, NSTextFieldDelegate {
 
         let line = NSStackView(views: [label, control])
         line.orientation = .horizontal
-        line.alignment = entry.kind.isMultiline ? .top : .firstBaseline
+        switch entry.kind {
+        // The label belongs at the top of anything taller than a line.
+        case .multilineText, .calendars: line.alignment = .top
+        default: line.alignment = .firstBaseline
+        }
         line.spacing = 10
 
         // A toggle is a small thing on the right of a wide label; a text field
@@ -601,6 +612,12 @@ final class SettingsWindow: NSObject, NSTextFieldDelegate {
             field.action = #selector(controlChanged(_:))
             return field
 
+        case .calendars:
+            let list = CalendarChecklist(listing: calendarListing)
+            list.target = self
+            list.action = #selector(controlChanged(_:))
+            return list
+
         case .multilineText:
             let field = NSTextField()
             field.usesSingleLineMode = false
@@ -633,6 +650,8 @@ final class SettingsWindow: NSObject, NSTextFieldDelegate {
             case .list:
                 let items = stored as? [String] ?? []
                 row.control.stringValue = items.joined(separator: ", ")
+            case .calendars:
+                (row.control as? CalendarChecklist)?.show(stored as? [String])
             case .number, .text:
                 row.control.stringValue = stored.map { "\($0)" } ?? ""
             case .multilineText:
@@ -694,6 +713,8 @@ final class SettingsWindow: NSObject, NSTextFieldDelegate {
             input = .flag((row.control as? NSSwitch)?.state == .on)
         case .choice:
             input = .choice((row.control as? NSPopUpButton)?.titleOfSelectedItem ?? "")
+        case .calendars:
+            input = .calendars((row.control as? CalendarChecklist)?.ticked ?? [])
         case .number, .text, .multilineText, .list:
             input = .text(row.control.stringValue)
         }

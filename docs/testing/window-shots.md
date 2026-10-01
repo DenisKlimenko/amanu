@@ -50,6 +50,7 @@ program to suit its instruments.
 | `settings-setup-{light,dark}.png` | The settings window's first tab: the same form in another window. |
 | `settings-advanced-{light,dark}.png` | The Advanced tab, and `-narrow` at the minimum width the window allows. |
 | `settings-advanced-{light,dark}-bottom.png` | The same tab scrolled to its end, which is the only picture the models-on-disk block appears in. |
+| `settings-advanced-{light,dark}-calendars.png` | The same tab at the Meeting calendars checklist, drawn with made-up calendars. |
 | `settings-setup-switched-*.png` | The settings window through the same change of appearance. |
 | `about-{light,dark}.png` | The About window, which sizes itself to its words — so this pair is where a Russian line that outgrew the width would show. |
 | `setup-{light,dark}-whole.png` | The setup window closed onto its own form: the whole screen, one image, no scrollbar and no empty band. This is the one to show somebody. |

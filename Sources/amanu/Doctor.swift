@@ -43,7 +43,7 @@ enum DoctorReport {
             checkTranscription(),
             checkAutoRecord(),
             checkSummary(),
-        ] + [checkSpeakerNames()].compactMap { $0 }
+        ] + [checkSpeakerNames(), checkCalendars()].compactMap { $0 }
     }
 
     /// A first-run window can repair a denied microphone grant. It cannot
@@ -212,6 +212,45 @@ enum DoctorReport {
         return evaluate(
             "speaker names", route: route, facts: gatherFacts(for: [route]),
             settings: Config.summary())
+    }
+
+    /// Which calendars name recordings by their time, as a count such as
+    /// "3 of 21 count". It also names any chosen calendar this Mac no longer
+    /// has, which is what a calendar renamed in Calendar.app looks like.
+    /// Said only once there is a choice: with every calendar counting there
+    /// is nothing to report, and with the calendar not read there is nothing
+    /// to count. The calendar is read when `calendar` or
+    /// `auto_record.calendar` is on, and the choice governs both what it
+    /// names and what it starts.
+    static func checkCalendars() -> Check? {
+        guard Config.useCalendar() || Config.autoRecord().calendar,
+              let chosen = Config.meetingCalendars()
+        else { return nil }
+        let onMac = MeetingCalendars.onThisMac()?.flatMap { account in
+            account.calendars.map { MeetingCalendars.key(account: account.name, calendar: $0) }
+        }
+        return checkCalendars(chosen: chosen, onMac: onMac)
+    }
+
+    static func checkCalendars(chosen: [String], onMac: [String]?) -> Check {
+        // From a terminal, macOS answers for the terminal's calendar access
+        // rather than amanu's (docs/pitfalls.md), and it may have none.
+        guard let onMac else {
+            return Check(
+                name: "calendars",
+                status: .warn("\(chosen.count) chosen, but no calendars can be read from here"),
+                remediation: nil)
+        }
+        let count = "\(onMac.filter(chosen.contains).count) of \(onMac.count) count"
+        let missing = chosen.filter { !onMac.contains($0) }
+        guard missing.isEmpty else {
+            return Check(
+                name: "calendars",
+                status: .warn(count + "; not on this Mac: " + missing.joined(separator: ", ")),
+                remediation: "a calendar renamed in Calendar.app drops out of the choice — "
+                    + "tick it again in Settings → Advanced → Meeting calendars")
+        }
+        return Check(name: "calendars", status: .warn(count), remediation: nil)
     }
 
     static func evaluate(

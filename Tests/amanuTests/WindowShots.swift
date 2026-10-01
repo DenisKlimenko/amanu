@@ -102,6 +102,8 @@ struct WindowShots {
             panel.setContentSize(NSSize(width: 700, height: 900))
             scrollToBottom(in: tabs.selectedTabViewItem?.view)
             try write(panel, "settings-advanced-\(name)-bottom")
+            try scrollToCalendars(in: tabs.selectedTabViewItem?.view)
+            try write(panel, "settings-advanced-\(name)-calendars")
         }
 
         // The setup form here is built before its window exists and then lives
@@ -196,13 +198,32 @@ struct WindowShots {
         return panel
     }
 
+    /// Made up, so that nobody's own calendars end up in a picture and every
+    /// run draws the same rows.
+    private static let calendars = [
+        MeetingCalendars.Account(name: "iCloud", calendars: ["Family", "Home"]),
+        MeetingCalendars.Account(name: "Work", calendars: ["A colleague", "me@example.com", "Team"]),
+    ]
+
+    /// Scroll the Advanced tab to the Meeting calendars checklist, which sits
+    /// in the middle of it and so in neither the top picture nor the bottom.
+    @MainActor
+    private func scrollToCalendars(in view: NSView?) throws {
+        let list = try #require(view?.allDescendants.first { $0 is CalendarChecklist })
+        view?.layoutSubtreeIfNeeded()
+        list.scrollToVisible(list.bounds)
+        view?.layoutSubtreeIfNeeded()
+    }
+
     @MainActor
     private func settingsPanel(
         builtIn appearance: NSAppearance?, keeping owners: inout [Any]
     ) throws -> NSWindow {
         NSApp.appearance = appearance
         var window: SettingsWindow?
-        appearance?.performAsCurrentDrawingAppearance { window = SettingsWindow() }
+        appearance?.performAsCurrentDrawingAppearance {
+            window = SettingsWindow(calendarListing: { Self.calendars })
+        }
         owners.append(try #require(window))
         let title = localised("amanu settings", "Настройки amanu")
         let panel = try #require(NSApp.windows.last { $0.title == title })
