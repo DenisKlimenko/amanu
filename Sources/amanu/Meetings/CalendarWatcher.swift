@@ -32,6 +32,17 @@ final class CalendarWatcher {
         var account: String?
         /// How the event was chosen for a recording.
         var matchedBy: MatchedBy = .time
+        /// Whether the user has declined the invitation.
+        var declined = false
+
+        /// Whether a recording may be named after the event, or started by
+        /// it, on its time alone. The event has to be a meeting the user has
+        /// not declined, with someone else in it or a call link.
+        /// Out-of-office, focus-time and working-location blocks have no type
+        /// in EventKit, but they are the user alone with no link, which is
+        /// what keeps them out. An invitation not yet answered still counts,
+        /// as it does in Granola.
+        var guessable: Bool { !declined && looksLikeCall }
     }
 
     enum MatchedBy: String {
@@ -67,34 +78,77 @@ final class CalendarWatcher {
 
     /// Meetings that started within the last `window` seconds (or are about to,
     /// by up to 30s — calendar clocks and wall clocks disagree slightly) and
-    /// look like calls. The auto-record trigger.
+    /// may be guessed at. The auto-record trigger.
     func justStarted(now: Date, window: TimeInterval) -> [Meeting] {
-        meetings(around: now, slack: window).filter {
+        Self.justStarted(meetings(around: now, slack: window), now: now, window: window)
+    }
+
+    /// The trigger's rule, apart from the calendar it reads.
+    static func justStarted(_ events: [Meeting], now: Date, window: TimeInterval) -> [Meeting] {
+        events.filter {
             let sinceStart = now.timeIntervalSince($0.start)
-            return sinceStart >= -30 && sinceStart <= window && $0.looksLikeCall
+            return sinceStart >= -30 && sinceStart <= window && $0.guessable
         }
     }
+
+    /// How far either side of a recording's start its events are looked for,
+    /// and how long after a meeting's start a recording can begin and still
+    /// be named after it by time: Granola's fifteen minutes.
+    static let window: TimeInterval = 15 * 60
+    /// How long before a meeting's start a recording can begin and be named
+    /// after it by time — amanu's own allowance for opening a call early.
+    static let early: TimeInterval = 5 * 60
+    /// How far a Meet call's room is looked for. A recurring meeting's room
+    /// is still that meeting on another day, and a week either side reaches
+    /// the nearest occurrence of anything held weekly or fortnightly.
+    static let roomReach: TimeInterval = 7 * 24 * 60 * 60
 
     /// The event that best describes a recording started at `date` — used to
     /// name the session folder even when the recording began some other way.
     func bestMatch(for date: Date) -> Meeting? {
-        Self.pick(
-            from: meetings(around: date, slack: 8 * 60),
-            duringMeet: MeetSpeakers.callsInProgress(at: date))
+        let calls = MeetSpeakers.callsInProgress(at: date)
+        // Only a Meet call looks past the window, for its room's meeting.
+        let reach = calls.isEmpty ? Self.window : Self.roomReach
+        return Self.pick(from: meetings(around: date, slack: reach), duringMeet: calls, at: date)
     }
 
-    /// Every calendar on the Mac is read, so the events around a recording
-    /// include other people's: a colleague's calendar, a family one. A Meet
-    /// call in progress settles which is ours — the event that links to it,
-    /// in whichever calendar — and rules out any that links to another call.
-    /// Without one, something with other people in it beats a solo block.
-    static func pick(from candidates: [Meeting], duringMeet calls: Set<String>) -> Meeting? {
-        if var event = candidates.first(where: { !$0.meetCodes.isDisjoint(with: calls) }) {
+    /// Which event a recording started at `date` belongs to, if any; section 3
+    /// of `docs/specs/2026-10-01-calendar-meetings-design.md` gives the rule.
+    ///
+    /// A Meet call in progress is proof rather than a guess. The event that
+    /// links to it is the one, in whichever calendar, declined or not, even
+    /// after its slot is over. Events around the start come first, then the
+    /// nearest within `roomReach`. An event that links to another call is
+    /// never the one.
+    ///
+    /// Without proof, time decides, and only for an event that is `guessable`.
+    /// The recording must have begun no more than `early` before the event's
+    /// start, no more than `window` after it, and before its end. The nearest
+    /// start wins either way: taking the earliest used to hand recordings to
+    /// the long block. When nothing matches, the folder is named after the app
+    /// alone, since an honest "FaceTime" beats a wrong title.
+    static func pick(
+        from events: [Meeting], duringMeet calls: Set<String>, at date: Date
+    ) -> Meeting? {
+        let linked = events.filter { !$0.meetCodes.isDisjoint(with: calls) }
+        let around = linked.filter {
+            $0.end > date.addingTimeInterval(-window) && $0.start < date.addingTimeInterval(window)
+        }
+        if var event = nearest(around, to: date) ?? nearest(linked, to: date) {
             event.matchedBy = .meet
             return event
         }
-        let rest = calls.isEmpty ? candidates : candidates.filter { $0.meetCodes.isEmpty }
-        return rest.first { $0.looksLikeCall } ?? rest.first
+        return nearest(events.filter {
+            $0.guessable
+                && (calls.isEmpty || $0.meetCodes.isEmpty)
+                && date >= $0.start.addingTimeInterval(-early)
+                && date <= $0.start.addingTimeInterval(window)
+                && date < $0.end
+        }, to: date)
+    }
+
+    private static func nearest(_ events: [Meeting], to date: Date) -> Meeting? {
+        events.min { abs($0.start.timeIntervalSince(date)) < abs($1.start.timeIntervalSince(date)) }
     }
 
     /// Meeting codes of the Meet links in `text`: the path after
@@ -150,7 +204,10 @@ final class CalendarWatcher {
                 || Self.conferenceMarkers.contains { haystack.contains($0) },
             meetCodes: Self.meetCodes(in: haystack),
             calendarName: event.calendar?.title,
-            account: event.calendar?.source?.title
+            account: event.calendar?.source?.title,
+            // Google appears not to hand declined invitations to the Mac at
+            // all, so on a Google calendar this has yet to find one.
+            declined: event.attendees?.first { $0.isCurrentUser }?.participantStatus == .declined
         )
     }
 

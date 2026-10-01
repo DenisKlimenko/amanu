@@ -523,12 +523,11 @@ reasoning alone. Worth knowing before trusting any of them in front of someone.
 - **Whisper and GigaAM decoding on their own threads.** The move off the
   cooperative pool is tested with a stand-in for the native call; neither
   runtime has been run that way against a real model, cancellation included.
-- **Finding a Meet call's calendar event by its meeting code.** The code comes
-  from the browser extension, and the event is expected to carry the Meet link
-  in its notes, where Google puts it in an invitation. Nobody has yet looked at
-  a Google event through EventKit to see that it does. Until someone has,
-  `"matched_by": "time"` in the meta.json of a Meet call with an invitation
-  means the link was not where it was expected.
+- **The declined check against a Google calendar.** An event the user declined
+  is never chosen by its time, read from the attendee EventKit marks as the
+  current user. Google appears not to hand declined events to the Mac at all —
+  a declined invitation overlapping a recording on 30 September 2026 was not
+  among the candidates — so on a Google calendar the check has never run.
 
 ## Bold in the release notes cannot cross a line wrap
 
