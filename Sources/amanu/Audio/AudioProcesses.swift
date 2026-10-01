@@ -22,8 +22,13 @@ enum AudioProcesses {
     /// Names for processes whose own name says nothing to the person reading
     /// the menu or the recordings folder. `avconferenced` carries FaceTime's
     /// calls and the ones handed over from the iPhone, whose banner on the Mac
-    /// is FaceTime's too.
-    private static let displayNames = ["com.apple.avconferenced": "FaceTime"]
+    /// is FaceTime's too. ArcCore's `Browser Helper` is Dia's audio service.
+    /// Arc runs the same helper and would be called Dia as well; the helper's
+    /// parent app is where to look if that ever matters.
+    private static let displayNames = [
+        "com.apple.avconferenced": "FaceTime",
+        "company.thebrowser.browser.helper": "Dia",
+    ]
 
     /// Every audio process except our own — our capture must never be evidence
     /// about anyone else, and tapping ourselves would be a feedback loop.
