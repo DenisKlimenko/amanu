@@ -49,6 +49,26 @@ struct MicRestartTests {
         #expect(MicRecorder.silenceFrames(gap: -0.3, sampleRate: 48000) == 0)
     }
 
+    /// An engine that runs and delivers nothing took 74 seconds of a mic
+    /// track on 2 October 2026; one that has not had time to deliver, or has
+    /// stopped and is being rebuilt anyway, is not to be restarted for it.
+    @Test func aRunningEngineThatDeliversNothingIsSilent() {
+        let attached = Date(timeIntervalSinceReferenceDate: 1_000)
+        func silent(last: Date?, running: Bool = true, after: TimeInterval) -> Bool {
+            MicRecorder.isSilent(
+                lastBufferAt: last, since: attached, running: running,
+                now: attached.addingTimeInterval(after))
+        }
+        #expect(silent(last: nil, after: 6))
+        #expect(!silent(last: nil, after: 2))
+        #expect(!silent(last: nil, running: false, after: 60))
+        #expect(!silent(last: attached.addingTimeInterval(59.9), after: 60))
+        #expect(silent(last: attached.addingTimeInterval(30), after: 60))
+        // The previous engine's last buffer says nothing about this one.
+        #expect(!silent(last: attached.addingTimeInterval(-4), after: 2))
+        #expect(silent(last: attached.addingTimeInterval(-4), after: 6))
+    }
+
     /// While `avconferenced` runs voice processing on the built-in microphone,
     /// a restart finds it as three channels with no positions, and a converter
     /// left to its own map turned them into digital zeros — the whole of our

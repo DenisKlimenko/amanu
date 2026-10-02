@@ -337,11 +337,13 @@ final class MicRecorder: @unchecked Sendable {
     }
 
     /// Re-examine which microphone we ought to be on, and move if it is not
-    /// the one we are on. Called on every route notification and on the
-    /// session's own timer, because a call app can change device without
-    /// anything system-wide changing at all.
+    /// the one we are on — or if the one we are on has stopped delivering.
+    /// Called on every route notification and on the session's own timer,
+    /// because a call app can change device without anything system-wide
+    /// changing at all.
     func checkRoute() {
         guard isRecording, !restartPending else { return }
+        if restartIfSilent() { return }
         guard let target = routeTarget(), target != boundDevice else { return }
         // Two questions a second apart: a route in the middle of changing
         // answers differently each time, and every move costs seconds of
@@ -488,6 +490,9 @@ final class MicRecorder: @unchecked Sendable {
         }
         attachedAt = Date()
         finalVoiceProcessing = input.isVoiceProcessingEnabled
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDeadline) { [weak self] in
+            self?.restartIfSilent()
+        }
 
         let report = "mic: voiceProcessing=\(input.isVoiceProcessingEnabled) "
             + "input=\(input.outputFormat(forBus: 0)) tap=\(monoFormat)\n"
@@ -841,6 +846,36 @@ final class MicRecorder: @unchecked Sendable {
     private var audioIsFlowing: Bool {
         guard let last = lastBufferAt, last > attachedAt else { return false }
         return Date().timeIntervalSince(last) < Self.aliveWithin
+    }
+
+    /// Rebuild capture if the engine is running and nothing has come out of
+    /// it for `settleDeadline`. Asked after every attach, and on every route
+    /// check for an engine that stops delivering later.
+    ///
+    /// Nothing else would notice: such an engine raises no error and posts no
+    /// configuration change. On 2 October 2026 a restart while AirPods were
+    /// changing mode left one running with Core Audio dropping every cycle of
+    /// the built-in microphone ("mono buffer too small (512 > 480)") until
+    /// something else restarted it 74 seconds later. A tap AVFAudio refuses
+    /// without saying so ("config change pending") looks the same from here.
+    @discardableResult
+    private func restartIfSilent() -> Bool {
+        guard isRecording, !restartPending, Self.isSilent(
+            lastBufferAt: lastBufferAt, since: attachedAt, running: engine.isRunning, now: Date())
+        else { return false }
+        FileHandle.standardError.write(Data(
+            "mic: no audio for \(Int(Self.settleDeadline))s from a running engine — restarting capture\n".utf8))
+        restartCapture()
+        return true
+    }
+
+    /// Whether a running engine has gone `settleDeadline` without a buffer,
+    /// counted from its attach when it has delivered none — a buffer from
+    /// before then came from the engine it replaced.
+    static func isSilent(lastBufferAt: Date?, since attachedAt: Date, running: Bool, now: Date) -> Bool {
+        guard running else { return false }
+        let last = max(lastBufferAt ?? attachedAt, attachedAt)
+        return now.timeIntervalSince(last) >= settleDeadline
     }
 
     /// Rebuild the engine on the new route, keeping the file, the wall clock,

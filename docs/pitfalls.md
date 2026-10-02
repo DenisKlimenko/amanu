@@ -292,6 +292,19 @@ configuration change is pending, otherwise with an Objective-C exception that
 Swift cannot catch. On 2 October 2026 that ended amanu twice in one call.
 From macOS 27 `MicRecorder.installTap` gets the refusal back as an error.
 
+A rebuilt engine can also run and deliver nothing. Earlier in the same call a
+restart that followed Meet to the built-in microphone, made while the AirPods
+were changing mode, started without an error, and from then on Core Audio
+dropped every cycle of the microphone — `AUHAL::AUIOProc: mono buffer too small
+(512 > 480)`, 94 times a second. No configuration change was posted, so
+nothing restarted it. It did not reproduce by changing a device's buffer size,
+with a bind in between or without: what AirPods do in the middle of a mode
+change is the missing piece. `MicRecorder.restartIfSilent` now asks, five
+seconds after every attach and on every route check, whether a running engine
+has delivered anything, and rebuilds it if not. The rebuild after that one
+hung amanu for eleven minutes inside `AVAudioEngine`, which nothing in amanu
+can see from inside; `.issues/011` has it.
+
 **Setting a default device can silently do nothing.** `AudioObjectSetPropertyData`
 on `kAudioHardwarePropertyDefaultInputDevice` returns `noErr` for a device
 macOS will not make default — Zoom's hidden `ZoomAudioDevice` is one — and the
@@ -461,6 +474,9 @@ reasoning alone. Worth knowing before trusting any of them in front of someone.
   2 October 2026 is tested with a stale output side made by hand on one
   microphone. No call on the built-in microphone has been recorded since with
   AirPods connecting in the middle of it.
+- **Rebuilding an engine that delivers nothing.** The decision is tested; the
+  dead engine it is for has been seen once, in the log of that same call, and
+  never made to happen since.
 - **The mic's retreats against a real device.** A call app on a microphone
   that refuses `setDeviceID`, or whose engine will not start, is now given up
   for the default and not asked again for a minute, then two, up to fifteen;
