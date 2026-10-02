@@ -282,6 +282,16 @@ microphone), and the device has to be bound explicitly with
 `AUAudioUnit.setDeviceID` before any format is read, because with voice
 processing the unit builds its aggregate around whatever it was pointed at.
 
+Binding moves only the node's hardware side. Its output side keeps the format
+the engine settled on with the default device, so the raw tap is made in
+`inputFormat(forBus: 0)`, not in the `outputFormat(forBus: 0)` every example
+uses. The two differ exactly when the call's microphone and the default run at
+different rates — AirPods at 24 kHz as the default, under a call on the 48 kHz
+built-in microphone — and AVFAudio refuses such a tap: silently while a
+configuration change is pending, otherwise with an Objective-C exception that
+Swift cannot catch. On 2 October 2026 that ended amanu twice in one call.
+From macOS 27 `MicRecorder.installTap` gets the refusal back as an error.
+
 **Setting a default device can silently do nothing.** `AudioObjectSetPropertyData`
 on `kAudioHardwarePropertyDefaultInputDevice` returns `noErr` for a device
 macOS will not make default — Zoom's hidden `ZoomAudioDevice` is one — and the
@@ -447,6 +457,10 @@ reasoning alone. Worth knowing before trusting any of them in front of someone.
   `docs/testing/setup-window-manual-checklist.md` — a recording with real
   microphone speech and real playback, checked by ear; a permission denied and
   re-granted; a recordings folder moved into Documents.
+- **The tap format with AirPods joining a call.** The fix for the crashes of
+  2 October 2026 is tested with a stale output side made by hand on one
+  microphone. No call on the built-in microphone has been recorded since with
+  AirPods connecting in the middle of it.
 - **The mic's retreats against a real device.** A call app on a microphone
   that refuses `setDeviceID`, or whose engine will not start, is now given up
   for the default and not asked again for a minute, then two, up to fifteen;

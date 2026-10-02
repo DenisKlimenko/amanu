@@ -420,7 +420,7 @@ final class MicRecorder: @unchecked Sendable {
                 voice = false
             }
         }
-        let inputFormat = input.outputFormat(forBus: 0)
+        let inputFormat = Self.tapFormat(of: input, voiceProcessing: voice)
 
         // One explicit mono client format. With voice processing this is the
         // Voice I/O boundary format on both sides of the duplex unit — never
@@ -452,7 +452,7 @@ final class MicRecorder: @unchecked Sendable {
             livenessFrames = 0
             livenessPeak = 0
             livenessSettled = false
-            installVoiceTap(on: input, format: monoFormat, reusingFile: existing != nil)
+            try installVoiceTap(on: input, format: monoFormat, reusingFile: existing != nil)
         } else {
             try installRawTap(on: input, inputFormat: inputFormat, monoFormat: monoFormat)
         }
@@ -519,9 +519,9 @@ final class MicRecorder: @unchecked Sendable {
     /// path exists to prevent.
     private func installVoiceTap(
         on input: AVAudioInputNode, format: AVAudioFormat, reusingFile: Bool
-    ) {
+    ) throws {
         let checkFrames = Int(format.sampleRate * (reusingFile ? 3 : 1))
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+        try Self.installTap(on: input, format: format) { [weak self] buffer, _ in
             guard let self, let writer = self.writer else { return }
             if self.firstBufferAt == nil { self.firstBufferAt = Date() }
             self.lastBufferAt = Date()
@@ -584,7 +584,7 @@ final class MicRecorder: @unchecked Sendable {
         }
         let sameRate = inputFormat.sampleRate == monoFormat.sampleRate
         let ratio = monoFormat.sampleRate / inputFormat.sampleRate
-        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
+        try Self.installTap(on: input, format: inputFormat) { [weak self] buffer, _ in
             guard let self, let writer = self.writer else { return }
             if self.firstBufferAt == nil { self.firstBufferAt = Date() }
             self.lastBufferAt = Date()
@@ -624,6 +624,40 @@ final class MicRecorder: @unchecked Sendable {
         let converter = AVAudioConverter(from: input, to: mono)
         converter?.channelMap = [0]
         return converter
+    }
+
+    /// The format to read the microphone in: the hardware's, unless the voice
+    /// unit is running, which converts between its two sides itself.
+    ///
+    /// Not the node's output side, though nearly always that is the same
+    /// format. The output side keeps what the engine settled on with the
+    /// default device, and `bindInputDevice` moves only the hardware side to
+    /// the call's microphone. On 2 October 2026 AirPods became the default at
+    /// 24 kHz in the middle of a Meet call on the built-in microphone at
+    /// 48 kHz, and every raw tap after that asked a 48 kHz device for 24 kHz.
+    /// AVFAudio refused each one: silently while a configuration change was
+    /// pending, and otherwise with an exception. That ended the app twice in
+    /// ten minutes, and the third time left a recording with no microphone.
+    static func tapFormat(of input: AVAudioInputNode, voiceProcessing: Bool) -> AVAudioFormat {
+        voiceProcessing ? input.outputFormat(forBus: 0) : input.inputFormat(forBus: 0)
+    }
+
+    /// Tap bus 0 of `input`, with a format AVFAudio refuses thrown rather
+    /// than raised.
+    ///
+    /// The old call reports a refusal with an Objective-C exception, which
+    /// Swift cannot catch: the app ends there, the system track with it.
+    /// From macOS 27 the same refusal comes back as an error, and the start
+    /// and the restart already know what to do with one. Before 27 there is
+    /// no such call, and a refused tap is still fatal.
+    static func installTap(
+        on input: AVAudioInputNode, format: AVAudioFormat, block: @escaping AVAudioNodeTapBlock
+    ) throws {
+        if #available(macOS 27, *) {
+            try input.__installTap(onBus: 0, bufferSize: 4096, format: format, error: (), block: block)
+        } else {
+            input.installTap(onBus: 0, bufferSize: 4096, format: format, block: block)
+        }
     }
 
     /// Feed `buffer` through `converter` exactly once, for the rate-mismatched

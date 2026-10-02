@@ -78,6 +78,37 @@ struct MicRestartTests {
         #expect(abs(track.floatChannelData![0][479] - 0.1) < 0.001)
     }
 
+    /// Binding the call's microphone moves the node's hardware side and leaves
+    /// its output side at the default device's rate — on 2 October 2026,
+    /// AirPods at 24 kHz under a call on the 48 kHz built-in microphone — and
+    /// AVFAudio refuses a raw tap in that rate. It ended the app twice in one
+    /// call. Here the stale side is made by hand, on whatever microphone
+    /// the Mac has. Before macOS 27 the refusal is an exception that would end
+    /// the test run too.
+    @Test(.enabled(if: AudioDevices.defaultInput() != nil
+        && ProcessInfo.processInfo.isOperatingSystemAtLeast(
+            OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0))))
+    func aRawTapFollowsTheHardwareRatherThanAStaleOutputSide() throws {
+        let engine = AVAudioEngine()
+        let input = engine.inputNode
+        let hardware = input.inputFormat(forBus: 0)
+        var stale = hardware.streamDescription.pointee
+        stale.mSampleRate = hardware.sampleRate == 24_000 ? 48_000 : 24_000
+        let status = AudioUnitSetProperty(
+            try #require(input.audioUnit), kAudioUnitProperty_StreamFormat,
+            kAudioUnitScope_Output, 1, &stale, UInt32(MemoryLayout<AudioStreamBasicDescription>.size))
+        try #require(status == noErr)
+        try #require(input.outputFormat(forBus: 0).sampleRate == stale.mSampleRate)
+
+        #expect(throws: (any Error).self) {
+            try MicRecorder.installTap(on: input, format: input.outputFormat(forBus: 0)) { _, _ in }
+        }
+        try MicRecorder.installTap(
+            on: input, format: MicRecorder.tapFormat(of: input, voiceProcessing: false)
+        ) { _, _ in }
+        input.removeTap(onBus: 0)
+    }
+
     @Test func aRestartRecordsBothSidesOfTheRouteChange() {
         let iso = ISO8601DateFormatter()
         let at = Date(timeIntervalSince1970: 1_755_710_180)
