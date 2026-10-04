@@ -659,10 +659,10 @@ final class MicRecorder: @unchecked Sendable {
     /// logs a 36.5 dB input gain — and nothing does either for us, so channel
     /// 0 alone sits about 20 dB under the ordinary stream. On 30 September
     /// 2026 one call's mic floor rose that much at the restart where the call
-    /// left `avconferenced`, and our side of four such calls sat at about
-    /// −54 dBFS against −29 in a browser call. The far end, which a bare
-    /// capsule hears as well as it hears us, comes up with it, to about where
-    /// it sits in a browser call.
+    /// left `avconferenced`, and our side of four such calls sat at −54 to
+    /// −56 dBFS against −30 in a browser call. The far end, which a bare
+    /// capsule hears as well as it hears us, comes up with it: level with our
+    /// voice, and over `SpeakerAttribution`'s speech floor.
     ///
     /// ponytail: recognised by channel count, with one fixed gain, both
     /// measured on one MacBook Air (M1). If another Mac's capsule clips or

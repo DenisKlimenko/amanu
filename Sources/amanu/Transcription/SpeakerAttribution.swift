@@ -85,11 +85,11 @@ enum SpeakerAttribution {
         //
         // An utterance the far end said nothing over is ours, however little
         // of it reached the mic: the mix is only ever the two tracks, so the
-        // engine heard it through the mic. On a FaceTime call the mic hears
-        // us at −54 to −62 dBFS, under the floor, and a lower floor would not
-        // help — the far end, coming back out of the speakers, reads louder
-        // there than we do (2026.10.01-1323). Only a mic that recorded
-        // nothing leaves such an utterance undecided.
+        // engine heard it through the mic. Before `MicRecorder.rawGain`, a
+        // FaceTime call heard us at −54 to −62 dBFS, under the floor, and a
+        // lower floor would not have helped — the far end, coming back out of
+        // the speakers, read louder there than we did (2026.10.01-1323). Only
+        // a mic that recorded nothing leaves such an utterance undecided.
         var sides: [Side?] = segments.map { segment in
             guard segment.end > segment.start else { return nil }
             let me = micEnvelope.level(
