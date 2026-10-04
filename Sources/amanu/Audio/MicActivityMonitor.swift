@@ -28,6 +28,15 @@ enum MicActivityMonitor {
         "com.apple.speech.SpeechRecognitionCore.speechrecognitiond",
         "com.apple.SpeechRecognitionCore.speechrecognitiond",
         "com.prakashjoshipax.VoiceInk",
+        // `corespeechd` is not on the microphone at all. Siri's self-trigger
+        // detector, which keeps the Mac's own playback from waking Siri,
+        // records the built-in speakers whenever they play, and Core Audio
+        // reports that as running input. On 4 October 2026 a notification
+        // sound started a recording that way, and the recording kept itself
+        // going: the raw mic engine runs on an aggregate of the default input
+        // and output, which kept the speakers, and so the detector, running
+        // until AirPods took the output away.
+        "com.apple.CoreSpeech",
     ]
 
     /// Bundle-id prefixes that mean "a call is happening". Prefixes rather than

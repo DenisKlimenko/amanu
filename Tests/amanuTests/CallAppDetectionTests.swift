@@ -121,6 +121,18 @@ struct CallAppDetectionTests {
         #expect(!result.active)
     }
 
+    /// Siri's self-trigger detector records the built-in speakers whenever
+    /// they play, and Core Audio reports it as running input. A notification
+    /// sound on 4 October 2026 started a recording that way.
+    @Test("Siri listening to the speakers is never a meeting")
+    func siriSpeakerTapIsAlwaysIgnored() {
+        let result = MicActivityMonitor.evaluate(
+            processes: [process("com.apple.CoreSpeech", name: "corespeechd", input: true)],
+            callApps: [])
+
+        #expect(!result.active)
+    }
+
     @Test("An empty whitelist means any app counts")
     func emptyWhitelistCountsEverything() {
         let result = MicActivityMonitor.evaluate(
