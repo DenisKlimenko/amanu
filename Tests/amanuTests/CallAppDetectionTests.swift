@@ -133,6 +133,22 @@ struct CallAppDetectionTests {
         #expect(!result.active)
     }
 
+    /// Siri's self-trigger detector listens whenever the built-in speakers
+    /// play, so a call taken on them has it beside the call app. Skipping it
+    /// must not skip the call.
+    @Test("A call on the speakers still counts with Siri listening beside it")
+    func callCountsBesideSiriSpeakerTap() {
+        let result = MicActivityMonitor.evaluate(
+            processes: [
+                process("com.apple.CoreSpeech", name: "corespeechd", input: true),
+                process("us.zoom.xos", name: "zoom.us", input: true),
+            ],
+            callApps: [])
+
+        #expect(result.active)
+        #expect(result.names == ["zoom.us"])
+    }
+
     @Test("An empty whitelist means any app counts")
     func emptyWhitelistCountsEverything() {
         let result = MicActivityMonitor.evaluate(
