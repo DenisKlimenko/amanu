@@ -63,6 +63,8 @@ final class MicRecorder: @unchecked Sendable {
         var inputNow: String?
         var outputWas: String?
         var outputNow: String?
+        /// Channels the microphone came back with; see `Capture.inputChannels`.
+        var inputChannels: Int?
 
         func meta(iso: ISO8601DateFormatter) -> [String: Any] {
             var fields: [String: Any] = ["at": iso.string(from: at)]
@@ -73,6 +75,7 @@ final class MicRecorder: @unchecked Sendable {
             if let inputNow { fields["input_now"] = inputNow }
             if let outputWas { fields["output_was"] = outputWas }
             if let outputNow { fields["output_now"] = outputNow }
+            if let inputChannels { fields["input_channels"] = inputChannels }
             return fields
         }
     }
@@ -90,6 +93,13 @@ final class MicRecorder: @unchecked Sendable {
         let sampleRate: Double?
         let channels: Int?
         let sampleFormat: String?
+        /// Channels the microphone came in, where `channels` is the track's
+        /// and always one. Three is the built-in microphone while another
+        /// process runs voice processing on it, the shape `rawGain(for:)`
+        /// amplifies — and the only trace of it that lasts: the format line
+        /// goes to a stderr nobody keeps when macOS launches the app, and the
+        /// system log, where AUHAL prints it too, keeps it less than a day.
+        let inputChannels: Int?
 
         var meta: [String: Any] {
             var fields: [String: Any] = [
@@ -104,6 +114,7 @@ final class MicRecorder: @unchecked Sendable {
             if let sampleRate { fields["sample_rate_hz"] = Int(sampleRate.rounded()) }
             if let channels { fields["channels"] = channels }
             if let sampleFormat { fields["sample_format"] = sampleFormat }
+            if let inputChannels { fields["input_channels"] = inputChannels }
             return fields
         }
     }
@@ -117,6 +128,7 @@ final class MicRecorder: @unchecked Sendable {
     private var finalVoiceProcessing = false
     private var initialInputDevice: String?
     private var initialOutputDevice: String?
+    private var initialInputChannels: Int?
     private var captureSampleRate: Double?
     private var captureChannels: Int?
     private var captureSampleFormat: String?
@@ -130,7 +142,8 @@ final class MicRecorder: @unchecked Sendable {
             outputDevice: initialOutputDevice,
             sampleRate: captureSampleRate,
             channels: captureChannels,
-            sampleFormat: captureSampleFormat)
+            sampleFormat: captureSampleFormat,
+            inputChannels: initialInputChannels)
     }
 
     // Thread-safe shared state: accessed from both the main thread and the
@@ -209,6 +222,7 @@ final class MicRecorder: @unchecked Sendable {
     /// changed rather than only that something did.
     private var inputDevice: String?
     private var outputDevice: String?
+    private var inputChannels: Int?
     /// True while the engine is writing into a file that was already open —
     /// a mid-session rebuild. It decides what a failure may throw away: at
     /// the start of a session, a silent prefix; mid-session, a meeting.
@@ -293,6 +307,7 @@ final class MicRecorder: @unchecked Sendable {
         finalVoiceProcessing = initialVoiceProcessing
         initialInputDevice = inputDevice
         initialOutputDevice = outputDevice
+        initialInputChannels = inputChannels
         if let format = file?.processingFormat {
             captureSampleRate = format.sampleRate
             captureChannels = Int(format.channelCount)
@@ -423,6 +438,7 @@ final class MicRecorder: @unchecked Sendable {
             }
         }
         let inputFormat = Self.tapFormat(of: input, voiceProcessing: voice)
+        inputChannels = Int(inputFormat.channelCount)
 
         // One explicit mono client format. With voice processing this is the
         // Voice I/O boundary format on both sides of the duplex unit — never
@@ -577,7 +593,8 @@ final class MicRecorder: @unchecked Sendable {
     }
 
     /// Raw path: tap at the device's native format and keep its first channel
-    /// as the mono track. Same sample rate on both sides, so the one-shot
+    /// as the mono track, louder where that channel is a bare capsule (see
+    /// `rawGain(for:)`). Same sample rate on both sides, so the one-shot
     /// convert applies.
     private func installRawTap(
         on input: AVAudioInputNode,
@@ -589,6 +606,7 @@ final class MicRecorder: @unchecked Sendable {
         }
         let sameRate = inputFormat.sampleRate == monoFormat.sampleRate
         let ratio = monoFormat.sampleRate / inputFormat.sampleRate
+        let gain = Self.rawGain(for: inputFormat)
         try Self.installTap(on: input, format: inputFormat) { [weak self] buffer, _ in
             guard let self, let writer = self.writer else { return }
             if self.firstBufferAt == nil { self.firstBufferAt = Date() }
@@ -610,6 +628,7 @@ final class MicRecorder: @unchecked Sendable {
                 FileHandle.standardError.write(Data("mic downmix failed: \(error)\n".utf8))
                 return
             }
+            Self.amplify(mono, by: gain)
             self.writeTracked(mono, to: writer)
         }
     }
@@ -629,6 +648,33 @@ final class MicRecorder: @unchecked Sendable {
         let converter = AVAudioConverter(from: input, to: mono)
         converter?.channelMap = [0]
         return converter
+    }
+
+    /// How much louder the raw path writes what it taps: ten times, +20 dB,
+    /// for the three-channel shape, and as it comes otherwise.
+    ///
+    /// Those three channels are the built-in microphone's capsules before the
+    /// beamforming and gain that make its ordinary one-channel stream. The
+    /// process that asked for them does both for itself — `avconferenced`
+    /// logs a 36.5 dB input gain — and nothing does either for us, so channel
+    /// 0 alone sits about 20 dB under the ordinary stream. On 30 September
+    /// 2026 one call's mic floor rose that much at the restart where the call
+    /// left `avconferenced`, and our side of four such calls sat at about
+    /// −54 dBFS against −29 in a browser call. The far end, which a bare
+    /// capsule hears as well as it hears us, comes up with it, to about where
+    /// it sits in a browser call.
+    ///
+    /// ponytail: recognised by channel count, with one fixed gain, both
+    /// measured on one MacBook Air (M1). If another Mac's capsule clips or
+    /// stays quiet, the upgrade is a gain per model.
+    static func rawGain(for input: AVAudioFormat) -> Float {
+        input.channelCount == 3 ? 10 : 1
+    }
+
+    /// Multiply the track's samples by `gain`, held to full scale.
+    static func amplify(_ buffer: AVAudioPCMBuffer, by gain: Float) {
+        guard gain != 1, let samples = buffer.floatChannelData?[0] else { return }
+        for i in 0..<Int(buffer.frameLength) { samples[i] = min(1, max(-1, samples[i] * gain)) }
     }
 
     /// The format to read the microphone in: the hardware's, unless the voice
@@ -935,9 +981,11 @@ final class MicRecorder: @unchecked Sendable {
         let output = AudioDevices.defaultOutputName()
         let voice = engine.inputNode.isVoiceProcessingEnabled
         let (inputWas, outputWas) = (inputDevice, outputDevice)
+        let channels = inputChannels
         state.withLock {
             $0.log.update(index) { restart in
                 restart.voiceProcessing = voice
+                restart.inputChannels = channels
                 restart.inputWas = inputWas
                 restart.inputNow = input
                 restart.outputWas = outputWas

@@ -228,9 +228,20 @@ and converts every buffer to digital zeros, `downmix` or not, and without an
 error. On 30 September 2026 a call handed over from the iPhone lost our whole
 side that way: `avconferenced` took the mic two seconds in, and the track was
 exact zeros until the call ended and the mic went back to one channel. The raw
-tap names channel 0 itself. That this channel carries the voice in the
-three-channel shape is believed, not yet heard: the next handed-over call
-should have our side in it.
+tap names channel 0 itself, and the voice is on it — as one capsule as it
+comes, about 20 dB under the ordinary stream. The beamforming and gain that
+make that stream are done by the process that asked for the three channels,
+for itself alone (`avconferenced` logs a 36.5 dB input gain), so channel 0 has
+neither, and no echo cancellation either: our side of four FaceTime calls sat
+at about −54 dBFS against −29 in a browser call, under a far end the bare
+capsule hears as well as it hears us. The raw tap writes that shape ten times
+louder (`MicRecorder.rawGain`), and `input_channels` in `mic_capture` and
+`mic_restarts` says when the microphone was in it. The figure is one MacBook
+Air's. Heard on 4 October 2026, in a FaceTime call and in a call handed over
+from the iPhone: our side at −38 and −36 dBFS (p90 of 100 ms windows while the
+far end was quiet), nothing at full scale, and where the call let go of the
+microphone the floor fell 3–8 dB instead of rising 20. A browser call's side
+still sits near −30.
 
 **The silence pad belongs after the attach, not before it.** Only the first
 buffer of the new engine knows how long the route was actually down; starting

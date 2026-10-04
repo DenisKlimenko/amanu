@@ -19,7 +19,7 @@ final class FakeMicRecorder: MicTrackRecorder {
     var capture = MicRecorder.Capture(
         requestedVoiceProcessing: false, initialVoiceProcessing: false,
         finalVoiceProcessing: false, inputDevice: nil, outputDevice: nil,
-        sampleRate: nil, channels: nil, sampleFormat: nil)
+        sampleRate: nil, channels: nil, sampleFormat: nil, inputChannels: nil)
     var restarts: [MicRecorder.Restart] = []
 
     func start(writingTo url: URL, callApps: [String]) throws {

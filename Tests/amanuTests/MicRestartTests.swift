@@ -21,7 +21,8 @@ struct MicRestartTests {
             outputDevice: "MacBook Air Speakers",
             sampleRate: 48_000,
             channels: 1,
-            sampleFormat: "float32")
+            sampleFormat: "float32",
+            inputChannels: 3)
 
         let meta = capture.meta
         #expect(meta["requested_voice_processing"] as? Bool == true)
@@ -33,6 +34,7 @@ struct MicRestartTests {
         #expect(meta["sample_rate_hz"] as? Int == 48_000)
         #expect(meta["channels"] as? Int == 1)
         #expect(meta["sample_format"] as? String == "float32")
+        #expect(meta["input_channels"] as? Int == 3)
         #expect(JSONSerialization.isValidJSONObject(meta))
     }
 
@@ -98,6 +100,36 @@ struct MicRestartTests {
         #expect(abs(track.floatChannelData![0][479] - 0.1) < 0.001)
     }
 
+    /// Channel 0 of that shape is one capsule as it comes, about 20 dB under
+    /// the microphone's ordinary stream. Written as it came, our side of a
+    /// FaceTime call sat 30–40 dB under the far end in the track sent for
+    /// transcription.
+    @Test func theThreeChannelShapeIsWrittenTenTimesLouder() throws {
+        let layout = try #require(AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_Unknown | 3))
+        let three = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 48_000, interleaved: false,
+            channelLayout: layout)
+        let mono = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: 1, interleaved: false))
+
+        #expect(MicRecorder.rawGain(for: three) == 10)
+        #expect(MicRecorder.rawGain(for: mono) == 1)
+    }
+
+    /// Ten times the gain takes a shout past full scale; it is held there.
+    @Test func anAmplifiedSampleStopsAtFullScale() throws {
+        let mono = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: 1, interleaved: false))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: 4))
+        buffer.frameLength = 4
+        let samples = try #require(buffer.floatChannelData?[0])
+        for (i, value) in [Float(0.03125), -0.0625, 0.125, -0.25].enumerated() { samples[i] = value }
+
+        MicRecorder.amplify(buffer, by: 10)
+
+        #expect(Array(UnsafeBufferPointer(start: samples, count: 4)) == [0.3125, -0.625, 1, -1])
+    }
+
     /// Binding the call's microphone moves the node's hardware side and leaves
     /// its output side at the default device's rate — on 2 October 2026,
     /// AirPods at 24 kHz under a call on the 48 kHz built-in microphone — and
@@ -139,10 +171,12 @@ struct MicRestartTests {
             outputWas: "AirPods Pro", outputNow: "MacBook Pro Speakers"
         )
         restart.gapMs = 470
+        restart.inputChannels = 3
 
         let meta = restart.meta(iso: iso)
         #expect(meta["at"] as? String == iso.string(from: at))
         #expect(meta["gap_ms"] as? Int == 470)
+        #expect(meta["input_channels"] as? Int == 3)
         #expect(meta["voice_processing"] as? Bool == true)
         #expect(meta["input_was"] as? String == "AirPods Pro")
         #expect(meta["input_now"] as? String == "MacBook Pro Microphone")
