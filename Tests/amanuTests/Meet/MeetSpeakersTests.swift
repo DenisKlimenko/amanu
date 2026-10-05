@@ -183,6 +183,42 @@ struct MeetSpeakersTests {
         #expect(names.speakers["them B"]?.source == .manual)
     }
 
+    @Test("Our mic is off from a muted report until the next report of its tab")
+    func mutedFromEvents() {
+        #expect(MeetSpeakers.muted(from: Self.events("""
+        {"t":1000,"speaking":[],"muted":true}
+        {"t":3000,"speaking":[{"id":"a","name":"Ann"}]}
+        {"t":4000,"speaking":[],"muted":true}
+        """)) == [1000..<3000, 4000..<(4000 + MeetSpeakers.stale)])
+    }
+
+    @Test("What we said with the mic off is dropped, and nothing the far end said")
+    func dropsOurMutedSpeech() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-meet-\(UUID().uuidString)", isDirectory: true)
+        let session = root.appendingPathComponent("session", isDirectory: true)
+        let timeline = root.appendingPathComponent("meet", isDirectory: true)
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: timeline, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try JSONSerialization.data(withJSONObject: ["origin_ms": Self.origin])
+            .write(to: session.appendingPathComponent("meta.json"))
+        try """
+        {"t":\(Self.origin),"speaking":[{"id":"d","name":"Daniel"}],"muted":true}
+        {"t":\(Self.origin + 5000),"speaking":[]}
+        {"t":\(Self.origin + 9000),"speaking":[]}
+        """.write(to: timeline.appendingPathComponent("\(Self.origin).jsonl"),
+                  atomically: true, encoding: .utf8)
+
+        let segments = MeetSpeakers.apply(
+            to: [Self.seg("them", 0, 4), Self.seg("me", 1, 3), Self.seg("me", 6, 8)],
+            session: session, timeline: timeline, log: { _ in })
+
+        #expect(segments.map(\.speaker) == ["them", "me"])
+        #expect(segments.map(\.start_ms) == [0, 6000])
+    }
+
     @Test("A call is in progress while the extension keeps reporting it, in any tab")
     func callsInProgress() throws {
         let dir = FileManager.default.temporaryDirectory

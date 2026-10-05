@@ -200,6 +200,31 @@ struct SpeakerAttributionTests {
                 mic: noisy, micOffset: 0, system: speech, systemOffset: 0) == ["them"])
     }
 
+    @Test("With our mic off in the call, a noise on it does not take the far end's voices")
+    func mutedMicLosesToTheFarEnd() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-muted-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let mic = dir.appendingPathComponent("mic.caf")
+        let system = dir.appendingPathComponent("system.caf")
+        // A loud noise under the far end's words, then us talking over silence.
+        try Self.writeTrack(to: mic, seconds: 10, bursts: [(0, 4), (6, 8)], gain: 0.5)
+        try Self.writeTrack(to: system, seconds: 10, bursts: [(1, 3)], gain: 0.2)
+        let segments = [Self.seg(0.5, 3.5, "A"), Self.seg(5.5, 8.5, "B")]
+
+        #expect(
+            SpeakerAttribution.resolve(
+                segments: segments, mic: mic, micOffset: 0, system: system, systemOffset: 0)
+                == ["me A", "me B"])
+        #expect(
+            SpeakerAttribution.resolve(
+                segments: segments, mic: mic, micOffset: 0, system: system, systemOffset: 0,
+                micMuted: [0..<10])
+                == ["them", "me"])
+    }
+
     @Test("A missing track refuses to attribute rather than guessing")
     func missingTrackRefuses() throws {
         let f = try Fixture()

@@ -226,6 +226,13 @@ struct TranscriptionInputs {
         log("transcribing \(Self.mixedFile) (\(engine.name))")
         let segments = try await engine.transcribe(mixed)
 
+        // When our mic was off in Meet, on the mix's clock.
+        let micMuted = MeetSpeakers.originMs(of: session).map { origin in
+            MeetSpeakers.muted(
+                from: origin, to: origin + Int((segments.map(\.end).max() ?? 0) * 1000)
+            ).map { TimeInterval($0.lowerBound - origin) / 1000..<TimeInterval($0.upperBound - origin) / 1000 }
+        } ?? []
+
         let names = meta.track(for: "me").flatMap { mic in
             meta.track(for: "them").flatMap { system in
                 SpeakerAttribution.resolve(
@@ -233,7 +240,8 @@ struct TranscriptionInputs {
                     mic: dir.appendingPathComponent(mic.file),
                     micOffset: TimeInterval(mic.offsetMs) / 1000,
                     system: dir.appendingPathComponent(system.file),
-                    systemOffset: TimeInterval(system.offsetMs) / 1000
+                    systemOffset: TimeInterval(system.offsetMs) / 1000,
+                    micMuted: micMuted
                 )
             }
         }

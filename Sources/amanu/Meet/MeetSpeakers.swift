@@ -42,8 +42,11 @@ enum MeetSpeakers {
         /// made before the extension sent it.
         let title: String?
         let speaking: [Speaker]
+        /// Whether our own mic was off in Meet. Absent when it was on, and
+        /// from reports made before the extension sent it.
+        let muted: Bool?
 
-        private enum CodingKeys: String, CodingKey { case t, meeting, tab, title, speaking }
+        private enum CodingKeys: String, CodingKey { case t, meeting, tab, title, speaking, muted }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -54,6 +57,7 @@ enum MeetSpeakers {
             // A "left the call" message carries no speakers at all, which is
             // exactly what it means.
             speaking = try container.decodeIfPresent([Speaker].self, forKey: .speaking) ?? []
+            muted = try container.decodeIfPresent(Bool.self, forKey: .muted)
         }
     }
 
@@ -90,18 +94,29 @@ enum MeetSpeakers {
     /// is. Reports that name no call, or no tab, all belong to one, and follow
     /// one another as they always did.
     static func turns(from events: [Event]) -> [Turn] {
-        var turns: [Turn] = []
-        for (index, event) in events.enumerated() {
+        states(events).flatMap { event, end in
+            event.speaking.filter { $0.`self` != true }.map {
+                Turn(id: $0.id, name: $0.name, startMs: event.t, endMs: end)
+            }
+        }
+    }
+
+    /// When our mic was off in Meet, in epoch milliseconds, from one
+    /// connection's events. A state ends as it does for `turns(from:)`.
+    static func muted(from events: [Event]) -> [Range<Int>] {
+        states(events).filter { $0.event.muted == true }.map { $0.event.t..<$0.end }
+    }
+
+    /// Each event with the moment its state ends, as `turns(from:)` explains.
+    private static func states(_ events: [Event]) -> [(event: Event, end: Int)] {
+        events.indices.compactMap { index in
+            let event = events[index]
             let next = events[(index + 1)...]
                 .first { $0.meeting == event.meeting && $0.tab == event.tab }?.t
                 ?? event.t + stale
             let end = min(next, event.t + stale)
-            guard end > event.t else { continue }
-            for speaker in event.speaking where speaker.`self` != true {
-                turns.append(Turn(id: speaker.id, name: speaker.name, startMs: event.t, endMs: end))
-            }
+            return end > event.t ? (event, end) : nil
         }
-        return turns
     }
 
     /// Every turn recorded between two moments, across however many
@@ -111,6 +126,13 @@ enum MeetSpeakers {
     static func turns(in dir: URL = directory, from startMs: Int, to endMs: Int) -> [Turn] {
         connections(in: dir, from: startMs, to: endMs).flatMap {
             Self.turns(from: $0).filter { $0.endMs > startMs && $0.startMs < endMs }
+        }
+    }
+
+    /// Every stretch our mic was off in Meet between two moments.
+    static func muted(in dir: URL = directory, from startMs: Int, to endMs: Int) -> [Range<Int>] {
+        connections(in: dir, from: startMs, to: endMs).flatMap {
+            Self.muted(from: $0).filter { $0.upperBound > startMs && $0.lowerBound < endMs }
         }
     }
 
@@ -284,6 +306,22 @@ enum MeetSpeakers {
         label == "them" || label.hasPrefix("them ")
     }
 
+    private static func isOurs(_ label: String) -> Bool {
+        label == "me" || label.hasPrefix("me ")
+    }
+
+    /// Whether at least half of a segment fell while our mic was off.
+    private static func spokenMuted(
+        _ segment: Transcript.Segment,
+        muted: [Range<Int>],
+        originMs: Int
+    ) -> Bool {
+        let start = originMs + segment.start_ms
+        let end = originMs + max(segment.end_ms, segment.start_ms + 1)
+        let off = muted.reduce(0) { $0 + max(0, min(end, $1.upperBound) - max(start, $1.lowerBound)) }
+        return off * 2 >= end - start
+    }
+
     private static func dominant(
         _ segment: Transcript.Segment,
         turns: [Turn],
@@ -317,6 +355,17 @@ enum MeetSpeakers {
     ) -> [Transcript.Segment] {
         guard let origin = originMs(of: dir), let last = segments.map(\.end_ms).max() else {
             return segments
+        }
+        // What the mic heard while it was off in Meet never reached the
+        // call: a word to somebody in the room, or a vacuum cleaner the
+        // engine took for one. On 5 October 2026 a vacuum ran through the
+        // last five minutes of a call with the mic off (2026.10.05-0905).
+        var segments = segments
+        let before = segments.count
+        let muted = muted(in: timeline, from: origin, to: origin + last)
+        segments.removeAll { isOurs($0.speaker) && spokenMuted($0, muted: muted, originMs: origin) }
+        if segments.count < before {
+            log("dropped \(before - segments.count) of our segment(s) spoken with the mic off in Meet")
         }
         // Our own tile, when the extension could not tell it was ours: the
         // name on it is the one the naming pass would give the mic track.
