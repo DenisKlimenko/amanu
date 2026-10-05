@@ -50,6 +50,18 @@ enum SpeakerAttribution {
     /// they look identical.
     private static let speechFloor: Float = 0.005
 
+    /// The floor above assumes a quiet room, and a loud steady noise clears it
+    /// for as long as it runs. On 5 October 2026 a vacuum cleaner held the mic
+    /// at −39 dBFS for six minutes (2026.10.05-0905): every bucket of it read
+    /// as speech, and every voice of the call's last five minutes was
+    /// credited to "me". Speech stops between words; a vacuum, a fan or a
+    /// running tap does not. So a bucket also has to stand `noiseMargin` above
+    /// the quietest tenth of the `noiseWindow` around it — the room with
+    /// nobody talking — and in a quiet room that changes nothing, because the
+    /// absolute floor is the higher of the two.
+    private static let noiseWindow: TimeInterval = 30
+    private static let noiseMargin: Float = 3  // about 10 dB
+
     private enum Side {
         case me, them
         var name: String { self == .me ? "me" : "them" }
@@ -182,6 +194,9 @@ enum SpeakerAttribution {
     /// can be compared against another track recorded at a different gain.
     private struct Envelope {
         private let buckets: [Float]
+        /// The level a bucket has to reach to count as speech: the absolute
+        /// floor, or the room around it when the room is louder.
+        private let floors: [Float]
         private let reference: Float
         /// Digital zero nine tenths of the time and never loud enough to be
         /// speech the rest of it: nothing anyone said reached this track.
@@ -257,6 +272,20 @@ enum SpeakerAttribution {
             buckets = out
             isSilent = p90 == 0 && speech.isEmpty
             reference = p90 > 0 ? p90 : Self.p90(of: speech) ?? 1
+
+            // Worked out once a second, which is as fine as a noise that runs
+            // for minutes needs.
+            let second = Int((1 / SpeakerAttribution.bucket).rounded())
+            let half = Int(SpeakerAttribution.noiseWindow / 2 / SpeakerAttribution.bucket)
+            var floors = [Float](repeating: SpeakerAttribution.speechFloor, count: out.count)
+            for start in stride(from: 0, to: out.count, by: second) {
+                let window = out[max(0, start - half)..<min(out.count, start + half)].sorted()
+                let room = window[window.count / 10] * SpeakerAttribution.noiseMargin
+                for i in start..<min(out.count, start + second) {
+                    floors[i] = max(SpeakerAttribution.speechFloor, room)
+                }
+            }
+            self.floors = floors
         }
 
         private static func p90(of levels: [Float]) -> Float? {
@@ -271,10 +300,10 @@ enum SpeakerAttribution {
         func level(from start: TimeInterval, to end: TimeInterval) -> Double {
             guard let span = span(from: start, to: end) else { return 0 }
             var sum: Double = 0
-            // Buckets under the absolute floor contribute nothing: a track
-            // with only room noise under this utterance must lose to one with
-            // speech, however the two normalize.
-            for i in span where buckets[i] >= SpeakerAttribution.speechFloor {
+            // Buckets under the floor contribute nothing: a track with only
+            // room noise under this utterance must lose to one with speech,
+            // however the two normalize.
+            for i in span where buckets[i] >= floors[i] {
                 sum += Double(buckets[i])
             }
             return sum / Double(span.count) / Double(reference)
@@ -283,7 +312,7 @@ enum SpeakerAttribution {
         /// How much of a time range held speech, from 0 to 1.
         func share(from start: TimeInterval, to end: TimeInterval) -> Double {
             guard let span = span(from: start, to: end) else { return 0 }
-            let speech = span.filter { buckets[$0] >= SpeakerAttribution.speechFloor }
+            let speech = span.filter { buckets[$0] >= floors[$0] }
             return Double(speech.count) / Double(span.count)
         }
 
