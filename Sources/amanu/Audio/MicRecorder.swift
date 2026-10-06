@@ -8,20 +8,21 @@
 import Foundation
 import os.lock
 
-/// Records the default input device to a mono PCM file via AVAudioEngine.
-/// Buffers stream straight to disk — nothing is held in memory, so
-/// session length is unbounded.
+/// Records the microphone to a mono PCM file. Buffers stream straight to
+/// disk — nothing is held in memory, so session length is unbounded.
 ///
 /// Raw capture is the default so recording never reroutes or attenuates what
-/// the person hears. With voice processing explicitly enabled, Apple's echo
-/// canceller subtracts speaker playback from the mic. VoiceProcessingIO is a
-/// duplex unit, not an input effect: it
+/// the person hears. It reads the microphone itself, through an IO proc
+/// (`MicIOProc`) that is started and stopped off main. With voice processing
+/// explicitly enabled, an AVAudioEngine runs Apple's echo canceller, which
+/// subtracts speaker playback from the mic. VoiceProcessingIO is a duplex
+/// unit, not an input effect: it
 /// needs a rendered output path and one explicit mono client format on both
 /// sides, or it silently delivers zeroed buffers (rca-001). A first-second
 /// liveness check catches routes where even the correct graph stays silent
 /// and restarts capture raw.
 ///
-/// A route change mid-meeting rebuilds the engine, and the rebuild keeps both
+/// A route change mid-meeting rebuilds capture, and the rebuild keeps both
 /// of those properties: the chosen processing mode and the same wall clock.
 /// Losing either is silent at the time and obvious a day later — see
 /// `restartCapture`.
@@ -30,19 +31,29 @@ final class MicRecorder: @unchecked Sendable {
         case engineStartFailed(Error)
         case fileCreationFailed(Error)
         case formatUnsupported(AVAudioFormat)
+        case voiceProcessingUnavailable(Error)
+        case noMicrophone
+        case deviceUnreadable(AudioObjectID)
+        case ioProcCreationFailed(OSStatus)
+        case deviceStartFailed(OSStatus)
 
         var description: String {
             switch self {
             case .engineStartFailed(let e): return "mic engine start failed: \(e)"
             case .fileCreationFailed(let e): return "mic file creation failed: \(e)"
             case .formatUnsupported(let f): return "can't downmix mic format \(f)"
+            case .voiceProcessingUnavailable(let e): return "mic voice processing unavailable: \(e)"
+            case .noMicrophone: return "no microphone to record"
+            case .deviceUnreadable(let d): return "can't read the input format of mic device \(d)"
+            case .ioProcCreationFailed(let s): return "mic IO proc creation failed (OSStatus \(s))"
+            case .deviceStartFailed(let s): return "mic device start failed (OSStatus \(s))"
             }
         }
     }
 
     /// One mid-session capture restart: something reconfigured the input
     /// device under us — a call app engaging voice processing, headphones
-    /// connecting, AirPods coming out of an ear — and the engine had to be
+    /// connecting, AirPods coming out of an ear — and capture had to be
     /// rebuilt on the new route.
     ///
     /// Recorded because the two things that go wrong here are invisible while
@@ -52,8 +63,8 @@ final class MicRecorder: @unchecked Sendable {
     struct Restart {
         let at: Date
         /// Dead span written as silence, filled in by the first buffer the new
-        /// engine delivers — nothing before that knows how long the route took
-        /// to come back.
+        /// capture delivers — nothing before that knows how long the route
+        /// took to come back.
         var gapMs: Int?
         /// Silence actually written, when less than the gap: see
         /// `longestPad`. Absent when the whole gap was padded.
@@ -97,8 +108,7 @@ final class MicRecorder: @unchecked Sendable {
         /// and always one. Three is the built-in microphone while another
         /// process runs voice processing on it, the shape `rawGain(for:)`
         /// amplifies — and the only trace of it that lasts: the format line
-        /// goes to a stderr nobody keeps when macOS launches the app, and the
-        /// system log, where AUHAL prints it too, keeps it less than a day.
+        /// goes to a stderr nobody keeps when macOS launches the app.
         let inputChannels: Int?
 
         var meta: [String: Any] {
@@ -119,7 +129,18 @@ final class MicRecorder: @unchecked Sendable {
         }
     }
 
-    private var engine = AVAudioEngine()
+    /// The voice-processing engine, while that is what is capturing. Raw
+    /// capture never builds one: an engine's input node joins the default
+    /// device's aggregate the moment it is touched, and that is where the
+    /// waits on AirPods were (see `MicIOProc`).
+    private var engine: AVAudioEngine?
+    /// The raw capture, while that is what is capturing. Opened, checked and
+    /// stopped on `deviceQueue` only, because any of that can wait on the
+    /// device, and main must never wait on one.
+    private var proc: MicIOProc?
+    private let deviceQueue = DispatchQueue(label: "me.samat.amanu.mic-device")
+    /// Where raw capture's buffers are written, one at a time.
+    private let ioQueue = DispatchQueue(label: "me.samat.amanu.mic-io")
     private let liveAudio = LiveAudioBufferRelay()
     private var url: URL?
     private(set) var isRecording = false
@@ -146,11 +167,11 @@ final class MicRecorder: @unchecked Sendable {
             inputChannels: initialInputChannels)
     }
 
-    // Thread-safe shared state: accessed from both the main thread and the
-    // audio-tap callback (background audio thread) without further sync.
+    // Thread-safe shared state: accessed from the main thread, the device
+    // queue and the capture callbacks without further sync.
     private struct LockedState {
         var file: AVAudioFile?
-        /// What the taps write through. Replaced whenever `file` is, and
+        /// What capture writes through. Replaced whenever `file` is, and
         /// kept across a mid-session rebuild along with it.
         var writer: TrackWriter?
         var firstBufferAt: Date?
@@ -159,9 +180,16 @@ final class MicRecorder: @unchecked Sendable {
         var levelMeasurable = true
         var muted = false
         /// Every restart, and the dead span still open. Opened on the main
-        /// thread when capture is torn down, closed by the tap callback whose
+        /// thread when capture is retired, closed by the callback whose
         /// buffer ends it.
         var log = RestartLog()
+        /// Which capture may write. Moved on whenever one is retired — by a
+        /// restart, or by stop — so that what its device still delivers on
+        /// the way down is dropped. Written after the gap opened for the
+        /// capture replacing it, a single such buffer would close that gap
+        /// before the new capture had delivered anything, and the track would
+        /// lose the time the restart took.
+        var generation = 0
     }
     private let state = OSAllocatedUnfairLock(initialState: LockedState())
 
@@ -175,20 +203,21 @@ final class MicRecorder: @unchecked Sendable {
         }
     }
 
-    private var writer: TrackWriter? { state.withLockUnchecked { $0.writer } }
+    /// The writer, for buffers of the capture that is current — nil for one
+    /// that a restart or stop has retired since it started.
+    private func writer(for generation: Int) -> TrackWriter? {
+        state.withLockUnchecked { $0.generation == generation ? $0.writer : nil }
+    }
 
     /// Wall-clock time of the first captured buffer — the track's true start,
     /// used to offset-align the two tracks' transcript timestamps.
-    private(set) var firstBufferAt: Date? {
-        get { state.withLock { $0.firstBufferAt } }
-        set { state.withLock { $0.firstBufferAt = newValue } }
-    }
+    var firstBufferAt: Date? { state.withLock { $0.firstBufferAt } }
 
     /// Wall-clock time of the most recent captured buffer. When a device
-    /// reconfiguration kills the engine, the span from here to the restart is
+    /// reconfiguration stops capture, the span from here to the restart is
     /// written as silence so downstream timestamps stay wall-clock aligned.
-    /// Written from the tap callback and read on main during a restart, so it
-    /// belongs under the same lock as the rest.
+    /// Written from the capture callbacks and read on main during a restart,
+    /// so it belongs under the same lock as the rest.
     private var lastBufferAt: Date? {
         get { state.withLock { $0.lastBufferAt } }
         set { state.withLock { $0.lastBufferAt = newValue } }
@@ -214,20 +243,22 @@ final class MicRecorder: @unchecked Sendable {
         set { state.withLock { $0.muted = newValue } }
     }
 
-    // Main-thread only: the observer passes its changes to the main queue and
-    // handleConfigChange runs there, so these need no lock.
+    // Main-thread only: the observer passes its changes to the main queue,
+    // and raw capture reports there, so these need no lock.
     private var configObserver: NSObjectProtocol?
+    /// A rebuild is scheduled or under way — for raw capture, until its
+    /// device has started or failed to — and nothing else may begin one.
     private var restartPending = false
-    /// The route the current engine attached to, so a restart can say what
+    /// The route the current capture attached to, so a restart can say what
     /// changed rather than only that something did.
     private var inputDevice: String?
     private var outputDevice: String?
     private var inputChannels: Int?
-    /// True while the engine is writing into a file that was already open —
-    /// a mid-session rebuild. It decides what a failure may throw away: at
+    /// True while capture is writing into a file that was already open — a
+    /// mid-session rebuild. It decides what a failure may throw away: at
     /// the start of a session, a silent prefix; mid-session, a meeting.
     private var attachedReusingFile = false
-    /// When the current engine finished attaching, for the settle window
+    /// When the current capture finished attaching, for the settle window
     /// below.
     private var attachedAt = Date.distantPast
     /// The call app families this session follows, and the device that choice
@@ -240,15 +271,20 @@ final class MicRecorder: @unchecked Sendable {
     /// Whether the last attach bound a microphone other than the default —
     /// what `attachWithFallbacks` asks after a failure.
     private var boundChosenDevice = false
+    /// Whether raw capture is up: set once its device has started, cleared
+    /// when it is retired.
+    private var rawRunning = false
+    /// Whether capture has come up yet this session. What it first came up
+    /// as is what `capture` reports.
+    private var startedOnce = false
     /// Listener on the system default input, because a default that changes
-    /// under a running engine changes nothing else: `AVAudioEngine` stays on
-    /// the device it was built around and posts no notification at all.
+    /// under running capture changes nothing else: capture stays on the
+    /// device it was opened on, and nothing is posted at all.
     private var defaultInputListener: AudioObjectPropertyListenerBlock?
 
     /// How long a new microphone has to still be the answer before we move to
     /// it. A route in the middle of changing answers differently from one
-    /// second to the next, and each move costs about four seconds of silence
-    /// in the track.
+    /// second to the next, and each move costs silence in the track.
     private static let routeSettle: TimeInterval = 1.5
 
     /// How long after an attach a configuration change may be our own doing.
@@ -267,8 +303,8 @@ final class MicRecorder: @unchecked Sendable {
     private static let settleWindow: TimeInterval = 1.5
     /// When that question gets answered, measured from the attach. Long enough
     /// to cover a voice-processing route's warm-up — 1.7 to 2.8 s to the first
-    /// buffer on this Mac — and the worst case for how much audio a genuinely
-    /// dead engine costs before it is rebuilt.
+    /// buffer on this Mac — and the worst case for how much audio genuinely
+    /// dead capture costs before it is rebuilt.
     private static let settleDeadline: TimeInterval = 5
     /// A buffer this recent means capture is alive.
     private static let aliveWithin: TimeInterval = 1
@@ -294,30 +330,28 @@ final class MicRecorder: @unchecked Sendable {
     /// listening to, falling back to the system default. Pass them again
     /// through `follow(callApps:)` when the session's idea of the call
     /// changes.
+    ///
+    /// Raw capture comes up off main, so this returns before it has: it
+    /// throws only when there is no microphone at all, and one that will not
+    /// start is asked again every two seconds, while the watchdog reports a
+    /// mic track that is not growing.
     func start(writingTo url: URL, callApps: [String] = []) throws {
         guard !isRecording else { return }
         self.url = url
         followedCallApps = callApps
         requestedVoiceProcessing = Config.micVoiceProcessing()
+        restartPending = false
+        startedOnce = false
         try attachWithFallbacks(voiceProcessing: requestedVoiceProcessing, reusingFile: false)
         isRecording = true
-        inputDevice = AudioDevices.name(of: boundDevice) ?? AudioDevices.defaultInputName()
-        outputDevice = AudioDevices.defaultOutputName()
-        initialVoiceProcessing = engine.inputNode.isVoiceProcessingEnabled
-        finalVoiceProcessing = initialVoiceProcessing
-        initialInputDevice = inputDevice
-        initialOutputDevice = outputDevice
-        initialInputChannels = inputChannels
-        if let format = file?.processingFormat {
-            captureSampleRate = format.sampleRate
-            captureChannels = Int(format.channelCount)
-            captureSampleFormat = Self.name(of: format.commonFormat)
-        }
+        // The engine is up by now; raw capture reports when its device is.
+        if engine != nil { noteStarted() }
         // A call app (FaceTime, Zoom) grabbing the mic reconfigures the input
         // device and stops the engine mid-session; without this observer the
-        // track just ends there (2026.07.28: 1.7s mic on a 19min call).
+        // track just ends there (2026.07.28: 1.7s mic on a 19min call). Raw
+        // capture hears the same from the device itself.
         configObserver = Self.observeConfigurationChanges { [weak self] changed in
-            guard let self, changed === self.engine else { return }
+            guard let self, let engine = self.engine, changed === engine else { return }
             self.handleConfigChange()
         }
         listenForDefaultInputChanges()
@@ -361,8 +395,8 @@ final class MicRecorder: @unchecked Sendable {
         if restartIfSilent() { return }
         guard let target = routeTarget(), target != boundDevice else { return }
         // Two questions a second apart: a route in the middle of changing
-        // answers differently each time, and every move costs seconds of
-        // silence in the track.
+        // answers differently each time, and every move costs silence in the
+        // track.
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.routeSettle) { [weak self] in
             guard let self, self.isRecording, !self.restartPending else { return }
             guard let now = self.routeTarget(), now == target, now != self.boundDevice
@@ -379,16 +413,24 @@ final class MicRecorder: @unchecked Sendable {
     func stop() {
         guard isRecording else { return }
         isRecording = false
-        finalVoiceProcessing = engine.inputNode.isVoiceProcessingEnabled
+        if let engine { finalVoiceProcessing = engine.inputNode.isVoiceProcessingEnabled }
         if let configObserver {
             NotificationCenter.default.removeObserver(configObserver)
             self.configObserver = nil
         }
         stopListeningForDefaultInputChanges()
-        engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
+        stopEngine()
+        stopRaw()
+        // Nothing raw capture delivers from here on is written, however long
+        // its device takes to stop. A buffer already past that check may be
+        // writing, and is waited for.
+        let writer = state.withLockUnchecked { s -> TrackWriter? in
+            s.generation += 1
+            return s.writer
+        }
+        ioQueue.sync {}
         // Whatever a gap left queued belongs in the file before it is let go,
-        // and with the tap removed nothing more can be added.
+        // and nothing more can be added to it now.
         writer?.drain()
         file = nil
         lastBufferAt = nil
@@ -407,50 +449,44 @@ final class MicRecorder: @unchecked Sendable {
         liveAudio.isPaused = paused
     }
 
-    // MARK: -
+    // MARK: - voice processing
 
-    /// Build the engine graph, create the PCM file, and start capture. Called
-    /// once at start, again (voiceProcessing: false) if the liveness check
-    /// trips, and (reusingFile: true) after a device reconfiguration.
+    /// Build the voice-processing graph, create the PCM file if there is
+    /// none, and start capture. Called at start when voice processing is
+    /// asked for, and again by a restart that keeps it.
     ///
     /// `reusingFile` changes two things and nothing else: the client format
     /// follows the open file rather than the new device, and a failure here
     /// leaves that file alone.
-    private func attach(voiceProcessing: Bool, reusingFile: Bool = false) throws {
-        engine = AVAudioEngine()
+    private func attachVoice(reusingFile: Bool) throws {
+        let engine = AVAudioEngine()
+        self.engine = engine
         let input = engine.inputNode
         bindInputDevice(of: input)
 
-        var voice = voiceProcessing
-        if voice {
-            do {
-                try input.setVoiceProcessingEnabled(true)
-                // The live voice unit makes macOS treat the session like a
-                // call and duck all other audio — meetings played through the
-                // speakers would get quieter the moment recording starts.
-                input.voiceProcessingOtherAudioDuckingConfiguration =
-                    .init(enableAdvancedDucking: false, duckingLevel: .min)
-            } catch {
-                FileHandle.standardError.write(Data(
-                    "warning: mic voice processing unavailable (\(error)) — recording raw mic\n".utf8
-                ))
-                voice = false
-            }
+        do {
+            try input.setVoiceProcessingEnabled(true)
+            // The live voice unit makes macOS treat the session like a call
+            // and duck all other audio — meetings played through the speakers
+            // would get quieter the moment recording starts.
+            input.voiceProcessingOtherAudioDuckingConfiguration =
+                .init(enableAdvancedDucking: false, duckingLevel: .min)
+        } catch {
+            self.engine = nil
+            throw RecorderError.voiceProcessingUnavailable(error)
         }
-        let inputFormat = Self.tapFormat(of: input, voiceProcessing: voice)
+        // The unit's client side: it converts from the hardware by itself.
+        let inputFormat = input.outputFormat(forBus: 0)
         inputChannels = Int(inputFormat.channelCount)
 
-        // One explicit mono client format. With voice processing this is the
-        // Voice I/O boundary format on both sides of the duplex unit — never
-        // accept the inherited multichannel route format (a 9-channel device
-        // yielded digital silence). Raw capture downmixes to the same shape;
-        // speech models want one channel anyway.
+        // One explicit mono client format, the Voice I/O boundary format on
+        // both sides of the duplex unit — never the inherited multichannel
+        // route format (a 9-channel device yielded digital silence).
         //
         // Mid-session the rate is the open file's, not the new device's: the
         // device may well come back at another rate (48k speakers, 24k
         // AirPods) and the file's format is the one thing that cannot change.
-        // Both paths convert — the voice unit between its hardware and client
-        // scopes, the raw tap in `convertResampling`.
+        // The unit converts between its hardware and client scopes.
         let existing = reusingFile ? file : nil
         guard let monoFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -458,21 +494,25 @@ final class MicRecorder: @unchecked Sendable {
             channels: 1,
             interleaved: false
         ) else {
+            self.engine = nil
             throw RecorderError.formatUnsupported(inputFormat)
         }
 
-        if voice {
-            // Complete the duplex graph: VoiceProcessingIO must render to an
-            // output device or the input side never produces audio. The mixer
-            // has no sources — nothing is monitored or played — its connection
-            // exists solely to give the unit a formatted output path.
-            engine.connect(engine.mainMixerNode, to: engine.outputNode, format: monoFormat)
-            livenessFrames = 0
-            livenessPeak = 0
-            livenessSettled = false
-            try installVoiceTap(on: input, format: monoFormat, reusingFile: existing != nil)
-        } else {
-            try installRawTap(on: input, inputFormat: inputFormat, monoFormat: monoFormat)
+        // Complete the duplex graph: VoiceProcessingIO must render to an
+        // output device or the input side never produces audio. The mixer
+        // has no sources — nothing is monitored or played — its connection
+        // exists solely to give the unit a formatted output path.
+        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: monoFormat)
+        livenessFrames = 0
+        livenessPeak = 0
+        livenessSettled = false
+        do {
+            try installVoiceTap(
+                on: input, format: monoFormat, reusingFile: existing != nil,
+                generation: state.withLock { $0.generation })
+        } catch {
+            self.engine = nil
+            throw error
         }
 
         if existing == nil {
@@ -487,6 +527,7 @@ final class MicRecorder: @unchecked Sendable {
                 )
             } catch {
                 input.removeTap(onBus: 0)
+                self.engine = nil
                 throw RecorderError.fileCreationFailed(error)
             }
         }
@@ -497,6 +538,7 @@ final class MicRecorder: @unchecked Sendable {
             try engine.start()
         } catch {
             input.removeTap(onBus: 0)
+            self.engine = nil
             if existing == nil { file = nil }
             // If we had pointed it at a microphone of our own choosing, that
             // is the first suspect: it is not asked again for a while, and the
@@ -513,6 +555,14 @@ final class MicRecorder: @unchecked Sendable {
         let report = "mic: voiceProcessing=\(input.isVoiceProcessingEnabled) "
             + "input=\(input.outputFormat(forBus: 0)) tap=\(monoFormat)\n"
         FileHandle.standardError.write(Data(report.utf8))
+    }
+
+    /// Stop the voice-processing engine, if that is what is capturing.
+    private func stopEngine() {
+        guard let engine else { return }
+        engine.stop()
+        engine.inputNode.removeTap(onBus: 0)
+        self.engine = nil
     }
 
     private static func name(of format: AVAudioCommonFormat) -> String {
@@ -539,13 +589,11 @@ final class MicRecorder: @unchecked Sendable {
     /// cancellation for the rest of the call — the exact failure this restart
     /// path exists to prevent.
     private func installVoiceTap(
-        on input: AVAudioInputNode, format: AVAudioFormat, reusingFile: Bool
+        on input: AVAudioInputNode, format: AVAudioFormat, reusingFile: Bool, generation: Int
     ) throws {
         let checkFrames = Int(format.sampleRate * (reusingFile ? 3 : 1))
         try Self.installTap(on: input, format: format) { [weak self] buffer, _ in
-            guard let self, let writer = self.writer else { return }
-            if self.firstBufferAt == nil { self.firstBufferAt = Date() }
-            self.lastBufferAt = Date()
+            guard let self, let writer = self.writer(for: generation) else { return }
 
             if !self.livenessSettled {
                 let frames = Int(buffer.frameLength)
@@ -558,21 +606,29 @@ final class MicRecorder: @unchecked Sendable {
                 if self.livenessFrames >= checkFrames {
                     self.livenessSettled = true
                     if self.livenessPeak == 0 {
-                        DispatchQueue.main.async { self.fallBackToRaw() }
+                        DispatchQueue.main.async { self.fallBackToRaw(from: generation) }
                         return
                     }
                 }
             }
 
-            self.writeTracked(buffer, to: writer)
+            self.writeTracked(buffer, to: writer, generation: generation)
         }
     }
 
     /// Write one captured buffer, recording its level on the way through and
-    /// substituting silence while paused. Both taps funnel through here so the
-    /// pause and the level tracking can't diverge between the two paths.
-    private func writeTracked(_ buffer: AVAudioPCMBuffer, to writer: TrackWriter) {
-        let silence = pendingGap(before: buffer, rate: writer.file.processingFormat.sampleRate)
+    /// substituting silence while paused. Both paths funnel through here so
+    /// the pause and the level tracking can't diverge between them.
+    /// `skipped` is audio of the device's that went by unread just before
+    /// this buffer, in the track's frames, written as silence to keep the
+    /// track on the wall clock.
+    private func writeTracked(
+        _ buffer: AVAudioPCMBuffer, to writer: TrackWriter, generation: Int,
+        skipped: AVAudioFrameCount = 0
+    ) {
+        guard let silence = pendingGap(
+            before: buffer, rate: writer.file.processingFormat.sampleRate, generation: generation
+        ) else { return }
         let peak = AudioLevel.peak(of: buffer)
         let muted: Bool = state.withLock { s in
             if let peak {
@@ -588,50 +644,277 @@ final class MicRecorder: @unchecked Sendable {
             guard let silent = AudioLevel.silence(like: buffer) else { return }
             outgoing = silent
         }
-        writer.write(outgoing, after: silence)
+        writer.write(outgoing, after: silence + skipped)
         liveAudio.forward(outgoing)
     }
 
-    /// Raw path: tap at the device's native format and keep its first channel
-    /// as the mono track, louder where that channel is a bare capsule (see
-    /// `rawGain(for:)`). Same sample rate on both sides, so the one-shot
-    /// convert applies.
-    private func installRawTap(
-        on input: AVAudioInputNode,
-        inputFormat: AVAudioFormat,
-        monoFormat: AVAudioFormat
-    ) throws {
-        guard let converter = Self.monoConverter(from: inputFormat, to: monoFormat) else {
-            throw RecorderError.formatUnsupported(inputFormat)
-        }
-        let sameRate = inputFormat.sampleRate == monoFormat.sampleRate
-        let ratio = monoFormat.sampleRate / inputFormat.sampleRate
-        let gain = Self.rawGain(for: inputFormat)
-        try Self.installTap(on: input, format: inputFormat) { [weak self] buffer, _ in
-            guard let self, let writer = self.writer else { return }
-            if self.firstBufferAt == nil { self.firstBufferAt = Date() }
-            self.lastBufferAt = Date()
-            let capacity = AVAudioFrameCount(Double(buffer.frameCapacity) * ratio) + 64
-            guard let mono = AVAudioPCMBuffer(
-                pcmFormat: monoFormat,
-                frameCapacity: capacity
-            ) else { return }
-            do {
-                if sameRate {
-                    try converter.convert(to: mono, from: buffer)
-                } else {
-                    // Post-reconfigure the device can come back at a new rate;
-                    // the one-shot convert only handles equal rates.
-                    try Self.convertResampling(buffer, to: mono, using: converter)
-                }
-            } catch {
-                FileHandle.standardError.write(Data("mic downmix failed: \(error)\n".utf8))
-                return
-            }
-            Self.amplify(mono, by: gain)
-            self.writeTracked(mono, to: writer)
+    // MARK: - raw capture
+
+    /// What a raw start tells main.
+    private struct RawStart: Sendable {
+        let device: AudioObjectID
+        let channels: Int
+        let reusedFile: Bool
+        let report: String
+    }
+
+    /// Bring raw capture up off main. The work goes to `deviceQueue`, which
+    /// first stops whatever raw capture ran before, and is reported back to
+    /// `rawStarted` or `rawFailed`. There a microphone of our choosing that
+    /// will not start gives way to the default, as in `attachWithFallbacks`,
+    /// and is not asked again for a while. `index` is the restart this
+    /// capture ends, when it is one.
+    ///
+    /// Throws only when there is no microphone to try.
+    private func startRaw(restart index: Int?) throws {
+        let fallback = AudioDevices.defaultInput()
+        let wanted = routeTarget()
+        let candidates = [wanted, wanted == fallback ? nil : fallback].compactMap { $0 }
+        guard !candidates.isEmpty else { throw RecorderError.noMicrophone }
+        let url = url!
+        let generation = state.withLock { $0.generation }
+        restartPending = true
+        deviceQueue.async { [self] in
+            openRaw(on: candidates, fallback: fallback, url: url, generation: generation, restart: index)
         }
     }
+
+    /// On `deviceQueue`: stop the raw capture there is, and start one on the
+    /// first of `candidates` that will.
+    private func openRaw(
+        on candidates: [AudioObjectID], fallback: AudioObjectID?, url: URL, generation: Int,
+        restart index: Int?
+    ) {
+        proc?.stop()
+        proc = nil
+        var refusals: [AudioObjectID] = []
+        var failed: [AudioObjectID] = []
+        var failure = "\(RecorderError.noMicrophone)"
+        for device in candidates {
+            // Stopped, or overtaken by a newer attach, while this one waited.
+            guard state.withLock({ $0.generation }) == generation else { return }
+            do {
+                let (opened, started) = try openProc(on: device, url: url, generation: generation)
+                proc = opened
+                let chosen = device != fallback
+                let refused = refusals, tried = failed
+                DispatchQueue.main.async { [self] in
+                    rawStarted(
+                        started, chosen: chosen, refusals: refused, failed: tried,
+                        generation: generation, restart: index)
+                }
+                return
+            } catch is CancellationError {
+                return
+            } catch {
+                failure = "\(error)"
+                failed.append(device)
+                // A microphone that has gone away has not refused anything.
+                if device != fallback, MicIOProc.isAlive(device) { refusals.append(device) }
+                FileHandle.standardError.write(Data(
+                    "warning: cannot record \(AudioDevices.name(of: device) ?? "device \(device)") (\(error))\n".utf8))
+            }
+        }
+        let refused = refusals
+        let reason = failure
+        DispatchQueue.main.async { [self] in
+            rawFailed(reason, refusals: refused, generation: generation)
+        }
+    }
+
+    /// On `deviceQueue`: open `device`, create the file if the session has
+    /// none yet, and start the device writing to it.
+    private func openProc(
+        on device: AudioObjectID, url: URL, generation: Int
+    ) throws -> (MicIOProc, RawStart) {
+        let opened = try MicIOProc(device: device)
+        let input = opened.format
+        let (mono, converter, reusedFile) = try claimTrack(for: input, at: url, generation: generation)
+
+        let gain = Self.rawGain(for: input)
+        try opened.start(
+            on: ioQueue,
+            changed: { [weak self] in
+                guard let self else { return }
+                self.deviceQueue.async { self.checkDevice() }
+            },
+            body: { [weak self] buffer, missed in
+                self?.writeRaw(
+                    buffer, missed: missed, as: mono, converter: converter, gain: gain,
+                    generation: generation)
+            })
+        let report = "mic: voiceProcessing=false device=\(AudioDevices.name(of: device) ?? "?") "
+            + "input=\(input) track=\(mono)\n"
+        return (opened, RawStart(
+            device: device, channels: Int(input.channelCount), reusedFile: reusedFile,
+            report: report))
+    }
+
+    /// The track a raw capture of `input` writes, and the converter into it:
+    /// the session's open file, or one created now. Settled in the same lock
+    /// in which a stop or a restart retires a capture, so one retired while
+    /// its device opened gets neither and throws `CancellationError`. Looked
+    /// at apart from that check, the file could already have been let go by
+    /// a stop: the open created it again, over the meeting in it, and then
+    /// deleted it as a file nobody wanted.
+    func claimTrack(
+        for input: AVAudioFormat, at url: URL, generation: Int
+    ) throws -> (mono: AVAudioFormat, converter: AVAudioConverter, reusedFile: Bool) {
+        try state.withLockUnchecked { s in
+            guard s.generation == generation else { throw CancellationError() }
+            // Mid-session the rate is the open file's, not the device's: the
+            // device may well come back at another rate (48k built-in, 24k
+            // AirPods) and the file's format is the one thing that cannot
+            // change. `convertResampling` makes up the difference.
+            guard let mono = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: s.file?.processingFormat.sampleRate ?? input.sampleRate,
+                channels: 1,
+                interleaved: false
+            ), let converter = Self.monoConverter(from: input, to: mono)
+            else { throw RecorderError.formatUnsupported(input) }
+            if s.file != nil { return (mono, converter, true) }
+            do {
+                let created = try AVAudioFile(
+                    forWriting: url,
+                    settings: AudioFormats.pcmSettings(sampleRate: mono.sampleRate, channels: 1),
+                    commonFormat: mono.commonFormat,
+                    interleaved: mono.isInterleaved)
+                s.file = created
+                s.writer = TrackWriter(file: created, label: "mic")
+            } catch {
+                throw RecorderError.fileCreationFailed(error)
+            }
+            return (mono, converter, false)
+        }
+    }
+
+    /// One buffer of raw capture, on `ioQueue`: the device's first channel,
+    /// at the file's rate, louder where it is a bare capsule (`rawGain`),
+    /// after silence for the device's frames that were `missed` before it.
+    private func writeRaw(
+        _ buffer: AVAudioPCMBuffer, missed: AVAudioFrameCount, as mono: AVAudioFormat,
+        converter: AVAudioConverter, gain: Float, generation: Int
+    ) {
+        guard let writer = writer(for: generation) else { return }
+        let ratio = mono.sampleRate / buffer.format.sampleRate
+        guard let track = AVAudioPCMBuffer(
+            pcmFormat: mono,
+            frameCapacity: AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 64
+        ) else { return }
+        do {
+            if ratio == 1 {
+                try converter.convert(to: track, from: buffer)
+            } else {
+                // The device came back at another rate than the file's, and
+                // the one-shot convert only handles equal rates.
+                try Self.convertResampling(buffer, to: track, using: converter)
+            }
+        } catch {
+            FileHandle.standardError.write(Data("mic downmix failed: \(error)\n".utf8))
+            return
+        }
+        Self.amplify(track, by: gain)
+        writeTracked(
+            track, to: writer, generation: generation,
+            skipped: AVAudioFrameCount(Double(missed) * ratio))
+    }
+
+    /// Raw capture is up. What main keeps about the capture is brought up to
+    /// date here, for the raw path, and nowhere else.
+    private func rawStarted(
+        _ started: RawStart, chosen: Bool, refusals: [AudioObjectID], failed: [AudioObjectID],
+        generation: Int, restart index: Int?
+    ) {
+        for device in refusals { refused.refuse(device, at: Date()) }
+        // Overtaken by a newer attach, or stopped: theirs is the report that
+        // counts.
+        guard isRecording, state.withLock({ $0.generation }) == generation else { return }
+        restartPending = false
+        rawRunning = true
+        boundDevice = started.device
+        boundChosenDevice = chosen
+        attachedAt = Date()
+        attachedReusingFile = started.reusedFile
+        inputChannels = started.channels
+        finalVoiceProcessing = false
+        if chosen {
+            FileHandle.standardError.write(Data(
+                "mic: recording \(AudioDevices.name(of: started.device) ?? "?"), the microphone the call is on\n".utf8
+            ))
+        }
+        FileHandle.standardError.write(Data(started.report.utf8))
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDeadline) { [weak self] in
+            self?.restartIfSilent()
+        }
+        if let index { noteRestart(index) }
+        noteStarted()
+        // Every route check while the device started was held off by
+        // `restartPending`, so a microphone the call moved to meanwhile has
+        // not been followed yet. One that has just failed to open is left to
+        // the next tick, as it always was: one on its way out fails again at
+        // once, and every try costs the track a restart.
+        if let target = routeTarget(), !failed.contains(target) { checkRoute() }
+    }
+
+    /// No microphone would start. Asked again in two seconds, as a failed
+    /// restart always has been.
+    private func rawFailed(_ reason: String, refusals: [AudioObjectID], generation: Int) {
+        for device in refusals { refused.refuse(device, at: Date()) }
+        guard isRecording, state.withLock({ $0.generation }) == generation else { return }
+        restartPending = false
+        FileHandle.standardError.write(Data(
+            "mic: capture would not start: \(reason) — retrying in 2s\n".utf8))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self, self.isRecording, !self.restartPending else { return }
+            self.restartCapture()
+        }
+    }
+
+    /// On `deviceQueue`: whether raw capture still has the device it was
+    /// opened on, in the shape it was opened in. Asked on every change the
+    /// device reports, and on every buffer of a shape the proc was not opened
+    /// for; only a no goes to main, which rebuilds.
+    private func checkDevice() {
+        guard let proc else { return }
+        let device = proc.device
+        // Taken before the device is looked at, so that an alarm raised while
+        // it is being looked at is not lifted by what was seen.
+        let alarms = proc.alarms
+        let gone = !MicIOProc.isAlive(device)
+        if !gone, MicIOProc.format(of: device)?.isEqual(proc.format) == true {
+            proc.trust(asOf: alarms)
+            return
+        }
+        DispatchQueue.main.async { [self] in deviceChanged(device, gone: gone) }
+    }
+
+    /// The microphone under raw capture went away, or changed shape. Rebuilt
+    /// at once for a new shape, whose buffers cannot be read as the old one,
+    /// and after a moment for a device that went away, so that the route has
+    /// settled on whatever replaces it.
+    private func deviceChanged(_ device: AudioObjectID, gone: Bool) {
+        guard isRecording, !restartPending, rawRunning, device == boundDevice else { return }
+        FileHandle.standardError.write(Data(
+            "mic: \(inputDevice ?? "the microphone") \(gone ? "went away" : "changed format") — restarting capture\n".utf8
+        ))
+        restartPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + (gone ? 0.5 : 0)) { [weak self] in
+            self?.restartCapture()
+        }
+    }
+
+    /// Retire raw capture, if that is what is capturing. Its device stops on
+    /// `deviceQueue`, after whatever is already queued there.
+    private func stopRaw() {
+        rawRunning = false
+        deviceQueue.async { [self] in
+            proc?.stop()
+            proc = nil
+        }
+    }
+
+    // MARK: -
 
     /// A converter from the device's own format to the mono track that reads
     /// the device's first channel.
@@ -650,7 +933,7 @@ final class MicRecorder: @unchecked Sendable {
         return converter
     }
 
-    /// How much louder the raw path writes what it taps: ten times, +20 dB,
+    /// How much louder the raw path writes what it reads: ten times, +20 dB,
     /// for the three-channel shape, and as it comes otherwise.
     ///
     /// Those three channels are the built-in microphone's capsules before the
@@ -675,22 +958,6 @@ final class MicRecorder: @unchecked Sendable {
     static func amplify(_ buffer: AVAudioPCMBuffer, by gain: Float) {
         guard gain != 1, let samples = buffer.floatChannelData?[0] else { return }
         for i in 0..<Int(buffer.frameLength) { samples[i] = min(1, max(-1, samples[i] * gain)) }
-    }
-
-    /// The format to read the microphone in: the hardware's, unless the voice
-    /// unit is running, which converts between its two sides itself.
-    ///
-    /// Not the node's output side, though nearly always that is the same
-    /// format. The output side keeps what the engine settled on with the
-    /// default device, and `bindInputDevice` moves only the hardware side to
-    /// the call's microphone. On 2 October 2026 AirPods became the default at
-    /// 24 kHz in the middle of a Meet call on the built-in microphone at
-    /// 48 kHz, and every raw tap after that asked a 48 kHz device for 24 kHz.
-    /// AVFAudio refused each one: silently while a configuration change was
-    /// pending, and otherwise with an exception. That ended the app twice in
-    /// ten minutes, and the third time left a recording with no microphone.
-    static func tapFormat(of input: AVAudioInputNode, voiceProcessing: Bool) -> AVAudioFormat {
-        voiceProcessing ? input.outputFormat(forBus: 0) : input.inputFormat(forBus: 0)
     }
 
     /// Tap bus 0 of `input`, with a format AVFAudio refuses thrown rather
@@ -783,27 +1050,40 @@ final class MicRecorder: @unchecked Sendable {
             now: Date())
     }
 
-    /// `attach`, with the retreats of `MicRecorder.attachWithFallbacks`.
-    private func attachWithFallbacks(voiceProcessing: Bool, reusingFile: Bool) throws {
+    /// `attachVoice` or `startRaw`, with the retreats of
+    /// `MicRecorder.attachWithFallbacks`. Raw capture comes up off main, so
+    /// for it this only sets the attempt going; its own retreat, from a
+    /// chosen microphone to the default, happens on `deviceQueue`.
+    private func attachWithFallbacks(
+        voiceProcessing: Bool, reusingFile: Bool, restart index: Int? = nil
+    ) throws {
         try Self.attachWithFallbacks(
             voiceProcessing: voiceProcessing,
             attempt: { voice in
                 do {
-                    try attach(voiceProcessing: voice, reusingFile: reusingFile)
+                    if voice {
+                        try attachVoice(reusingFile: reusingFile)
+                    } else {
+                        try startRaw(restart: index)
+                    }
                 } catch {
                     FileHandle.standardError.write(Data(
                         "mic: capture would not start (voiceProcessing=\(voice)): \(error)\n".utf8))
                     throw error
                 }
             },
-            failedOnChosenDevice: { boundChosenDevice })
+            // The same attempt again lands on the default only when the chosen
+            // microphone refused; anything else would fail the same way twice.
+            failedOnChosenDevice: {
+                boundChosenDevice && boundDevice.map { refused.isRefused($0, at: Date()) } == true
+            })
     }
 
     /// Follow the system default input while recording. A default that changes
-    /// under a running engine is silent in every other way — the engine stays
-    /// on the device it was built around, and `AVAudioEngineConfigurationChange`
-    /// is not posted — so without this listener, choosing another microphone
-    /// mid-meeting leaves amanu recording the old one for the rest of the call.
+    /// under running capture is silent in every other way — capture stays on
+    /// the device it was opened on, and nothing is posted — so without this
+    /// listener, choosing another microphone mid-meeting leaves amanu
+    /// recording the old one for the rest of the call.
     private func listenForDefaultInputChanges() {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultInputDevice,
@@ -840,13 +1120,14 @@ final class MicRecorder: @unchecked Sendable {
     }
 
     /// Another process reconfigured the input device (typically a call app
-    /// engaging voice processing) and the engine stopped. Debounce briefly —
-    /// reconfiguration storms post several notifications — then restart.
+    /// engaging voice processing) and the voice engine stopped. Debounce
+    /// briefly — reconfiguration storms post several notifications — then
+    /// restart.
     private func handleConfigChange() {
         guard isRecording, !restartPending else { return }
         restartPending = true
 
-        if Date().timeIntervalSince(attachedAt) <= Self.settleWindow, engine.isRunning {
+        if Date().timeIntervalSince(attachedAt) <= Self.settleWindow, engine?.isRunning == true {
             // Possibly our own attach reconfiguring the device — but only
             // possibly, and only while the engine is still running. An engine
             // that has stopped never restarts itself, so there is nothing to
@@ -882,49 +1163,51 @@ final class MicRecorder: @unchecked Sendable {
         }
     }
 
-    /// Whether a buffer has landed since the current engine attached, recently
-    /// enough to call capture alive. The only evidence that separates a device
-    /// we reconfigured ourselves from one that stopped.
+    /// Whether a buffer has landed since the current capture attached,
+    /// recently enough to call it alive. The only evidence that separates a
+    /// device we reconfigured ourselves from one that stopped.
     ///
-    /// Both halves matter. A buffer from the engine that has just been torn
+    /// Both halves matter. A buffer from the capture that has just been torn
     /// down says nothing about the one that replaced it, and without the first
-    /// half a dead engine looks alive for a whole second after every restart.
+    /// half dead capture looks alive for a whole second after every restart.
     private var audioIsFlowing: Bool {
         guard let last = lastBufferAt, last > attachedAt else { return false }
         return Date().timeIntervalSince(last) < Self.aliveWithin
     }
 
-    /// Rebuild capture if the engine is running and nothing has come out of
-    /// it for `settleDeadline`. Asked after every attach, and on every route
-    /// check for an engine that stops delivering later.
+    /// Rebuild capture if it is running and nothing has come out of it for
+    /// `settleDeadline`. Asked after every attach, and on every route check
+    /// for capture that stops delivering later.
     ///
-    /// Nothing else would notice: such an engine raises no error and posts no
+    /// Nothing else would notice: such capture raises no error and posts no
     /// configuration change. On 2 October 2026 a restart while AirPods were
-    /// changing mode left one running with Core Audio dropping every cycle of
-    /// the built-in microphone ("mono buffer too small (512 > 480)") until
-    /// something else restarted it 74 seconds later. A tap AVFAudio refuses
-    /// without saying so ("config change pending") looks the same from here.
+    /// changing mode left an engine running with Core Audio dropping every
+    /// cycle of the built-in microphone ("mono buffer too small (512 > 480)")
+    /// until something else restarted it 74 seconds later. A tap AVFAudio
+    /// refuses without saying so ("config change pending") looks the same
+    /// from here, and so would an IO proc its device stopped calling.
     @discardableResult
     private func restartIfSilent() -> Bool {
         guard isRecording, !restartPending, Self.isSilent(
-            lastBufferAt: lastBufferAt, since: attachedAt, running: engine.isRunning, now: Date())
+            lastBufferAt: lastBufferAt, since: attachedAt, running: engine?.isRunning ?? rawRunning,
+            now: Date())
         else { return false }
         FileHandle.standardError.write(Data(
-            "mic: no audio for \(Int(Self.settleDeadline))s from a running engine — restarting capture\n".utf8))
+            "mic: no audio for \(Int(Self.settleDeadline))s from running capture — restarting it\n".utf8))
         restartCapture()
         return true
     }
 
-    /// Whether a running engine has gone `settleDeadline` without a buffer,
+    /// Whether running capture has gone `settleDeadline` without a buffer,
     /// counted from its attach when it has delivered none — a buffer from
-    /// before then came from the engine it replaced.
+    /// before then came from the capture it replaced.
     static func isSilent(lastBufferAt: Date?, since attachedAt: Date, running: Bool, now: Date) -> Bool {
         guard running else { return false }
         let last = max(lastBufferAt ?? attachedAt, attachedAt)
         return now.timeIntervalSince(last) >= settleDeadline
     }
 
-    /// Rebuild the engine on the new route, keeping the file, the wall clock,
+    /// Rebuild capture on the new route, keeping the file, the wall clock,
     /// and — the part this used to give away — echo cancellation.
     ///
     /// Restarting raw was justified by "during a call the call app owns echo
@@ -937,19 +1220,15 @@ final class MicRecorder: @unchecked Sendable {
     private func restartCapture() {
         restartPending = false
         guard isRecording else { return }
-        engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
+        stopEngine()
+        stopRaw()
         // The gap is only marked here, not written: the first buffer of the
-        // new engine is the only thing that knows how long the dead span
+        // new capture is the only thing that knows how long the dead span
         // really was. Starting a device takes a few hundred milliseconds, and
         // padding before the start left every one of them out of the track —
         // two restarts put the mic 0.75 s ahead of the system track, far
         // enough for its echo of the far end to precede the far end.
-        let now = Date()
-        let (index, recent) = state.withLock { s in
-            let index = s.log.open(at: now, lastBufferAt: s.lastBufferAt)
-            return (index, s.log.recent(within: Self.stormWindow, of: now))
-        }
+        let (index, recent) = retireCapture(at: Date())
         let storming = recent >= Self.stormLimit
         if storming {
             FileHandle.standardError.write(Data(
@@ -960,7 +1239,7 @@ final class MicRecorder: @unchecked Sendable {
         do {
             // The new route may be one the voice unit can't take (rca-001), or
             // the call app's microphone may refuse us; each gives way in turn.
-            try attachWithFallbacks(voiceProcessing: voice, reusingFile: true)
+            try attachWithFallbacks(voiceProcessing: voice, reusingFile: true, restart: index)
         } catch {
             FileHandle.standardError.write(Data("mic: retrying restart in 2s\n".utf8))
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
@@ -969,7 +1248,49 @@ final class MicRecorder: @unchecked Sendable {
             }
             return
         }
-        noteRestart(index)
+        // Raw capture notes the restart, and the start, once its device has
+        // started. Voice capture is up by now, and may be the first capture
+        // of the session to come up at all: until it is noted as started, no
+        // restart after it would open a gap.
+        if engine != nil {
+            if let index { noteRestart(index) }
+            noteStarted()
+        }
+    }
+
+    /// Retire the capture that is going — nothing it still delivers is
+    /// written from here on — and open the gap that the first buffer of the
+    /// next one closes. Returns that restart's place in the log, and how many
+    /// others began within the storm window. Before capture has come up, or
+    /// written anything, there is no restart to log: a retry of the start is
+    /// not a route change, and nothing has been recorded to measure a gap
+    /// from.
+    func retireCapture(at now: Date) -> (index: Int?, recent: Int) {
+        let started = startedOnce
+        return state.withLock { s in
+            s.generation += 1
+            guard started || s.lastBufferAt != nil else { return (nil, 0) }
+            let index = s.log.open(at: now, lastBufferAt: s.lastBufferAt)
+            return (index, s.log.recent(within: Self.stormWindow, of: now))
+        }
+    }
+
+    /// Capture is up for the first time this session: what it came up as is
+    /// what `capture` reports for the start.
+    private func noteStarted() {
+        guard !startedOnce else { return }
+        startedOnce = true
+        inputDevice = AudioDevices.name(of: boundDevice) ?? AudioDevices.defaultInputName()
+        outputDevice = AudioDevices.defaultOutputName()
+        initialVoiceProcessing = finalVoiceProcessing
+        initialInputDevice = inputDevice
+        initialOutputDevice = outputDevice
+        initialInputChannels = inputChannels
+        if let format = file?.processingFormat {
+            captureSampleRate = format.sampleRate
+            captureChannels = Int(format.channelCount)
+            captureSampleFormat = Self.name(of: format.commonFormat)
+        }
     }
 
     /// Record what the route changed into, for meta.json and the run log.
@@ -979,7 +1300,7 @@ final class MicRecorder: @unchecked Sendable {
         // that is the whole point of binding it.
         let input = AudioDevices.name(of: boundDevice) ?? AudioDevices.defaultInputName()
         let output = AudioDevices.defaultOutputName()
-        let voice = engine.inputNode.isVoiceProcessingEnabled
+        let voice = engine?.inputNode.isVoiceProcessingEnabled ?? false
         let (inputWas, outputWas) = (inputDevice, outputDevice)
         let channels = inputChannels
         state.withLock {
@@ -1001,14 +1322,27 @@ final class MicRecorder: @unchecked Sendable {
 
     /// Close an open gap ahead of the first buffer that follows it: the
     /// frames of silence for the span between the last buffer of the old
-    /// engine and the start of the audio this one carries, so the track keeps
-    /// its place on the wall clock. The writer puts them in the file off this
-    /// thread.
-    private func pendingGap(before buffer: AVAudioPCMBuffer, rate: Double) -> AVAudioFrameCount {
+    /// capture and the start of the audio this one carries, so the track
+    /// keeps its place on the wall clock. The writer puts them in the file
+    /// off this thread.
+    ///
+    /// Nil when the capture `buffer` came from has been retired: such a
+    /// buffer is not written at all, and decided in the same lock that would
+    /// close the gap, so it cannot close the one opened for its successor.
+    /// The buffer times are kept here too, for buffers that are written and
+    /// no others: stamped before this check, a buffer a restart retired in
+    /// between would move the start of its gap past audio never written.
+    private func pendingGap(
+        before buffer: AVAudioPCMBuffer, rate: Double, generation: Int
+    ) -> AVAudioFrameCount? {
         let carried = Double(buffer.frameLength) / buffer.format.sampleRate
-        return state.withLock { s -> AVAudioFrameCount in
+        return state.withLock { s -> AVAudioFrameCount? in
+            guard s.generation == generation else { return nil }
+            let now = Date()
+            if s.firstBufferAt == nil { s.firstBufferAt = now }
+            s.lastBufferAt = now
             let index = s.log.openIndex
-            guard let gap = s.log.close(now: Date(), carried: carried) else { return 0 }
+            guard let gap = s.log.close(now: now, carried: carried) else { return 0 }
             let padded = min(gap, Self.longestPad)
             if padded < gap, let index { s.log.notePadded(padded, forEntry: index) }
             return Self.silenceFrames(gap: padded, sampleRate: rate)
@@ -1027,22 +1361,23 @@ final class MicRecorder: @unchecked Sendable {
     /// The voice-processing route delivered digital silence: tear the engine
     /// down and restart raw, discarding the silent prefix so the track's
     /// timestamps start at real audio.
-    private func fallBackToRaw() {
-        guard isRecording else { return }
+    private func fallBackToRaw(from generation: Int) {
+        // Only for the engine that found it: a restart may have replaced that
+        // engine since, or be replacing it now.
+        guard isRecording, !restartPending, engine != nil,
+              state.withLock({ $0.generation }) == generation
+        else { return }
         FileHandle.standardError.write(Data(
             "warning: voice processing delivered silence — restarting mic raw\n".utf8
         ))
-        engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
+        stopEngine()
 
         if attachedReusingFile {
             // Mid-session the "silent prefix" is a meeting. Keep the file and
             // the wall clock; give up only the cancellation.
-            let now = Date()
-            let index = state.withLock { $0.log.open(at: now, lastBufferAt: $0.lastBufferAt) }
+            let (index, _) = retireCapture(at: Date())
             do {
-                try attach(voiceProcessing: false, reusingFile: true)
-                noteRestart(index)
+                try startRaw(restart: index)
             } catch {
                 FileHandle.standardError.write(Data(
                     "mic raw fallback failed: \(error) — retrying in 2s\n".utf8
@@ -1055,8 +1390,17 @@ final class MicRecorder: @unchecked Sendable {
             return
         }
 
-        file = nil
-        firstBufferAt = nil
+        // The engine goes with its file: nothing it still delivers is
+        // written, and no gap is measured from its last buffer, or the new
+        // file would open with that much silence ahead of a start time that
+        // is its first raw buffer's.
+        state.withLockUnchecked { s in
+            s.generation += 1
+            s.file = nil
+            s.writer = nil
+            s.firstBufferAt = nil
+            s.lastBufferAt = nil
+        }
         if let url {
             try? FileManager.default.removeItem(at: url)
         }

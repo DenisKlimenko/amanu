@@ -130,17 +130,17 @@ struct MicRestartTests {
         #expect(Array(UnsafeBufferPointer(start: samples, count: 4)) == [0.3125, -0.625, 1, -1])
     }
 
-    /// Binding the call's microphone moves the node's hardware side and leaves
-    /// its output side at the default device's rate — on 2 October 2026,
-    /// AirPods at 24 kHz under a call on the 48 kHz built-in microphone — and
-    /// AVFAudio refuses a raw tap in that rate. It ended the app twice in one
-    /// call. Here the stale side is made by hand, on whatever microphone
-    /// the Mac has. Before macOS 27 the refusal is an exception that would end
-    /// the test run too.
-    @Test(.enabled(if: AudioDevices.defaultInput() != nil
+    /// A tap in a rate the node's hardware side does not have is refused —
+    /// on 2 October 2026, AirPods at 24 kHz under a call on the 48 kHz
+    /// built-in microphone, twice in one call, each time the end of the app.
+    /// The voice path still taps, so a refusal has to come back as an error.
+    /// Here the mismatch is made by hand, on whatever microphone the Mac has,
+    /// so it is opted into as `MicIOProcTests.liveMic` says. Before macOS 27
+    /// the refusal is an exception that would end the test run too.
+    @Test(.enabled(if: MicIOProcTests.liveMic
         && ProcessInfo.processInfo.isOperatingSystemAtLeast(
             OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0))))
-    func aRawTapFollowsTheHardwareRatherThanAStaleOutputSide() throws {
+    func aTapAVFAudioRefusesIsAnErrorRatherThanTheEndOfTheApp() throws {
         let engine = AVAudioEngine()
         let input = engine.inputNode
         let hardware = input.inputFormat(forBus: 0)
@@ -155,10 +155,6 @@ struct MicRestartTests {
         #expect(throws: (any Error).self) {
             try MicRecorder.installTap(on: input, format: input.outputFormat(forBus: 0)) { _, _ in }
         }
-        try MicRecorder.installTap(
-            on: input, format: MicRecorder.tapFormat(of: input, voiceProcessing: false)
-        ) { _, _ in }
-        input.removeTap(onBus: 0)
     }
 
     @Test func aRestartRecordsBothSidesOfTheRouteChange() {
