@@ -75,6 +75,11 @@ enum MeetSpeakers {
     /// Longer than the extension's heartbeat with room to spare.
     static let stale = 8_000
 
+    /// How much of the end of a stretch with the mic off is not believed: the
+    /// report that it came back on comes up to a scan late, and the engine's
+    /// times are not exact either. A word said as it came on is the call's.
+    static let unmuting = 1_000
+
     /// How long a timeline is worth keeping. Past a month it can only ever be
     /// matched against a re-transcription of an old recording, and those are
     /// rare enough to cost nothing when they come out unnamed.
@@ -102,9 +107,15 @@ enum MeetSpeakers {
     }
 
     /// When our mic was off in Meet, in epoch milliseconds, from one
-    /// connection's events. A state ends as it does for `turns(from:)`.
-    static func muted(from events: [Event]) -> [Range<Int>] {
-        states(events).filter { $0.event.muted == true }.map { $0.event.t..<$0.end }
+    /// connection's events between two moments. A state ends as it does for
+    /// `turns(from:)`. Only a call somebody else spoke in then counts: a tab
+    /// left alone in a call, muted, says nothing about what is being recorded.
+    static func muted(from events: [Event], between startMs: Int, and endMs: Int) -> [Range<Int>] {
+        let reported = states(events).filter { $0.end > startMs && $0.event.t < endMs }
+        let calls = Set(reported.filter { $0.event.speaking.contains { $0.`self` != true } }
+            .map(\.event.meeting))
+        return reported.filter { $0.event.muted == true && calls.contains($0.event.meeting) }
+            .map { $0.event.t..<$0.end }
     }
 
     /// Each event with the moment its state ends, as `turns(from:)` explains.
@@ -129,10 +140,22 @@ enum MeetSpeakers {
         }
     }
 
-    /// Every stretch our mic was off in Meet between two moments.
+    /// Every stretch our mic was off in Meet between two moments, each less
+    /// its last `unmuting`.
     static func muted(in dir: URL = directory, from startMs: Int, to endMs: Int) -> [Range<Int>] {
-        connections(in: dir, from: startMs, to: endMs).flatMap {
-            Self.muted(from: $0).filter { $0.upperBound > startMs && $0.lowerBound < endMs }
+        let reported = connections(in: dir, from: startMs, to: endMs)
+            .flatMap { Self.muted(from: $0, between: startMs, and: endMs) }
+            .sorted { $0.lowerBound < $1.lowerBound }
+        var stretches: [Range<Int>] = []
+        for range in reported {
+            if let last = stretches.last, range.lowerBound <= last.upperBound {
+                stretches[stretches.count - 1] = last.lowerBound..<max(last.upperBound, range.upperBound)
+            } else {
+                stretches.append(range)
+            }
+        }
+        return stretches.compactMap {
+            $0.upperBound - unmuting > $0.lowerBound ? $0.lowerBound..<($0.upperBound - unmuting) : nil
         }
     }
 
@@ -310,16 +333,16 @@ enum MeetSpeakers {
         label == "me" || label.hasPrefix("me ")
     }
 
-    /// Whether at least half of a segment fell while our mic was off.
-    private static func spokenMuted(
+    /// How much of a segment some stretches of the wall clock cover.
+    private static func share(
         _ segment: Transcript.Segment,
-        muted: [Range<Int>],
+        of ranges: [Range<Int>],
         originMs: Int
-    ) -> Bool {
+    ) -> Double {
         let start = originMs + segment.start_ms
         let end = originMs + max(segment.end_ms, segment.start_ms + 1)
-        let off = muted.reduce(0) { $0 + max(0, min(end, $1.upperBound) - max(start, $1.lowerBound)) }
-        return off * 2 >= end - start
+        let covered = ranges.reduce(0) { $0 + max(0, min(end, $1.upperBound) - max(start, $1.lowerBound)) }
+        return Double(covered) / Double(end - start)
     }
 
     private static func dominant(
@@ -356,22 +379,32 @@ enum MeetSpeakers {
         guard let origin = originMs(of: dir), let last = segments.map(\.end_ms).max() else {
             return segments
         }
-        // What the mic heard while it was off in Meet never reached the
-        // call: a word to somebody in the room, or a vacuum cleaner the
-        // engine took for one. On 5 October 2026 a vacuum ran through the
-        // last five minutes of a call with the mic off (2026.10.05-0905).
-        var segments = segments
-        let before = segments.count
-        let muted = muted(in: timeline, from: origin, to: origin + last)
-        segments.removeAll { isOurs($0.speaker) && spokenMuted($0, muted: muted, originMs: origin) }
-        if segments.count < before {
-            log("dropped \(before - segments.count) of our segment(s) spoken with the mic off in Meet")
-        }
         // Our own tile, when the extension could not tell it was ours: the
         // name on it is the one the naming pass would give the mic track.
         let owner = SpeakerNamer.ownerName()
         let turns = turns(in: timeline, from: origin, to: origin + last)
             .filter { $0.name == nil || $0.name != owner?.name }
+
+        // What the mic heard while it was off in Meet never reached the call:
+        // a word to somebody in the room. Unless somebody on the call was
+        // speaking then, by the 30% that names a speaker below — that is
+        // likelier the far end itself labelled ours, picked up from the
+        // speakers or heard through a vacuum cleaner (2026.10.05-0905), and
+        // theirs to keep. What goes is logged, so a mute amanu got wrong
+        // costs nobody their words.
+        let muted = muted(in: timeline, from: origin, to: origin + last)
+        let farEnd = turns.map { $0.startMs..<$0.endMs }
+        var kept: [Transcript.Segment] = []
+        for segment in segments {
+            if isOurs(segment.speaker), share(segment, of: muted, originMs: origin) >= 0.5,
+               share(segment, of: farEnd, originMs: origin) < 0.3 {
+                log("dropped, said with the mic off in Meet: \(segment.start_ms / 1000)s "
+                    + "\(segment.speaker): \(segment.text)")
+            } else {
+                kept.append(segment)
+            }
+        }
+        let segments = kept
         guard let result = attribute(segments, turns: turns, originMs: origin) else {
             return segments
         }

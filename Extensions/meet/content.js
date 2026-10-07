@@ -15,12 +15,14 @@
 // tiles have appeared yet. That reads none of Meet's wording, so it works in
 // any language.
 //
-// Whether our own mic is off goes with every report too. What amanu hears
-// through it then never reached the call, and is not part of the meeting.
+// Whether our own mic is off goes with every report too, as Meet's mic button
+// has it. What amanu hears through it then never reached the call, and is not
+// part of the meeting.
 //
 // Nothing here leans on Meet's class names, which change with every release:
-// tiles are found by `data-participant-id`, and "lit" means a coloured outline
-// or a coloured sliver of a meter, however Meet happens to style either.
+// tiles are found by `data-participant-id`, the mic by `data-is-muted`, and
+// "lit" means a coloured outline or a coloured sliver of a meter, however Meet
+// happens to style either.
 
 const SCAN_MS = 250;
 // Shorter than amanu's `MeetSpeakers.stale`, with room for a throttled tab.
@@ -151,16 +153,14 @@ function isSelf(tile) {
   return /\((you|вы)\)/i.test(tile.textContent ?? "");
 }
 
-// Whether this tile shows its mic as off. Meet marks every muted tile with a
-// mic_off icon; the button in the toolbar is not read instead, because only
-// its label, in the page's language, tells it from the camera's. That our
-// own tile carries the icon is reasoned from the others', not yet seen.
-function micOff(tile) {
-  for (const icon of tile.querySelectorAll("i.google-symbols, i.google-material-icons")) {
-    if (icon.textContent.trim() === "mic_off"
-      && icon.getClientRects().length > 0
-      && style(icon).visibility !== "hidden"
-      && !icon.closest('button, [role="button"], [role="menu"], [role="dialog"]')) return true;
+// Whether our mic is off in this call, as the button that turns it on and off
+// says: Meet marks that button and the camera's with `data-is-muted`, the
+// mic's first. Other Meet extensions read it so, and it reads none of Meet's
+// wording; that Meet still marks it so is not yet seen.
+function micMuted() {
+  for (const doc of documents()) {
+    const button = doc.querySelector("[data-is-muted]");
+    if (button) return button.getAttribute("data-is-muted") === "true";
   }
   return false;
 }
@@ -168,7 +168,6 @@ function micOff(tile) {
 function scan() {
   const speaking = new Map();
   let tiles = 0;
-  let muted = false;
   for (const doc of documents()) {
     for (const tile of doc.querySelectorAll(TILE)) {
       const id = tile.getAttribute("data-participant-id");
@@ -176,7 +175,6 @@ function scan() {
       const box = tile.getBoundingClientRect();
       if (box.width < 50 || box.height < 50) continue;
       tiles += 1;
-      if (!muted && micOff(tile) && isSelf(tile)) muted = true;
       // A participant can be on screen twice — the stage and the strip.
       if (speaking.has(id) || !lit(tile)) continue;
       const speaker = { id, name: nameOf(tile) };
@@ -184,7 +182,7 @@ function scan() {
       speaking.set(id, speaker);
     }
   }
-  return { tiles, speaking: [...speaking.values()], muted };
+  return { tiles, speaking: [...speaking.values()], muted: micMuted() };
 }
 
 function stateOf(speaking, muted) {

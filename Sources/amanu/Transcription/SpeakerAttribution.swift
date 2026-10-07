@@ -61,26 +61,16 @@ enum SpeakerAttribution {
     ///
     /// `micOffset` / `systemOffset` are the tracks' start offsets on the mixed
     /// clock: a segment at mixed time T sits at T − offset inside its track.
-    ///
-    /// `micMuted` is when our mic was off in the call, on the mixed clock.
-    /// Whatever the mic heard then never reached the far end, so it cannot
-    /// have been anyone's turn in the conversation, and the mic reads as
-    /// silent there: a noise in the room does not take the far end's voices.
-    /// Our own words from those stretches still come out as ours, for the
-    /// caller to drop.
     static func resolve(
         segments: [TranscriptSegment],
         mic: URL,
         micOffset: TimeInterval,
         system: URL,
-        systemOffset: TimeInterval,
-        micMuted: [Range<TimeInterval>] = []
+        systemOffset: TimeInterval
     ) -> [String]? {
         let sharedArchive = mic.standardizedFileURL == system.standardizedFileURL
         guard !segments.isEmpty,
-              let micEnvelope = Envelope(
-                url: mic, channel: sharedArchive ? 0 : nil,
-                silenced: micMuted.map { ($0.lowerBound - micOffset)..<($0.upperBound - micOffset) }),
+              let micEnvelope = Envelope(url: mic, channel: sharedArchive ? 0 : nil),
               let systemEnvelope = Envelope(url: system, channel: sharedArchive ? 1 : nil),
               // A silent mic still answers: the mix is only ever the two
               // tracks, so whatever the engine heard came in through the
@@ -201,10 +191,8 @@ enum SpeakerAttribution {
         let isSilent: Bool
 
         /// Read the file once, streaming, and reduce it to per-bucket RMS.
-        /// nil if the file is missing or empty. The `silenced` stretches, in
-        /// seconds on the track's own clock, read as silence everywhere but
-        /// in `isSilent`, which is about what was recorded.
-        init?(url: URL, channel selectedChannel: Int? = nil, silenced: [Range<TimeInterval>] = []) {
+        /// nil if the file is missing or empty.
+        init?(url: URL, channel selectedChannel: Int? = nil) {
             guard
                 FileManager.default.fileExists(atPath: url.path),
                 let file = try? AVAudioFile(forReading: url),
@@ -264,15 +252,10 @@ enum SpeakerAttribution {
             // it is taken from the stretches that held speech. A track with
             // none has no level at all, and loses every comparison anyway:
             // no bucket of it clears the floor.
-            isSilent = Self.p90(of: out) == 0 && !out.contains { $0 >= SpeakerAttribution.speechFloor }
-            for range in silenced {
-                let first = max(0, Int(range.lowerBound / SpeakerAttribution.bucket))
-                let last = min(out.count, Int((range.upperBound / SpeakerAttribution.bucket).rounded(.up)))
-                if first < last { out.replaceSubrange(first..<last, with: repeatElement(0, count: last - first)) }
-            }
             let p90 = Self.p90(of: out) ?? 0
             let speech = out.filter { $0 >= SpeakerAttribution.speechFloor }
             buckets = out
+            isSilent = p90 == 0 && speech.isEmpty
             reference = p90 > 0 ? p90 : Self.p90(of: speech) ?? 1
         }
 

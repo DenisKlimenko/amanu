@@ -183,16 +183,17 @@ struct MeetSpeakersTests {
         #expect(names.speakers["them B"]?.source == .manual)
     }
 
-    @Test("Our mic is off from a muted report until the next report of its tab")
+    @Test("Our mic is off from a muted report until the next of its tab, in a call somebody else spoke in")
     func mutedFromEvents() {
         #expect(MeetSpeakers.muted(from: Self.events("""
-        {"t":1000,"speaking":[],"muted":true}
-        {"t":3000,"speaking":[{"id":"a","name":"Ann"}]}
-        {"t":4000,"speaking":[],"muted":true}
-        """)) == [1000..<3000, 4000..<(4000 + MeetSpeakers.stale)])
+        {"t":1000,"meeting":"aaa","tab":"1","speaking":[{"id":"a","name":"Ann"}],"muted":true}
+        {"t":3000,"meeting":"aaa","tab":"1","speaking":[]}
+        {"t":4000,"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":5000,"meeting":"zzz","tab":"2","speaking":[],"muted":true}
+        """), between: 0, and: 20_000) == [1000..<3000, 4000..<(4000 + MeetSpeakers.stale)])
     }
 
-    @Test("What we said with the mic off is dropped, and nothing the far end said")
+    @Test("What we said with the mic off is dropped, but not while the far end spoke or as the mic came back on")
     func dropsOurMutedSpeech() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("amanu-meet-\(UUID().uuidString)", isDirectory: true)
@@ -204,19 +205,35 @@ struct MeetSpeakersTests {
 
         try JSONSerialization.data(withJSONObject: ["origin_ms": Self.origin])
             .write(to: session.appendingPathComponent("meta.json"))
+        // Muted from 0 to 6 s in the call, reported every 1.5 s, with Daniel
+        // speaking for the first 1.5; and a tab alone in another call, muted.
+        let o = Self.origin
         try """
-        {"t":\(Self.origin),"speaking":[{"id":"d","name":"Daniel"}],"muted":true}
-        {"t":\(Self.origin + 5000),"speaking":[]}
-        {"t":\(Self.origin + 9000),"speaking":[]}
-        """.write(to: timeline.appendingPathComponent("\(Self.origin).jsonl"),
-                  atomically: true, encoding: .utf8)
+        {"t":\(o),"meeting":"aaa","tab":"1","speaking":[{"id":"d","name":"Daniel"}],"muted":true}
+        {"t":\(o + 1500),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 3000),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 4500),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 6000),"meeting":"aaa","tab":"1","speaking":[]}
+        {"t":\(o + 7000),"meeting":"zzz","tab":"2","speaking":[],"muted":true}
+        {"t":\(o + 10000),"meeting":"aaa","tab":"1","speaking":[]}
+        {"t":\(o + 11000),"meeting":"zzz","tab":"2","speaking":[],"muted":true}
+        """.write(to: timeline.appendingPathComponent("\(o).jsonl"), atomically: true, encoding: .utf8)
 
+        var lines: [String] = []
         let segments = MeetSpeakers.apply(
-            to: [Self.seg("them", 0, 4), Self.seg("me", 1, 3), Self.seg("me", 6, 8)],
-            session: session, timeline: timeline, log: { _ in })
+            to: [
+                Self.seg("them", 0, 1.4),
+                Self.seg("me", 0.2, 1.2),  // over Daniel: likelier him, picked up from the speakers
+                Self.seg("me", 2, 3.5),  // muted, and nobody on the call speaking
+                Self.seg("them", 3.6, 4.4),  // the far end, whom the tiles missed
+                Self.seg("me", 5.4, 6.4),  // as the mic came back on
+                Self.seg("me", 7.5, 8.5),  // muted only in the other call
+            ],
+            session: session, timeline: timeline, log: { lines.append($0) })
 
-        #expect(segments.map(\.speaker) == ["them", "me"])
-        #expect(segments.map(\.start_ms) == [0, 6000])
+        #expect(segments.map(\.start_ms) == [0, 200, 3600, 5400, 7500])
+        #expect(segments.map(\.speaker) == ["them", "me", "them", "me", "me"])
+        #expect(lines.filter { $0.hasPrefix("dropped") } == ["dropped, said with the mic off in Meet: 2s me: me"])
     }
 
     @Test("A call is in progress while the extension keeps reporting it, in any tab")
