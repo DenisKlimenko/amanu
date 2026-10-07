@@ -76,9 +76,12 @@ enum MeetSpeakers {
     static let stale = 8_000
 
     /// How much of the end of a stretch with the mic off is not believed: the
-    /// report that it came back on comes up to a scan late, and the engine's
-    /// times are not exact either. A word said as it came on is the call's.
-    static let unmuting = 1_000
+    /// report that it came back on comes up to a scan late, the engine's times
+    /// are not exact either, and the transcript's clock and Meet's part as a
+    /// call goes on — in the all-hands of 7 October 2026, segments started
+    /// 0.6 s before the tiles of who said them lit early in it, and 0.9 s late
+    /// in it. A word said as the mic came on is the call's.
+    static let unmuting = 1_500
 
     /// How long a timeline is worth keeping. Past a month it can only ever be
     /// matched against a re-transcription of an old recording, and those are
@@ -106,8 +109,8 @@ enum MeetSpeakers {
         }
     }
 
-    /// When our mic was off in Meet, in epoch milliseconds, from one
-    /// connection's events between two moments. A state ends as it does for
+    /// When our mic was off in Meet, in epoch milliseconds, from events in the
+    /// order they happened, between two moments. A state ends as it does for
     /// `turns(from:)`. Only a call somebody else spoke in then counts: a tab
     /// left alone in a call, muted, says nothing about what is being recorded.
     static func muted(from events: [Event], between startMs: Int, and endMs: Int) -> [Range<Int>] {
@@ -142,9 +145,15 @@ enum MeetSpeakers {
 
     /// Every stretch our mic was off in Meet between two moments, each less
     /// its last `unmuting`.
+    ///
+    /// Unlike a turn, a state here is ended by its tab's next report on any
+    /// connection. The worker restarting mid-call opens a new one, and the old
+    /// one's last report would otherwise keep the mic off for up to `stale`
+    /// after it came back on. Reports of the mute all name their tab, so two
+    /// browsers cannot end each other's.
     static func muted(in dir: URL = directory, from startMs: Int, to endMs: Int) -> [Range<Int>] {
-        let reported = connections(in: dir, from: startMs, to: endMs)
-            .flatMap { Self.muted(from: $0, between: startMs, and: endMs) }
+        let events = connections(in: dir, from: startMs, to: endMs).joined().sorted { $0.t < $1.t }
+        let reported = Self.muted(from: events, between: startMs, and: endMs)
             .sorted { $0.lowerBound < $1.lowerBound }
         var stretches: [Range<Int>] = []
         for range in reported {

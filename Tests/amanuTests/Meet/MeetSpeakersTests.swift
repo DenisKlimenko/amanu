@@ -198,6 +198,27 @@ struct MeetSpeakersTests {
         """), between: 3000, and: 20_000) == [])
     }
 
+    @Test("A tab's next report ends its mute, even on the connection its worker opened after a restart")
+    func muteEndsAcrossConnections() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-meet-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let o = Self.origin
+        try """
+        {"t":\(o - 10000),"meeting":"aaa","tab":"1","speaking":[{"id":"a","name":"Ann"}],"muted":true}
+        {"t":\(o - 6000),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o - 2000),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        """.write(to: dir.appendingPathComponent("\(o - 10000).jsonl"), atomically: true, encoding: .utf8)
+        try """
+        {"t":\(o),"meeting":"aaa","tab":"1","speaking":[]}
+        {"t":\(o + 4000),"meeting":"aaa","tab":"1","speaking":[]}
+        """.write(to: dir.appendingPathComponent("\(o).jsonl"), atomically: true, encoding: .utf8)
+
+        #expect(MeetSpeakers.muted(in: dir, from: o - 20000, to: o + 20000)
+            == [(o - 10000)..<(o - MeetSpeakers.unmuting)])
+    }
+
     @Test("What we said with the mic off is marked, but not while the far end spoke or as the mic came back on")
     func marksOurMutedSpeech() throws {
         let root = FileManager.default.temporaryDirectory
@@ -240,6 +261,47 @@ struct MeetSpeakersTests {
         #expect(segments.map(\.speaker) == ["them", "me", "me", "them", "me", "me"])
         #expect(segments.map(\.muted) == [nil, nil, true, nil, nil, nil])
         #expect(lines.filter { $0.hasPrefix("marked") } == ["marked 1 segment(s) as said with the mic off in Meet"])
+    }
+
+    @Test("A mark needs half the segment muted before the last 1.5 s, under 30% of it lit for the far end, and a label of ours")
+    func markThresholds() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-meet-\(UUID().uuidString)", isDirectory: true)
+        let session = root.appendingPathComponent("session", isDirectory: true)
+        let timeline = root.appendingPathComponent("meet", isDirectory: true)
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: timeline, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try JSONSerialization.data(withJSONObject: ["origin_ms": Self.origin])
+            .write(to: session.appendingPathComponent("meta.json"))
+        // Muted for the first 20 s, so believed for 18.5; Daniel lit for 4–4.5
+        // and 8–8.7.
+        let o = Self.origin
+        try """
+        {"t":\(o),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 3000),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 4000),"meeting":"aaa","tab":"1","speaking":[{"id":"d","name":"Daniel"}],"muted":true}
+        {"t":\(o + 4500),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 8000),"meeting":"aaa","tab":"1","speaking":[{"id":"d","name":"Daniel"}],"muted":true}
+        {"t":\(o + 8700),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 11000),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 14000),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 17000),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 20000),"meeting":"aaa","tab":"1","speaking":[]}
+        """.write(to: timeline.appendingPathComponent("\(o).jsonl"), atomically: true, encoding: .utf8)
+
+        let segments = MeetSpeakers.apply(
+            to: [
+                Self.seg("me A", 2, 3),  // a lettered label is ours too
+                Self.seg("me", 4, 6),  // Daniel lit for 25% of it
+                Self.seg("me", 8, 10),  // and for 35% of this one
+                Self.seg("me", 17.4, 19.4),  // 55% of it before the last 1.5 s
+                Self.seg("me", 17.6, 19.6),  // 45%
+            ],
+            session: session, timeline: timeline, log: { _ in })
+
+        #expect(segments.map(\.muted) == [true, true, nil, true, nil])
     }
 
     @Test("A call is in progress while the extension keeps reporting it, in any tab")
