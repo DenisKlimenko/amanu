@@ -198,8 +198,8 @@ struct MeetSpeakersTests {
         """), between: 3000, and: 20_000) == [])
     }
 
-    @Test("What we said with the mic off is dropped, but not while the far end spoke or as the mic came back on")
-    func dropsOurMutedSpeech() throws {
+    @Test("What we said with the mic off is marked, but not while the far end spoke or as the mic came back on")
+    func marksOurMutedSpeech() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("amanu-meet-\(UUID().uuidString)", isDirectory: true)
         let session = root.appendingPathComponent("session", isDirectory: true)
@@ -236,9 +236,10 @@ struct MeetSpeakersTests {
             ],
             session: session, timeline: timeline, log: { lines.append($0) })
 
-        #expect(segments.map(\.start_ms) == [0, 200, 3600, 5400, 7500])
-        #expect(segments.map(\.speaker) == ["them", "me", "them", "me", "me"])
-        #expect(lines.filter { $0.hasPrefix("dropped") } == ["dropped, said with the mic off in Meet: 2s me: me"])
+        #expect(segments.map(\.start_ms) == [0, 200, 2000, 3600, 5400, 7500])
+        #expect(segments.map(\.speaker) == ["them", "me", "me", "them", "me", "me"])
+        #expect(segments.map(\.muted) == [nil, nil, true, nil, nil, nil])
+        #expect(lines.filter { $0.hasPrefix("marked") } == ["marked 1 segment(s) as said with the mic off in Meet"])
     }
 
     @Test("A call is in progress while the extension keeps reporting it, in any tab")

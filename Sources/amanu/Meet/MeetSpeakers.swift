@@ -311,7 +311,8 @@ enum MeetSpeakers {
                 speaker: participant.flatMap { label[$0] } ?? "them",
                 start_ms: segment.start_ms,
                 end_ms: segment.end_ms,
-                text: segment.text)
+                text: segment.text,
+                muted: segment.muted)
         }
 
         // The most recent name wins: people rename themselves mid-call rarely,
@@ -386,25 +387,25 @@ enum MeetSpeakers {
             .filter { $0.name == nil || $0.name != owner?.name }
 
         // What the mic heard while it was off in Meet never reached the call:
-        // a word to somebody in the room. Unless somebody on the call was
+        // a word to somebody in the room, or one the call missed because we
+        // forgot the mute. It is marked rather than dropped, so the reader can
+        // tell which from the context. Unless somebody on the call was
         // speaking then, by the 30% that names a speaker below — that is
         // likelier the far end itself labelled ours, picked up from the
         // speakers or heard through a vacuum cleaner (2026.10.05-0905), and
-        // theirs to keep. What goes is logged, so a mute amanu got wrong
-        // costs nobody their words.
+        // marked it would read as our aside rather than their words.
         let muted = muted(in: timeline, from: origin, to: origin + last)
         let farEnd = turns.map { $0.startMs..<$0.endMs }
-        var kept: [Transcript.Segment] = []
-        for segment in segments {
-            if isOurs(segment.speaker), share(segment, of: muted, originMs: origin) >= 0.5,
-               share(segment, of: farEnd, originMs: origin) < 0.3 {
-                log("dropped, said with the mic off in Meet: \(segment.start_ms / 1000)s "
-                    + "\(segment.speaker): \(segment.text)")
-            } else {
-                kept.append(segment)
-            }
+        var marked = 0
+        let segments = segments.map { segment in
+            guard isOurs(segment.speaker), share(segment, of: muted, originMs: origin) >= 0.5,
+                  share(segment, of: farEnd, originMs: origin) < 0.3 else { return segment }
+            marked += 1
+            var segment = segment
+            segment.muted = true
+            return segment
         }
-        let segments = kept
+        if marked > 0 { log("marked \(marked) segment(s) as said with the mic off in Meet") }
         guard let result = attribute(segments, turns: turns, originMs: origin) else {
             return segments
         }

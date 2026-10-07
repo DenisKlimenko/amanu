@@ -16,8 +16,8 @@
 // any language.
 //
 // Whether our own mic is off goes with every report too, as Meet's mic button
-// has it. What amanu hears through it then never reached the call, and is not
-// part of the meeting.
+// has it. What amanu hears through it then never reached the call, and the
+// transcript marks it so.
 //
 // Nothing here leans on Meet's class names, which change with every release:
 // tiles are found by `data-participant-id`, the mic by `data-is-muted`, and
@@ -155,8 +155,8 @@ function isSelf(tile) {
 
 // Whether our mic is off in this call, as the button that turns it on and off
 // says: Meet marks that button and the camera's with `data-is-muted`, the
-// mic's first. Other Meet extensions read it so, and it reads none of Meet's
-// wording; that Meet still marks it so is not yet seen.
+// mic's first, "true" while it is off. Seen so in October 2026, with the
+// camera on throughout, and it reads none of Meet's wording.
 function micMuted() {
   for (const doc of documents()) {
     const button = doc.querySelector("[data-is-muted]");

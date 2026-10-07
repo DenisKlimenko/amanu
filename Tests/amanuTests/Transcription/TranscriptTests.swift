@@ -91,6 +91,34 @@ struct TranscriptTests {
         #expect(!markdown.contains("**[0:02] them A:** дела?"))
     }
 
+    @Test("Words said on mute are marked wherever they are read, and only they carry the flag")
+    func marksWordsSaidOnMute() throws {
+        let segments: [Transcript.Segment] = [
+            .init(speaker: "me", start_ms: 0, end_ms: 300, text: "Да,"),
+            .init(speaker: "me", start_ms: 400, end_ms: 700, text: "закрой", muted: true),
+            .init(speaker: "me", start_ms: 700, end_ms: 1000, text: "дверь.", muted: true),
+        ]
+        let lines = Transcript(engine: "gemini", model: "test", created_at: "2026-10-08T00:00:00Z",
+                               segments: segments)
+        let turns = Transcript(engine: "assemblyai", model: "test", created_at: "2026-10-08T00:00:00Z",
+                               segments: segments)
+
+        #expect(lines.rendered(title: "Встреча", names: nil).contains("**[0:00] me:** (on mute) закрой\n"))
+        #expect(lines.rendered(title: "Встреча", names: nil).contains("**[0:00] me:** Да,\n"))
+        // The mic going off splits a turn, so the mark covers only its words.
+        #expect(turns.rendered(title: "Встреча", names: nil).contains("**[0:00] me:** Да,\n"))
+        #expect(turns.rendered(title: "Встреча", names: nil).contains("**[0:00] me:** (on mute) закрой дверь."))
+        let names = SpeakerNames(speakers: ["me": .init(name: "Денис", source: .manual)])
+        #expect(lines.named(with: names).segments.map(\.muted) == [nil, true, true])
+
+        let json = try JSONEncoder().encode(lines)
+        #expect(String(decoding: json, as: UTF8.self).components(separatedBy: "\"muted\":true").count == 3)
+        #expect(!String(decoding: json, as: UTF8.self).contains("\"muted\":null"))
+        let old = try JSONDecoder().decode(Transcript.Segment.self, from: Data(
+            #"{"speaker":"me","start_ms":0,"end_ms":1,"text":"x"}"#.utf8))
+        #expect(old.muted == nil)
+    }
+
     @Test("Two speaker labels named as one person keep their word order")
     func groupsByNamedPersonInChronologicalOrder() {
         let transcript = Transcript(

@@ -8,6 +8,17 @@ struct Transcript: Codable {
         let start_ms: Int
         let end_ms: Int
         let text: String
+        /// Said with our mic off in the call, so nobody on it heard it. Absent
+        /// otherwise, and from transcripts written before amanu knew.
+        var muted: Bool? = nil
+    }
+
+    /// A segment's words as a reader is given them: marked when the call never
+    /// heard them, so whoever reads them can tell from the context whether
+    /// they were for the meeting — someone forgetting the mute — or for the
+    /// room.
+    static func shown(_ text: String, muted: Bool?) -> String {
+        muted == true ? "(on mute) \(text)" : text
     }
 
     let engine: String
@@ -54,7 +65,8 @@ struct Transcript: Codable {
                     speaker: names.name(for: $0.speaker),
                     start_ms: $0.start_ms,
                     end_ms: $0.end_ms,
-                    text: $0.text
+                    text: $0.text,
+                    muted: $0.muted
                 )
             }
         )
@@ -73,13 +85,15 @@ struct Transcript: Codable {
         lines.append("")
         if Self.formatsTurns(engine) {
             for paragraph in paragraphs(names: names) {
-                lines.append("**[\(Self.clock(paragraph.start_ms))] \(paragraph.speaker):** \(paragraph.text)")
+                lines.append("**[\(Self.clock(paragraph.start_ms))] \(paragraph.speaker):** "
+                    + Self.shown(paragraph.text, muted: paragraph.muted))
                 lines.append("")
             }
         } else {
             for segment in segments {
                 let who = names?.name(for: segment.speaker) ?? segment.speaker
-                lines.append("**[\(Self.clock(segment.start_ms))] \(who):** \(segment.text)")
+                lines.append("**[\(Self.clock(segment.start_ms))] \(who):** "
+                    + Self.shown(segment.text, muted: segment.muted))
                 lines.append("")
             }
         }
@@ -95,7 +109,9 @@ struct Transcript: Codable {
 
     /// AssemblyAI can return one diarized utterance per word. Keep those
     /// timestamps in transcript.json, but present continuous speech as a turn.
-    /// A brief interjection by another speaker does not split that turn.
+    /// A brief interjection by another speaker does not split that turn; the
+    /// mic going off or on in the call does, so the mark stays on the words
+    /// it is about.
     private func paragraphs(names: SpeakerNames?) -> [Paragraph] {
         var result: [Paragraph] = []
         var lastBySpeaker: [String: Int] = [:]
@@ -103,7 +119,7 @@ struct Transcript: Codable {
             let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { continue }
             let speaker = names?.name(for: segment.speaker) ?? segment.speaker
-            if let index = lastBySpeaker[speaker],
+            if let index = lastBySpeaker[speaker], result[index].muted == segment.muted,
                segment.start_ms - result[index].end_ms <= 1_500 {
                 let separator = text.first.map { ",.!?;:…)]}»".contains($0) } == true ? "" : " "
                 result[index].text += separator + text
@@ -114,7 +130,8 @@ struct Transcript: Codable {
                     speaker: speaker,
                     start_ms: segment.start_ms,
                     end_ms: segment.end_ms,
-                    text: text))
+                    text: text,
+                    muted: segment.muted))
             }
         }
         return result
@@ -125,6 +142,7 @@ struct Transcript: Codable {
         let start_ms: Int
         var end_ms: Int
         var text: String
+        let muted: Bool?
     }
 
     private static func clock(_ ms: Int) -> String {
