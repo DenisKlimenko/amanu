@@ -163,7 +163,7 @@ enum MeetSpeakers {
         return files.filter { $0.pathExtension == "jsonl" }.compactMap { file in
             // Named for the moment the connection opened, and last written when
             // it closed: a file outside those two moments holds none of the
-            // meeting, and a month of calls is not worth parsing to learn that.
+            // meeting, and years of calls are not worth parsing to learn that.
             if let opened = Int(file.deletingPathExtension().lastPathComponent), opened > endMs {
                 return nil
             }

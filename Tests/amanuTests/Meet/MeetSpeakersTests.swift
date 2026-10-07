@@ -278,6 +278,9 @@ struct MeetSpeakersTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let old = dir.appendingPathComponent("1690000000000.jsonl")
         try Data(#"{"t":1690000000000,"speaking":[]}"#.utf8).write(to: old)
+        // Old by its modification date too, so retention by either is caught.
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1_690_000_000)], ofItemAtPath: old.path)
 
         let pipe = Pipe()
         try pipe.fileHandleForWriting.close()
