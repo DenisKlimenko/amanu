@@ -269,4 +269,22 @@ struct MeetSpeakersTests {
         #expect(events.map(\.t) == [1, 2])
         #expect(events.first?.speaking.first?.name == "Ann\nLee")
     }
+
+    @Test("A new connection leaves earlier timelines alone, however old")
+    func hostKeepsOldTimelines() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-host-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let old = dir.appendingPathComponent("1690000000000.jsonl")
+        try Data(#"{"t":1690000000000,"speaking":[]}"#.utf8).write(to: old)
+
+        let pipe = Pipe()
+        try pipe.fileHandleForWriting.close()
+        try MeetHost.serve(
+            input: pipe.fileHandleForReading, directory: dir,
+            now: Date(timeIntervalSince1970: 1_790_000_000))
+
+        #expect(FileManager.default.fileExists(atPath: old.path))
+    }
 }

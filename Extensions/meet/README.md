@@ -34,9 +34,10 @@ sends nothing anywhere except to amanu on this Mac.
 In a call, open the page's DevTools console and filter for `amanu:`. Every
 change of speaker is logged there. amanu writes each connection's timeline to
 `~/Library/Application Support/amanu/meet/<start-ms>.jsonl` and keeps it for
-30 days. When a session is transcribed, `transcribe.log` in the session folder
-reports a line like `Meet named them A → …`, and `speakers.json` records those
-names with `"source": "meet"`.
+good, so a session transcribed again later is named again. When a session is
+transcribed, `transcribe.log` in the session folder reports a line like
+`Meet named them A → …`, and `speakers.json` records those names with
+`"source": "meet"`.
 
 The timeline also carries the call's meeting code and the tab's title, from
 the waiting room on. A recording can start there, while the preview holds the

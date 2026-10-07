@@ -71,11 +71,6 @@ enum MeetSpeakers {
     /// Longer than the extension's heartbeat with room to spare.
     static let stale = 8_000
 
-    /// How long a timeline is worth keeping. Past a month it can only ever be
-    /// matched against a re-transcription of an old recording, and those are
-    /// rare enough to cost nothing when they come out unnamed.
-    static let retention: TimeInterval = 30 * 86_400
-
     // MARK: - the timeline
 
     /// Turns from one connection's events, in the order they were written.
@@ -180,18 +175,6 @@ enum MeetSpeakers {
             guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
             return text.split(separator: "\n").compactMap {
                 try? decoder.decode(Event.self, from: Data($0.utf8))
-            }
-        }
-    }
-
-    /// Delete timelines past `retention`.
-    static func prune(_ dir: URL = directory, now: Date = Date()) {
-        let cutoff = Int(now.addingTimeInterval(-retention).timeIntervalSince1970 * 1000)
-        for file in (try? FileManager.default.contentsOfDirectory(
-            at: dir, includingPropertiesForKeys: nil
-        )) ?? [] {
-            if let opened = Int(file.deletingPathExtension().lastPathComponent), opened < cutoff {
-                try? FileManager.default.removeItem(at: file)
             }
         }
     }

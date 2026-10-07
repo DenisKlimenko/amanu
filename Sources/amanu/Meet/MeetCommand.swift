@@ -115,14 +115,15 @@ enum MeetHost {
     static let maxMessage = 1 << 20
 
     /// Append every message to a new file in `directory`, one JSON object per
-    /// line, named for the moment the connection opened.
+    /// line, named for the moment the connection opened. Earlier connections'
+    /// files are never deleted: a session transcribed again, however long
+    /// after, is named from them.
     static func serve(
         input: FileHandle = .standardInput,
         directory: URL = MeetSpeakers.directory,
         now: Date = Date()
     ) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        MeetSpeakers.prune(directory, now: now)
         let file = directory.appendingPathComponent(
             "\(Int(now.timeIntervalSince1970 * 1000)).jsonl")
         FileManager.default.createFile(atPath: file.path, contents: nil)
