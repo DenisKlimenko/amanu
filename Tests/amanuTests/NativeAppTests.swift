@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 
@@ -244,6 +245,39 @@ struct SetupOfferTests {
         menuBar.setVisible(true)
         #expect(menuBar.statusItemTitle == " 1:23")
         #expect(menuBar.offeredItemTitles.contains("Stop recording"))
+    }
+
+    /// A banner goes away by itself, and the line saying a transcription
+    /// failed is replaced by the next transcription's, so a meeting a failure
+    /// left untranscribed needs something that stays until it is dealt with.
+    @Test("A recording left untranscribed keeps a mark by the icon and a line to the recordings")
+    func untranscribedStaysInView() {
+        let menuBar = MenuBarController()
+        let window = StatusWindow()
+        defer { withExtendedLifetime((menuBar, window)) {} }
+        var opened = 0
+        menuBar.onShowRecordings = { opened += 1 }
+        func shown() -> [String] {
+            (window.view?.allDescendants ?? [])
+                .compactMap { $0 as? NSTextField }
+                .filter { !$0.isHiddenOrHasHiddenAncestor }
+                .map(\.stringValue)
+        }
+
+        menuBar.updateUntranscribed(AppController.untranscribedLine(count: 2))
+        window.updateUntranscribed(AppController.untranscribedLine(count: 2))
+        #expect(menuBar.statusItemTitle == " ⚠︎")
+        menuBar.update(state: .recording, elapsed: "1:23")
+        #expect(menuBar.statusItemTitle == " 1:23 ⚠︎")
+        #expect(menuBar.performOfferedItem(titled: "⚠︎ not transcribed: 2"))
+        #expect(opened == 1)
+        #expect(shown().contains("⚠︎ not transcribed: 2"))
+
+        menuBar.updateUntranscribed(AppController.untranscribedLine(count: 0))
+        window.updateUntranscribed(AppController.untranscribedLine(count: 0))
+        #expect(menuBar.statusItemTitle == " 1:23")
+        #expect(!menuBar.offeredItemTitles.contains { $0.contains("⚠︎") })
+        #expect(!shown().contains { $0.contains("⚠︎") })
     }
 
     /// About is where a Mac user looks for a name, and there are two menus

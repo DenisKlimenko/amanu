@@ -31,6 +31,12 @@ actor TranscriptionCoordinator {
     /// back in front of the queue the next time something is queued, rather
     /// than at once: the same drain would only fail them the same way.
     private var heldBack: [URL] = []
+    /// When each session last failed while this app has been running. An
+    /// offer that comes soon after — another half-hourly one, a network
+    /// coming back, a Re-transcribe pressed on some other recording — passes
+    /// it over, so that one short outage cannot spend all of a session's
+    /// attempts, nor try it twice in one drain.
+    private var lastFailed: [String: Date] = [:]
     private var draining = false
     /// Whoever is waiting for the queue to run dry — see `waitUntilIdle`.
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
@@ -96,7 +102,13 @@ actor TranscriptionCoordinator {
     /// path. The importer hands over a path with its symlinks resolved and a
     /// rescan of the root does not, so under /var — which is /private/var —
     /// one session was two entries, and was transcribed and paid for twice.
+    ///
+    /// A held-back session offered again moves into the queue rather than
+    /// being in both: as two entries it was held back twice, and every drain
+    /// after tried it — and uploaded it — twice.
     private func add(_ dir: URL) {
+        let key = Self.identity(of: dir)
+        heldBack.removeAll { Self.identity(of: $0) == key }
         guard !isQueued(dir) else { return }
         queue.append(dir)
     }
@@ -123,12 +135,23 @@ actor TranscriptionCoordinator {
     /// Scan the recordings root for sessions that finished (meta.json exists)
     /// but were never transcribed. Folder names sort chronologically, so
     /// oldest-first is a name sort.
-    func resumePending(root: URL) {
+    ///
+    /// A session that failed less than `retryPause` ago is passed over, unless
+    /// it is the one `asked` for: somebody pressed a button for that one, and
+    /// is watching. What a drain held back for the machine goes back in front
+    /// all the same — waiting costs it no attempt, and the offer may well be
+    /// the network coming back.
+    func resumePending(root: URL, asked: URL? = nil) {
         // A config that cannot be read holds the queue — see `Config.Unreadable`.
         // The app offers the folder again once the file is fixed.
         guard Config.unreadableReason == nil, Config.transcriptionEnabled() else { return }
+        if let asked { lastFailed[Self.identity(of: asked)] = nil }
         requeueHeldBack()
-        let pending = Self.pendingSessions(in: root)
+        let now = Date()
+        let pending = Self.pendingSessions(in: root).filter { dir in
+            lastFailed[Self.identity(of: dir)]
+                .map { now.timeIntervalSince($0) >= Self.retryPause } ?? true
+        }
         for dir in pending { add(dir) }
         if !pending.isEmpty {
             FileHandle.standardError.write(Data(
@@ -137,6 +160,10 @@ actor TranscriptionCoordinator {
         }
         drainIfIdle()
     }
+
+    /// A little under the half hour the app waits between offers, so that a
+    /// session one offer failed is ready for the next one.
+    static let retryPause: TimeInterval = 25 * 60
 
     /// The folders `resumePending` would take, as a plain question about a
     /// directory: which sessions have ended, have no transcript, have not been
@@ -175,6 +202,11 @@ actor TranscriptionCoordinator {
     private func drain() async {
         while !queue.isEmpty {
             let dir = queue.removeFirst()
+            // Deleted while it waited — from the recordings window the ⚠︎ sends
+            // people to, or from the Finder. Nothing failed, and there is no
+            // folder left for a banner to open.
+            guard FileManager.default.fileExists(
+                atPath: dir.appendingPathComponent("meta.json").path) else { continue }
             publish(.transcribing(session: dir.lastPathComponent, queued: queue.count))
             do {
                 try await transcribeAndAnnounce(dir)
@@ -198,10 +230,15 @@ actor TranscriptionCoordinator {
             } catch {
                 log(dir, "transcription failed: \(error)")
                 lastFailure = dir.lastPathComponent
+                lastFailed[Self.identity(of: dir)] = Date()
+                // Nothing to say about a recording that was already waiting:
+                // the app offers what waits again every half hour, and an
+                // outage lasting a morning would say the same thing ten times.
+                let waited = SessionState.value(dir, SessionState.Key.transcriptionWaiting) != nil
                 let outcome = TranscriptionFailurePolicy.record(
-                    error, for: dir, engine: current, notify: !environmentalFailureNoted)
+                    error, for: dir, engine: current, notify: !environmentalFailureNoted && !waited)
                 if outcome == .environmental {
-                    environmentalFailureNoted = true
+                    if !waited { environmentalFailureNoted = true }
                     heldBack.append(dir)
                 }
             }

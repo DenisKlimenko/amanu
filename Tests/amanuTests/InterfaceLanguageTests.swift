@@ -347,6 +347,9 @@ struct InterfaceLanguageTests {
         window.updateConfigProblem(Config.Problem.unreadable(reason: "1").headline)
         read()
         window.updateConfigProblem(nil)
+        window.updateUntranscribed(AppController.untranscribedLine(count: 2))
+        read()
+        window.updateUntranscribed(nil)
         window.updateTranscription(nil)
         window.updateAutoRecord(enabled: true, decision: nil)
 
@@ -428,6 +431,7 @@ struct InterfaceLanguageTests {
         menuBar.setupAvailable(true)
         menuBar.updateAutoRecord(enabled: true, decision: "amanu")
         menuBar.updateConfigProblem(Config.Problem.unreadable(reason: "1").headline)
+        menuBar.updateUntranscribed(AppController.untranscribedLine(count: 2))
 
         var found: [String] = []
         for state in [MenuBarController.State.idle, .recording, .paused] {

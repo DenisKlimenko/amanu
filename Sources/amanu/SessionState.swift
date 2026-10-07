@@ -11,6 +11,11 @@ enum SessionState {
         /// Present when a session was retired without a transcript.
         static let transcriptionFailed = "transcription_failed"
         static let transcriptionAttempts = "transcription_attempts"
+        /// Present once a session has waited for its machine — a network, a
+        /// key, a service that was down — saying what it waited on. Waiting
+        /// costs no attempts, so without it a recording held back all day
+        /// looks like one that has not had its turn.
+        static let transcriptionWaiting = "transcription_waiting"
         /// Optional per-session choice made from Recordings' Re-transcribe
         /// context menu. It survives another manual retry as the last choice.
         static let transcriptionEngine = "transcription_engine"

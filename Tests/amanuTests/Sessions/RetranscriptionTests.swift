@@ -499,6 +499,32 @@ struct RetranscriptionTests {
         #expect(RecordingsWindow.inlineRetranscribeTitle(for: missingAudio) == nil)
     }
 
+    /// The ⚠︎ beside the feather sends people here. A recording a failure
+    /// left waiting used to read "pending", like one that had yet to have its
+    /// turn, with nothing in its row to press. Pressed, it is offered as it
+    /// stands: there is no transcript to clear, and the pieces the service
+    /// already answered are worth keeping.
+    @Test("A recording that failed and waits for a retry reads deferred, with Re-transcribe in its row")
+    @MainActor
+    func aWaitingRowOffersRetranscription() throws {
+        let dir = try Self.settledSession()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        for state: [String: Any?] in [
+            [SessionState.Key.transcriptionWaiting: "gemini refused the transcription over thinking"],
+            [SessionState.Key.transcriptionWaiting: nil, SessionState.Key.transcriptionAttempts: 1],
+        ] {
+            SessionState.update(dir, with: state)
+            let item = try #require(SessionInventory.item(for: dir, policy: Self.noPostProcessing))
+            #expect(item.transcript == .deferred)
+            #expect(RecordingsWindow.inlineRetranscribeTitle(for: item)
+                == localised("Re-transcribe", "Расшифровать заново"))
+            #expect(RecordingsWindow.decision(
+                for: item, policy: Self.noPostProcessing, transcriptionEnabled: true)
+                == .transcribe(clearingFirst: false))
+        }
+    }
+
     @MainActor
     @Test("A re-transcribe engine choice is stored with that session")
     func retranscriptionEngineOverride() throws {

@@ -396,6 +396,7 @@ enum PostProcessor {
             SessionState.Key.summaryStale: summaryKept ? true : nil,
             SessionState.Key.transcriptionFailed: nil,
             SessionState.Key.transcriptionAttempts: nil,
+            SessionState.Key.transcriptionWaiting: nil,
             SessionState.Key.speakersStatus: nil,
             SessionState.Key.summaryStatus: nil,
             SessionState.Key.speakersFailedFor: nil,

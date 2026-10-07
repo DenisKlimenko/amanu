@@ -29,6 +29,9 @@ final class MenuBarController {
     /// Says the config file cannot be used, and opens the settings window —
     /// the one surface that names the file and offers to reveal it.
     private let configProblemItem: NSMenuItem
+    /// How many recordings a failure has left untranscribed, opening the
+    /// recordings window, where each has its Re-transcribe button.
+    private let untranscribedItem: NSMenuItem
     private let toggleItem: NSMenuItem
     private let pauseItem: NSMenuItem
     private let autoRecordItem: NSMenuItem
@@ -73,6 +76,11 @@ final class MenuBarController {
             title: "", action: #selector(showSettingsClicked), keyEquivalent: "")
         configProblemItem.isHidden = true
         menu.addItem(configProblemItem)
+
+        untranscribedItem = NSMenuItem(
+            title: "", action: #selector(showRecordingsClicked), keyEquivalent: "")
+        untranscribedItem.isHidden = true
+        menu.addItem(untranscribedItem)
 
         menu.addItem(.separator())
 
@@ -191,7 +199,7 @@ final class MenuBarController {
         for item in [
             toggleItem, pauseItem, autoRecordItem, showWindow, openFolder,
             recordings, importItem, settings, setupItem, updatesItem, about, quit,
-            configProblemItem,
+            configProblemItem, untranscribedItem,
         ] {
             item.target = self
         }
@@ -314,6 +322,8 @@ final class MenuBarController {
             statusItem?.button?.title =
                 " " + (elapsed ?? "0:00") + localised(" paused", " пауза")
         }
+        // Beside whatever else the icon says — see `updateUntranscribed`.
+        if !untranscribedItem.isHidden { statusItem?.button?.title += " ⚠︎" }
     }
 
     /// Show transcription progress/failure as a second status line in the
@@ -330,6 +340,16 @@ final class MenuBarController {
     func updateConfigProblem(_ headline: String?) {
         configProblemItem.title = headline.map { "⚠︎ " + $0 } ?? ""
         configProblemItem.isHidden = headline == nil
+    }
+
+    /// Say how many recordings a failure has left untranscribed, and mark the
+    /// icon while there are any; nil takes both away. A banner goes by itself
+    /// and the failure line gives way to the next transcription, so without
+    /// this a meeting could stay untranscribed with nothing left saying so.
+    func updateUntranscribed(_ line: String?) {
+        untranscribedItem.title = line ?? ""
+        untranscribedItem.isHidden = line == nil
+        update(state: state, elapsed: elapsed)
     }
 
     func updateAutoRecord(enabled: Bool, decision: String?) {

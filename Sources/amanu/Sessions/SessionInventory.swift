@@ -152,6 +152,12 @@ enum SessionInventory {
             transcriptStep = .failed(failure)
         } else if !Config.transcriptionEnabled() {
             transcriptStep = .off
+        } else if meta[SessionState.Key.transcriptionWaiting] != nil
+                    || meta[SessionState.Key.transcriptionAttempts] != nil {
+            // Tried, failed, and waiting to be tried again: what the ⚠︎ beside
+            // the feather sends people here to find, so it must not read like
+            // a recording that has yet to have its turn.
+            transcriptStep = .deferred
         } else {
             transcriptStep = .pending
         }

@@ -297,6 +297,10 @@ final class AppController {
         return window
     }()
     private var network: NetworkMonitor?
+    /// Offers what failed back to the queue — see `startAutomaticFeatures`.
+    private var retry: Timer?
+    /// Counts what a failure has left untranscribed — see `showUntranscribed`.
+    private var untranscribedCheck: Timer?
     private var setupRequestObserver: NSObjectProtocol?
     /// How the app menu is told whether to offer **Setup…**; the status
     /// item's own menu is reached directly.
@@ -496,14 +500,40 @@ final class AppController {
             sweeps.request()
         }
 
-        // A backlog deferred for want of a model is only half-solved by
-        // recording the fact — something has to come back for it when the
-        // network does.
+        // A backlog deferred for want of a network — a transcription held
+        // back, a summary put off — is only half-solved by recording the
+        // fact: something has to come back for it when the network does.
         let monitor = NetworkMonitor { [weak self] in
-            Task { @MainActor [weak self] in self?.sweeps.request() }
+            Task { @MainActor [weak self] in self?.catchUp() }
         }
         monitor.start()
         network = monitor
+
+        // And for what a network coming back says nothing about: a service
+        // that was down, a key since replaced, a failure the queue counted.
+        // Left to the next recording or the next launch, a recording could
+        // wait a week. Half an hour apart because a cloud engine is paid per
+        // upload, and a failure the queue counts is one of three.
+        //
+        // Not during a recording: an upload, or a local model beside the live
+        // one, competing with the call is a poor trade for a transcript that
+        // can wait. The end of the recording offers the queue what waits for
+        // the machine, and the next half hour the rest.
+        retry = Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.session == nil else { return }
+                Task { [transcription = self.transcription, root = self.root] in
+                    await transcription.resumePending(root: root)
+                }
+            }
+        }
+        // Once a minute as well as after every transcription, because a
+        // recording also stops being untranscribed by going to the Trash —
+        // from the recordings window, the Finder or another amanu.
+        untranscribedCheck = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.showUntranscribed() }
+        }
+        showUntranscribed()
 
         // The loop runs whether or not auto-record is on; a tick with it off
         // reads the switch and does nothing else. Starting it only when the
@@ -897,6 +927,14 @@ final class AppController {
         }
     }
 
+    /// What the menu and the window say about the recordings a failure has
+    /// left untranscribed, or nil when there are none — see
+    /// `TranscriptionFailurePolicy.untranscribed`.
+    static func untranscribedLine(count: Int) -> String? {
+        guard count > 0 else { return nil }
+        return localised("⚠︎ not transcribed: \(count)", "⚠︎ не расшифровано: \(count)")
+    }
+
     /// Say what is wrong with the config file, and pick up the work held
     /// while it could not be read once it can.
     private func showConfigProblems() {
@@ -917,8 +955,11 @@ final class AppController {
     /// one sweep.
     private func catchUp() {
         let folder = root
+        // During a recording the queue waits for its end, as the half-hourly
+        // offer does; the sweep only names and summarizes, as it always has.
+        let recording = session != nil
         Task { [transcription, weak self] in
-            await transcription.resumePending(root: folder)
+            if !recording { await transcription.resumePending(root: folder) }
             self?.sweeps.request()
         }
     }
@@ -932,6 +973,22 @@ final class AppController {
         // recordings window reads again rather than going on offering
         // Finish processing for work that has been done.
         sessionsChanged()
+        showUntranscribed()
+    }
+
+    /// Count the recordings a failure has left untranscribed, and show the
+    /// count beside the feather and in the window. Off the main thread: a
+    /// year of recordings is a few thousand meta.json files.
+    private func showUntranscribed() {
+        let folder = root
+        Task { [weak self] in
+            let count = await Task.detached(priority: .utility) {
+                TranscriptionFailurePolicy.untranscribed(in: folder).count
+            }.value
+            let line = Self.untranscribedLine(count: count)
+            self?.menuBar.updateUntranscribed(line)
+            self?.window.updateUntranscribed(line)
+        }
     }
 
     /// The recordings folder changed behind the recordings window's back.
@@ -1041,9 +1098,9 @@ final class AppController {
     private func showRecordings() {
         // A session put back in the queue should start transcribing now, not
         // at the next launch — the person asking for it is watching.
-        recordings.onRetranscribe = { [weak self, transcription] _ in
+        recordings.onRetranscribe = { [weak self, transcription] dir in
             guard let root = self?.root else { return }
-            Task { await transcription.resumePending(root: root) }
+            Task { await transcription.resumePending(root: root, asked: dir) }
         }
         NSApp.activate(ignoringOtherApps: true)
         recordings.show()

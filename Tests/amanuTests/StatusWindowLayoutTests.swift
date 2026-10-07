@@ -94,6 +94,10 @@ struct StatusWindowLayoutTests {
         window.updateTranscription("transcribing 2026.08.21-1000")
         check(window, panel, "recording while transcribing")
 
+        // And the recordings a failure left untranscribed above it.
+        window.updateUntranscribed(AppController.untranscribedLine(count: 2))
+        check(window, panel, "recording, transcribing, two left untranscribed")
+
         // Import adds another live row, first indeterminate and then with a
         // measured fraction. It must grow the compact window instead of
         // drawing across the buttons below it.
@@ -112,6 +116,7 @@ struct StatusWindowLayoutTests {
         check(window, panel, "recording, transcript open")
         window.update(state: .idle, elapsed: nil)
         window.updateTranscription(nil)
+        window.updateUntranscribed(nil)
         window.updateAutoRecord(enabled: true, decision: nil)
         window.updateLive(.init(
             isRecording: false, isEnabled: true, entries: [speech], status: .idle))

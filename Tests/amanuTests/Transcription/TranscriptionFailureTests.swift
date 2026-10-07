@@ -175,6 +175,53 @@ struct TranscriptionFailureTests {
         #expect(Self.attempts(dir) == nil)
     }
 
+    /// What the menu bar warns about: the recordings a failure has left with
+    /// no transcript, waiting for a retry or given up on. One that has not had
+    /// its turn yet is the queue's business, and one shorter than a minute is
+    /// the auto-recorder catching a notification sound. A length of nothing is
+    /// neither: it is a recovered recording whose start was lost.
+    @Test("Only recordings a failure left untranscribed, a minute long or more, are counted")
+    func untranscribedAreTheFailedOnes() throws {
+        let recordings = try TestRecordings()
+        defer { recordings.remove() }
+        let long = ["duration_seconds": 1800]
+        let waiting = try recordings.session("2026-10-07-a", state: long)
+        let counted = try recordings.session("2026-10-07-b", state: long)
+        let retired = try recordings.session("2026-10-07-c", state: long)
+        let short = try recordings.session("2026-10-07-d", state: ["duration_seconds": 4])
+        try recordings.session("2026-10-07-e", state: long)
+        let done = try recordings.session("2026-10-07-f", state: long)
+        let recovered = try recordings.session("2026-10-07-g", state: ["duration_seconds": 0])
+
+        TranscriptionFailurePolicy.record(URLError(.notConnectedToInternet), for: waiting, engine: nil)
+        TranscriptionFailurePolicy.record(Flaky(), for: counted, engine: nil)
+        TranscriptionFailurePolicy.record(Refused(), for: retired, engine: nil)
+        TranscriptionFailurePolicy.record(Refused(), for: short, engine: nil)
+        TranscriptionFailurePolicy.record(Flaky(), for: done, engine: nil)
+        TranscriptionFailurePolicy.record(Refused(), for: recovered, engine: nil)
+        try Transcript(
+            engine: "gemini", model: "gemini-3.5-transcribe", created_at: "2026-10-07T10:00:00Z",
+            segments: [.init(speaker: "me", start_ms: 0, end_ms: 1000, text: "Привет.")]
+        ).write(to: done)
+
+        #expect(TranscriptionFailurePolicy.untranscribed(in: recordings.root).map(\.lastPathComponent)
+            == ["2026-10-07-a", "2026-10-07-b", "2026-10-07-c", "2026-10-07-g"])
+    }
+
+    /// Re-transcribe starts the recording over, its wait included: until the
+    /// new attempt fails, nothing has.
+    @Test("A recording put back for re-transcription is not counted as untranscribed")
+    func retranscriptionEndsTheWait() throws {
+        let recordings = try TestRecordings()
+        defer { recordings.remove() }
+        let dir = try recordings.session("2026-10-07-a", state: ["duration_seconds": 1800])
+        TranscriptionFailurePolicy.record(URLError(.notConnectedToInternet), for: dir, engine: nil)
+
+        #expect(PostProcessor.markForRetranscription(dir))
+
+        #expect(TranscriptionFailurePolicy.untranscribed(in: recordings.root).isEmpty)
+    }
+
     @Test("A mixed engine is handed one mix of both tracks")
     func mixedPathThroughTheCoordinator() async throws {
         let recordings = try TestRecordings()

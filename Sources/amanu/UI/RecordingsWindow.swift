@@ -445,11 +445,18 @@ final class RecordingsWindow: NSObject {
         transcriptText.identifier = markdown != nil || transcript != nil ? .init("meeting-words") : nil
         for text in [summaryText, transcriptText] { text.scrollToBeginningOfDocument(nil) }
         guard let transcript else {
-            openingLabel.stringValue = item.transcript == .pending
-                ? localised("Not transcribed yet.", "Ещё не расшифровано.")
-                : localised(
+            switch item.transcript {
+            case .pending:
+                openingLabel.stringValue = localised("Not transcribed yet.", "Ещё не расшифровано.")
+            case .deferred:
+                openingLabel.stringValue = localised(
+                    "Not transcribed yet: the last attempt failed, and amanu will retry by itself.",
+                    "Ещё не расшифровано: попытка не удалась, amanu повторит сам.")
+            default:
+                openingLabel.stringValue = localised(
                     "No transcript — nothing to name.",
                     "Расшифровки нет — некому давать имена.")
+            }
             updateButtons()
             return
         }
@@ -528,11 +535,16 @@ final class RecordingsWindow: NSObject {
         busyLabel.stringValue = working ? localised("working…", "работаю…") : ""
     }
 
-    /// The row-level action belongs only beside a failed transcript whose
-    /// source audio still exists. A generic action column would put buttons
-    /// beside healthy rows and make the failure harder, not easier, to act on.
+    /// The row-level action belongs only beside a failed transcript — given
+    /// up on, or waiting to be tried again — whose source audio still exists.
+    /// A generic action column would put buttons beside healthy rows and make
+    /// the failure harder, not easier, to act on.
     static func inlineRetranscribeTitle(for item: SessionInventory.Item) -> String? {
-        guard case .failed = item.transcript, item.hasAudio else { return nil }
+        switch item.transcript {
+        case .failed, .deferred: break
+        default: return nil
+        }
+        guard item.hasAudio else { return nil }
         return localised("Re-transcribe", "Расшифровать заново")
     }
 
@@ -729,9 +741,14 @@ final class RecordingsWindow: NSObject {
 
     @objc private func inlineRetranscribeClicked(_ sender: NSButton) {
         guard sender.tag >= 0, sender.tag < items.count else { return }
+        // A recording still waiting for its retry has no transcript to throw
+        // away, so it is not asked about, and keeps the pieces the service
+        // already answered: Finish processing is the same request without
+        // the question.
+        let waiting = items[sender.tag].transcript == .deferred
         table.selectRowIndexes(IndexSet(integer: sender.tag), byExtendingSelection: false)
         showDetail()
-        retranscribeClicked()
+        if waiting { finishClicked() } else { retranscribeClicked() }
     }
 
     @objc private func chooseImportClicked() { onChooseImport?() }

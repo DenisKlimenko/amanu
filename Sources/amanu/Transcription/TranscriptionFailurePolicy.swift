@@ -10,7 +10,8 @@ import Foundation
 /// queue once each and retired all of them on the third launch, and a Mac
 /// that was offline three times running retired the meeting it recorded on
 /// the train. A session failed that way keeps its attempts and waits, and is
-/// offered again the next time the queue has anything to do.
+/// offered again with the next recording, when the network comes back, and
+/// every half hour in between.
 enum TranscriptionFailurePolicy {
     enum Outcome: Equatable {
         /// Not the session's fault; nothing was counted.
@@ -29,6 +30,30 @@ enum TranscriptionFailurePolicy {
 
     static func hasGivenUp(on dir: URL) -> Bool {
         SessionState.value(dir, SessionState.Key.transcriptionFailed) != nil
+    }
+
+    /// The recordings under `root` a failure has left with no transcript —
+    /// waiting for a retry or given up on — oldest first: what the menu bar
+    /// warns about until somebody transcribes or deletes them.
+    ///
+    /// One that has not had its turn yet is the queue's business, not a
+    /// warning. Nor is one shorter than a minute: auto-record starts on any
+    /// app that takes the microphone, and a notification sound it caught
+    /// fails as "no speech", which is the truth about it. A length of zero is
+    /// not short but unknown — a recovered recording whose start was lost.
+    static func untranscribed(in root: URL) -> [URL] {
+        SessionInventory.sessionFolders(in: root).filter { dir in
+            guard let meta = SessionState.read(dir),
+                  !FileManager.default.fileExists(
+                      atPath: dir.appendingPathComponent("transcript.json").path)
+            else { return false }
+            if let seconds = meta["duration_seconds"] as? Int, (1..<60).contains(seconds) {
+                return false
+            }
+            return meta[SessionState.Key.transcriptionFailed] != nil
+                || meta[SessionState.Key.transcriptionAttempts] != nil
+                || meta[SessionState.Key.transcriptionWaiting] != nil
+        }
     }
 
     /// Network-shaped failures, the ones a local engine can rescue. A bad key
@@ -83,7 +108,8 @@ enum TranscriptionFailurePolicy {
     /// meta.json to offer it to the queue again.
     ///
     /// `notify` is off for the second and later sessions a drain holds back
-    /// for the same missing model: one banner says it, ten say it louder.
+    /// for the same missing model: one banner says it, ten say it louder. It
+    /// is off as well for a session that was already waiting.
     @discardableResult
     static func record(
         _ error: Error, for dir: URL, engine: TranscriptionEngine?, notify: Bool = true
@@ -102,8 +128,9 @@ enum TranscriptionFailurePolicy {
 
         if isEnvironmental(error) {
             report(.deferred)
+            SessionState.update(dir, with: [SessionState.Key.transcriptionWaiting: "\(error)"])
             log("not counted against this recording — the problem is this Mac's, "
-                + "and the recording is offered again once there is more to transcribe")
+                + "and the app offers the recording again within half an hour")
             if notify {
                 notifyUser(
                     title: localised(
