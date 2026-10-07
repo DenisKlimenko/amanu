@@ -42,6 +42,8 @@ actor GeminiTranscriptionEngine: TranscriptionEngine {
         case noToken(String)
         case unfinished(String)
         case empty
+        /// Refused over something amanu never sent — see `reclassified`.
+        case serviceFault(String)
 
         /// Only "there was no speech in this audio" is permanent. HTTP
         /// answers are classified by `CloudHTTP`.
@@ -52,10 +54,11 @@ actor GeminiTranscriptionEngine: TranscriptionEngine {
 
         /// A lapsed login or a missing project is the machine's, fixed by a
         /// person, after which the next sweep should simply work — so it
-        /// costs the recording none of its attempts.
+        /// costs the recording none of its attempts. A fault on Google's side
+        /// is the same, fixed by Google.
         var isEnvironmental: Bool {
             switch self {
-            case .noCredentials, .noToken: return true
+            case .noCredentials, .noToken, .serviceFault: return true
             case .unfinished, .empty: return false
             }
         }
@@ -73,6 +76,10 @@ actor GeminiTranscriptionEngine: TranscriptionEngine {
                 return "gemini stopped before the end of the audio: \(reason)"
             case .empty:
                 return "gemini returned no speech"
+            case .serviceFault(let body):
+                return "gemini refused the transcription over thinking, which amanu does not ask for — "
+                    + "a fault on Google's side, so the recording waits for their fix: "
+                    + "HTTP 400 \(body.prefix(400))"
             }
         }
     }
@@ -262,11 +269,21 @@ actor GeminiTranscriptionEngine: TranscriptionEngine {
     /// 401, which `CloudHTTP` reads as a request that can never succeed and
     /// the queue as a meeting to give up on. It is still the key, and so the
     /// machine's to fix: the meeting waits for a new one.
-    static func reclassified(_ failure: CloudHTTP.Failure) -> CloudHTTP.Failure {
-        guard case let .rejected(service, what, 400, body) = failure,
-              body.contains("API_KEY_INVALID")
-        else { return failure }
-        return .unauthorized(service: service, what: what, status: 400, body: body)
+    ///
+    /// A refusal over thinking waits too, for Google. amanu sends no thinking
+    /// config, yet on 2026-10-07 `gemini-3.5-transcribe` answered every
+    /// request "Thinking is not enabled for this model" — one with nothing
+    /// but the audio in it, and one turning thinking off, included. Nothing
+    /// about the request or the recording can change that answer.
+    static func reclassified(_ failure: CloudHTTP.Failure) -> any TranscriptionFailure {
+        guard case let .rejected(service, what, 400, body) = failure else { return failure }
+        if body.contains("API_KEY_INVALID") {
+            return CloudHTTP.Failure.unauthorized(service: service, what: what, status: 400, body: body)
+        }
+        if body.contains("Thinking is not enabled") {
+            return EngineError.serviceFault(body)
+        }
+        return failure
     }
 
     /// `ru` → `ru-RU`: Vertex wants a region, and the language's likeliest one

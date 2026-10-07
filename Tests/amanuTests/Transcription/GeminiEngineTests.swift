@@ -117,6 +117,20 @@ struct GeminiEngineTests {
         #expect(GeminiTranscriptionEngine.reclassified(rejected("audio too long")).isPermanent)
     }
 
+    /// The answer `gemini-3.5-transcribe` gave every request on 2026-10-07,
+    /// one with nothing but the audio in it included, though amanu asks for no
+    /// thinking. Retired, the meeting would not come back once Google fixed it.
+    @Test("A refusal over thinking amanu never asked for waits for Google instead of retiring the meeting")
+    func thinkingRefusalIsGooglesToFix() {
+        let refusal = CloudHTTP.Failure.rejected(
+            service: "gemini", what: "transcription", status: 400,
+            body: #"{"error":{"code":400,"message":"Thinking is not enabled for this model","#
+                + #""status":"INVALID_ARGUMENT"}}"#)
+        let reclassified = GeminiTranscriptionEngine.reclassified(refusal)
+        #expect(reclassified.isEnvironmental)
+        #expect(!reclassified.isPermanent)
+    }
+
     /// A signed-in gcloud always has some project configured — whichever one
     /// the last piece of work needed. Sending meetings to it would bill a
     /// project nobody chose for them, so without a key Vertex is a way in only
