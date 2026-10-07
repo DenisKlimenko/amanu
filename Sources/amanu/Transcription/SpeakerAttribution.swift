@@ -22,6 +22,13 @@ import Foundation
 /// because they were both Миша. So the side is a majority verdict over the
 /// whole meeting, and a voice keeps one name from beginning to end.
 ///
+/// Except where a voice is not one person. The engine sometimes puts people
+/// from both sides under one label, and the verdict then carries whoever lost
+/// it to the wrong side: on 7 October 2026 (`2026.10.07-1501`) the far end's
+/// answer to a question came back as ours, and our backchannels around it as
+/// theirs. A voice that leaks is on both tracks, so an utterance only one
+/// track carried keeps that track's side.
+///
 /// The labels still earn their keep on the far side: three people sharing one
 /// room mic are all "them", and only diarization can tell them apart. So the
 /// name is side + label, with the label dropped when a side has only one.
@@ -171,13 +178,51 @@ enum SpeakerAttribution {
         }
         let settled = majority.mapValues { $0.me > $0.them ? Side.me : Side.them }
 
-        // Utterances the engine gave no label to have no voice to be settled
-        // with, so they keep their own reading — or, where neither track
-        // could have carried it, the side that spoke last. That is a dropout,
-        // not a new speaker.
+        // An utterance read against its voice's verdict, over which only the
+        // track it read on carried speech — that track for at least half of
+        // it, the other for a tenth at most — did not leak: the engine put
+        // someone under the wrong label. It keeps its own reading and loses
+        // the label, to take its side's plain name, the one naming gives the
+        // owner on ours. Kept, the label would be one more voice on that side
+        // for a backchannel, and where the side had only one, every name on
+        // it would take a letter, ours included.
+        //
+        // Both tracks count as they were recorded, not the mic as the first
+        // pass reads it. Over the far end's words their echo puts an
+        // utterance on both tracks, for the vote to settle. In the moment
+        // after them only the echo rings on, and the mic carries an utterance
+        // there alone: a backchannel of ours in it stays ours, where the mic
+        // read over the echo would hold too little of us to keep it from the
+        // far end's voice.
+        //
+        // No minimum length, though a tenth of a second is a bucket or two
+        // and the engine's timestamps on a backchannel are a guess. The
+        // backchannels in `2026.10.07-1501` were that short, and their
+        // guesses fell on the track that carried them. A guess a few tenths
+        // off can fall where only the other side's track carried anything,
+        // and now goes to that side: one of ours did in `2026.10.01-1103`,
+        // over the far end's speech, and one would over a far end's line
+        // humming above the floor; a word of theirs timed onto its own echo
+        // would come to us. The verdict used to mend that.
+        let voices = zip(segments, sides).map { segment, side -> String? in
+            guard let side, let label = segment.speaker, settled[label] != side else {
+                return segment.speaker
+            }
+            let mic = micEnvelope.share(
+                from: segment.start - micOffset, to: segment.end - micOffset)
+            let system = systemEnvelope.share(
+                from: segment.start - systemOffset, to: segment.end - systemOffset)
+            let (own, other) = side == .me ? (mic, system) : (system, mic)
+            return own >= 0.5 && other <= 0.1 ? nil : label
+        }
+
+        // Utterances with no voice — none from the engine, or none left after
+        // the above — have nothing to be settled with, so they keep their own
+        // reading — or, where neither track could have carried it, the side
+        // that spoke last. That is a dropout, not a new speaker.
         var previous: Side = .them
         for i in sides.indices {
-            if let label = segments[i].speaker, let side = settled[label] {
+            if let label = voices[i], let side = settled[label] {
                 sides[i] = side
                 previous = side
             } else if let side = sides[i] {
@@ -190,8 +235,8 @@ enum SpeakerAttribution {
         // Name each side. The label only survives where a side actually holds
         // more than one person — otherwise "them" beats "them A".
         var labelsPerSide: [String: Set<String>] = [:]
-        for (segment, side) in zip(segments, sides) {
-            guard let side, let label = segment.speaker else { continue }
+        for (voice, side) in zip(voices, sides) {
+            guard let side, let label = voice else { continue }
             labelsPerSide[side.name, default: []].insert(label)
         }
         // Sorted so the suffixes are stable across reruns rather than
@@ -204,9 +249,9 @@ enum SpeakerAttribution {
             })
         }
 
-        return zip(segments, sides).map { segment, side in
+        return zip(voices, sides).map { voice, side in
             let name = (side ?? .them).name
-            guard let label = segment.speaker,
+            guard let label = voice,
                   let suffix = suffixes[name]?[label]
             else { return name }
             return "\(name) \(suffix)"

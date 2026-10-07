@@ -98,36 +98,45 @@ struct SpeakerAttributionTests {
     /// happened to every voice in every meeting — `2026.08.18-1502` came out of
     /// two speakers as four labels, and `-1303` out of six as twelve.
     ///
-    /// Here A is loud on the system track twice and on the mic once, which is
-    /// exactly that shape, and it has to stay one speaker.
+    /// Here A is loud on the system track twice and louder on the mic once,
+    /// over a stretch the far end's track carried speech for too — anything
+    /// that leaks is on both tracks — and it has to stay one speaker.
     @Test("A voice that leaks into the other track is still one speaker")
     func leakageDoesNotSplitAVoice() throws {
         let f = try Fixture()
         #expect(
-            f.resolve([Self.seg(0.1, 1.9, "A"), Self.seg(3.1, 3.9, "A"), Self.seg(4.0, 4.9, "A")])
+            f.resolve([Self.seg(0.1, 3.5, "A"), Self.seg(3.6, 4.2, "A"), Self.seg(4.3, 4.9, "A")])
                 == ["them", "them", "them"])
     }
 
-    /// The invariant the naming pass rests on, stated on its own: whatever the
-    /// tracks say utterance by utterance, a diarization label comes back as one
-    /// name. Two names for one voice is two people as far as `speakers.json` is
-    /// concerned, and no amount of evidence in the transcript can tell them
-    /// apart afterwards, because there is nothing there to tell apart.
-    @Test("One diarized voice never becomes two speakers")
-    func aVoiceKeepsOneName() throws {
+    /// A voice is one person only as far as the engine could tell, and it can
+    /// put people from both sides under one label: on 7 October 2026
+    /// (`2026.10.07-1501`) the far end's answer to a question came back under
+    /// our voice, and our backchannels between its sentences under theirs, to
+    /// be named after the person we were listening to. Leaking puts a voice on
+    /// both tracks, and those utterances were each on one.
+    ///
+    /// So A's utterance that only the far track carried and B's that only the
+    /// mic did keep their own sides, without a voice, and the rest of A and B
+    /// keep theirs.
+    @Test("An utterance only one track carried keeps its side, whatever its voice")
+    func oneTrackKeepsItsSide() throws {
         let f = try Fixture()
-        // A talks on the mic and leaks once into the far track; B does the
-        // reverse. Both come back as one name each, on opposite sides.
-        let segments = [
-            Self.seg(0.1, 1.0, "A"), Self.seg(1.1, 1.9, "A"), Self.seg(3.1, 3.5, "A"),
-            Self.seg(3.6, 4.0, "B"), Self.seg(4.1, 4.9, "B"), Self.seg(6.1, 7.9, "B"),
-        ]
-        let resolved = try #require(f.resolve(segments))
-        var namesPerVoice: [String: Set<String>] = [:]
-        for (segment, name) in zip(segments, resolved) {
-            namesPerVoice[segment.speaker!, default: []].insert(name)
-        }
-        #expect(namesPerVoice.mapValues(\.count) == ["A": 1, "B": 1])
+        #expect(
+            f.resolve([
+                Self.seg(0.1, 1.0, "A"), Self.seg(1.1, 1.9, "A"), Self.seg(3.1, 3.5, "A"),
+                Self.seg(3.6, 4.0, "B"), Self.seg(4.1, 4.9, "B"), Self.seg(6.1, 7.9, "B"),
+            ]) == ["me", "me", "them", "them", "them", "me"])
+    }
+
+    /// Neither track has to be clean for that: A's last utterance had the far
+    /// end's track for about three fifths of it and the mic for one bucket.
+    @Test("An utterance mostly on one track and barely on the other keeps its side")
+    func nearlyOneTrackKeepsItsSide() throws {
+        let f = try Fixture()
+        #expect(
+            f.resolve([Self.seg(0.1, 1.0, "A"), Self.seg(1.1, 1.9, "A"), Self.seg(1.95, 4.6, "A")])
+                == ["me", "me", "them"])
     }
 
     @Test("Segments with no diarization label still get a side")
@@ -175,12 +184,16 @@ struct SpeakerAttributionTests {
         ) == ["me", "them"])
     }
 
+    /// A stretch neither track carried reads as ours, because the far end's
+    /// was silent through it, but that is no evidence against a voice.
     @Test("A stretch silent on both tracks inherits its label's usual side")
     func silentStretchInheritsSide() throws {
         let f = try Fixture()
         #expect(
-            f.resolve([Self.seg(0.1, 1.9, "A"), Self.seg(8.2, 9.4, "A"), Self.seg(3.1, 4.9, "B")])
-                == ["me", "me", "them"])
+            f.resolve([
+                Self.seg(0.1, 1.9, "A"), Self.seg(8.2, 9.4, "A"),
+                Self.seg(3.1, 3.9, "B"), Self.seg(4.0, 4.9, "B"), Self.seg(9.5, 9.9, "B"),
+            ]) == ["me", "me", "them", "them", "them"])
     }
 
     /// The failure this floor exists for, measured on a real session: the far
@@ -472,6 +485,39 @@ struct SpeakerAttributionTests {
             SpeakerAttribution.resolve(
                 segments: segments, mic: mic, micOffset: 0, system: system, systemOffset: 0)
                 == segments.map { "them \($0.speaker!)" })
+    }
+
+    /// On the speakers, in the moment after the far end stops, only its echo
+    /// rings on: the far end's track is quiet, and the mic carries whatever is
+    /// said there alone. Our "mm" in that moment, which the engine put under
+    /// the far end's voice, stays ours only while the mic counts as it was
+    /// recorded, echo and all. Read over the echo, it holds too little of us
+    /// to keep its side, and the far end's voice takes it.
+    @Test("Our backchannel in the far end's echo on the speakers stays ours")
+    func backchannelInTheEchoStaysOurs() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-tail-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let farEnd = (0..<5).map { (2 + 4 * Double($0), 3.5 + 4 * Double($0)) }
+        let us = (0..<4).map { (4 + 4 * Double($0), 5.5 + 4 * Double($0)) }
+        let mm = (19.6, 19.8)
+        let mic = dir.appendingPathComponent("mic.caf")
+        let system = dir.appendingPathComponent("system.caf")
+        try Self.writeTrack(
+            to: mic, seconds: 25,
+            sources: [(farEnd.map { ($0.0 + 0.15, $0.1 + 0.45) }, 0.07), (us + [mm], 0.03)])
+        try Self.writeTrack(to: system, seconds: 25, bursts: farEnd, gain: 0.1)
+
+        let segments = ((farEnd.map { ($0, "A") } + us.map { ($0, "B") })
+            .map { Self.seg($0.0.0 - 0.05, $0.0.1 + 0.25, $0.1) }
+            + [Self.seg(mm.0, mm.1 + 0.05, "A")])
+            .sorted { $0.start < $1.start }
+        #expect(
+            SpeakerAttribution.resolve(
+                segments: segments, mic: mic, micOffset: 0, system: system, systemOffset: 0)
+                == segments.map { $0.start == mm.0 || $0.speaker == "B" ? "me" : "them" })
     }
 
     /// What the gate costs has a bound: on the speakers, our answers starting
