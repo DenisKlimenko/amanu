@@ -200,6 +200,30 @@ struct SpeakerAttributionTests {
                 mic: noisy, micOffset: 0, system: speech, systemOffset: 0) == ["them"])
     }
 
+    /// The same shape in a loud room, where the absolute floor no longer
+    /// helps: a vacuum cleaner held the mic of 2026.10.05-0905 at −39 dBFS for
+    /// six minutes, and every far-end voice of those minutes came out as "me".
+    @Test("A steady noise louder than the speech floor does not take the far end's voices")
+    func loudSteadyNoiseLosesToSpeech() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-noise-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let noisy = dir.appendingPathComponent("mic.caf")
+        let speech = dir.appendingPathComponent("system.caf")
+        // About −37 dBFS from start to end, well over the absolute floor.
+        try Self.writeTrack(to: noisy, seconds: 10, bursts: [(0, 10)], gain: 0.02)
+        // Two far-end utterances, each with the pauses around it.
+        try Self.writeTrack(to: speech, seconds: 10, bursts: [(1, 3), (5, 7)], gain: 0.5)
+
+        #expect(
+            SpeakerAttribution.resolve(
+                segments: [Self.seg(0.5, 3.5, "A"), Self.seg(4.5, 7.5, "B")],
+                mic: noisy, micOffset: 0, system: speech, systemOffset: 0)
+                == ["them A", "them B"])
+    }
+
     @Test("A missing track refuses to attribute rather than guessing")
     func missingTrackRefuses() throws {
         let f = try Fixture()
