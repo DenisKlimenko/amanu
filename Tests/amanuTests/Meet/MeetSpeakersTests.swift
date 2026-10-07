@@ -189,8 +189,13 @@ struct MeetSpeakersTests {
         {"t":1000,"meeting":"aaa","tab":"1","speaking":[{"id":"a","name":"Ann"}],"muted":true}
         {"t":3000,"meeting":"aaa","tab":"1","speaking":[]}
         {"t":4000,"meeting":"aaa","tab":"1","speaking":[],"muted":true}
-        {"t":5000,"meeting":"zzz","tab":"2","speaking":[],"muted":true}
+        {"t":5000,"meeting":"zzz","tab":"2","speaking":[{"id":"m","name":"Me","self":true}],"muted":true}
         """), between: 0, and: 20_000) == [1000..<3000, 4000..<(4000 + MeetSpeakers.stale)])
+        // Somebody spoke in this call, but before the recording began.
+        #expect(MeetSpeakers.muted(from: Self.events("""
+        {"t":1000,"meeting":"yyy","tab":"3","speaking":[{"id":"b","name":"Bob"}]}
+        {"t":3000,"meeting":"yyy","tab":"3","speaking":[],"muted":true}
+        """), between: 3000, and: 20_000) == [])
     }
 
     @Test("What we said with the mic off is dropped, but not while the far end spoke or as the mic came back on")
