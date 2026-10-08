@@ -17,6 +17,17 @@ struct SpeakerAttributionTests {
         gain: Float,
         rate: Double = 48000.0
     ) throws {
+        try writeTrack(to: url, seconds: seconds, sources: [(bursts, gain)], rate: rate)
+    }
+
+    /// The same with several sources on one track, each at its own gain and
+    /// summed where they overlap — our voice and the far end's echo on one mic.
+    private static func writeTrack(
+        to url: URL,
+        seconds: Double,
+        sources: [(bursts: [(Double, Double)], gain: Float)],
+        rate: Double = 48000.0
+    ) throws {
         let aac: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: rate,
@@ -24,8 +35,10 @@ struct SpeakerAttributionTests {
         ]
         try TestAudio.write(to: url, seconds: seconds, sampleRate: rate, settings: aac) { _, frame in
             let t = Double(frame) / rate
-            let live = bursts.contains { t >= $0.0 && t < $0.1 }
-            return live ? gain * Float(sin(2 * .pi * 220 * t)) : 0
+            let gain = sources.reduce(Float(0)) { sum, source in
+                source.bursts.contains { t >= $0.0 && t < $0.1 } ? sum + source.gain : sum
+            }
+            return gain * Float(sin(2 * .pi * 220 * t))
         }
     }
 
@@ -283,6 +296,211 @@ struct SpeakerAttributionTests {
                 Self.seg(6.1, 7.4, "A"), Self.seg(8.1, 9.4, "A"),
             ])
         #expect(names == ["me", "them", "me", "me"])
+    }
+
+    /// A call on the speakers, as the MacBook's own mic hears it: the far end
+    /// comes back 150 ms late, rings on for a few hundred more, and reads
+    /// louder there than we do. Normalized against its own p90, which is now
+    /// the echo, the mic reads as loud as the far end's own track over every
+    /// far-end utterance, and the room's ring tips each one to us. On 7
+    /// October 2026 (`2026.10.07-1540`) that put the whole far end on "me".
+    ///
+    /// The system track starts a second late, so an echo looked for on the
+    /// wrong side of that offset finds the far end silent and passes for us.
+    /// And the far end is once 14 dB louder than the rest, as in that call,
+    /// which must not be what says how loud its echo runs.
+    @Test("The far end on the speakers stays the far end where its echo outshouts us")
+    func farEndEchoOnTheSpeakersStaysTheFarEnd() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-echo-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let farEnd = (0..<6).map { (2 + 4 * Double($0), 3.5 + 4 * Double($0)) }
+        let loud = [(6.5, 6.9)]
+        let us = [(4.0, 5.5), (12.0, 13.5), (20.0, 21.5)]
+        let mic = dir.appendingPathComponent("mic.caf")
+        let system = dir.appendingPathComponent("system.caf")
+        let echo = { (bursts: [(Double, Double)]) in bursts.map { ($0.0 + 0.15, $0.1 + 0.45) } }
+        try Self.writeTrack(
+            to: mic, seconds: 25, sources: [(echo(farEnd), 0.07), (echo(loud), 0.28), (us, 0.03)])
+        try Self.writeTrack(
+            to: system, seconds: 24,
+            sources: [(farEnd.map { ($0.0 - 1, $0.1 - 1) }, 0.1), (loud.map { ($0.0 - 1, $0.1 - 1) }, 0.4)])
+
+        // Engine timestamps run a little past the words, as Gemini's do.
+        let segments = (farEnd.map { ($0, "A") } + us.map { ($0, "B") })
+            .sorted { $0.0.0 < $1.0.0 }
+            .map { Self.seg($0.0.0 - 0.05, $0.0.1 + 0.25, $0.1) }
+        #expect(
+            SpeakerAttribution.resolve(
+                segments: segments, mic: mic, micOffset: 0, system: system, systemOffset: 1)
+                == segments.map { $0.speaker == "A" ? "them" : "me" })
+    }
+
+    /// A far end speaking by the syllable, 100 ms in every 400, its echo
+    /// 200 ms late as in a browser; and by the word, 400 ms in every 600, its
+    /// echo within the bucket as on FaceTime. Read at one fixed delay out of
+    /// step with the browser's echo, a quarter of the time the far end's
+    /// track is on a syllable while the mic holds only the echo of the quiet
+    /// between two. Read anywhere in the half second but its first 200 ms,
+    /// once a word the track is loud throughout while the mic holds only the
+    /// echo of the pause after it. Against that moment the echo looks twelve
+    /// times weaker than it runs, and passes for us at any margin the gate
+    /// could be given. No fixed delay within the half second is in step with
+    /// both echoes.
+    @Test(
+        "A far end's syllables and words stay the far end, their echo late or at once",
+        arguments: [(0.2, 0.1, 0.4), (0, 0.4, 0.6)])
+    func syllablesAndWordsStayTheFarEnd(delay: Double, burst: Double, period: Double) throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-syllables-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let farEnd = (0..<6).map { (2 + 4 * Double($0), 4 + 4 * Double($0)) }
+        let syllables = farEnd.flatMap { turn in
+            stride(from: turn.0, through: turn.1 - burst, by: period).map { ($0, $0 + burst) }
+        }
+        let us = farEnd.map { ($0.1 + 0.6, $0.1 + 1.3) }
+        let mic = dir.appendingPathComponent("mic.caf")
+        let system = dir.appendingPathComponent("system.caf")
+        let echo = { (bursts: [(Double, Double)]) in bursts.map { ($0.0 + delay, $0.1 + delay + 0.1) } }
+        try Self.writeTrack(
+            to: mic, seconds: 25,
+            sources: [(echo(farEnd), 0.0175), (echo(syllables), 0.1925), (us, 0.03)])
+        try Self.writeTrack(to: system, seconds: 25, sources: [(farEnd, 0.025), (syllables, 0.275)])
+
+        let segments = (farEnd.map { ($0, "A") } + us.map { ($0, "B") })
+            .sorted { $0.0.0 < $1.0.0 }
+            .map { Self.seg($0.0.0 - 0.05, $0.0.1 + 0.25, $0.1) }
+        #expect(
+            SpeakerAttribution.resolve(
+                segments: segments, mic: mic, micOffset: 0, system: system, systemOffset: 0)
+                == segments.map { $0.speaker == "A" ? "them" : "me" })
+    }
+
+    /// On headphones nothing on the far end's track comes back, neither its
+    /// words nor the hum its open mic makes above the speech floor between
+    /// them. The quietest tenth of mic over system stays near zero there,
+    /// where a median would have us, talking over the hum more than half the
+    /// call, taken for the echo of that hum.
+    @Test("A far end humming between its words does not make our voice its echo")
+    func farEndHumIsNotTakenForOurEcho() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-hum-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let farEnd = [(1.0, 3.0), (8.0, 10.0), (15.0, 17.0)]
+        let us = [(3.5, 7.5), (10.5, 14.5), (17.5, 20.0)]
+        let mic = dir.appendingPathComponent("mic.caf")
+        let system = dir.appendingPathComponent("system.caf")
+        try Self.writeTrack(to: mic, seconds: 20, bursts: us, gain: 0.03)
+        try Self.writeTrack(
+            to: system, seconds: 20, sources: [([(0, 20)], 0.014), (farEnd, 0.1)])
+
+        let segments = (farEnd.map { ($0, "A") } + us.map { ($0, "B") })
+            .sorted { $0.0.0 < $1.0.0 }
+            .map { Self.seg($0.0.0 + 0.05, $0.0.1 - 0.05, $0.1) }
+        #expect(
+            SpeakerAttribution.resolve(
+                segments: segments, mic: mic, micOffset: 0, system: system, systemOffset: 0)
+                == segments.map { $0.speaker == "A" ? "them" : "me" })
+    }
+
+    /// The same on headphones from a far end that mostly listens: its open
+    /// mic clicks above the speech floor a third of the time and it says one
+    /// word, under a hundredth of the call, so even its 99th percentile is the
+    /// clicking. Taking the far end's speech from either made us, presenting
+    /// over the clicks, their echo.
+    @Test("A far end listening through a noisy open mic does not make our voice its echo")
+    func noisyListenerIsNotTakenForOurEcho() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-listener-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let us = [(0.5, 6.5), (7.5, 13.5), (14.5, 20.5), (23.0, 29.5)]
+        let farEnd = [(21.0, 21.15)]
+        let clicks = stride(from: 0.0, to: 30.0, by: 0.3).map { ($0, $0 + 0.1) }
+        let mic = dir.appendingPathComponent("mic.caf")
+        let system = dir.appendingPathComponent("system.caf")
+        try Self.writeTrack(to: mic, seconds: 30, bursts: us, gain: 0.03)
+        try Self.writeTrack(to: system, seconds: 30, sources: [(clicks, 0.012), (farEnd, 0.1)])
+
+        let segments = (farEnd.map { ($0, "A") } + us.map { ($0, "B") })
+            .sorted { $0.0.0 < $1.0.0 }
+            .map { Self.seg($0.0.0 + 0.05, $0.0.1 - 0.05, $0.1) }
+        #expect(
+            SpeakerAttribution.resolve(
+                segments: segments, mic: mic, micOffset: 0, system: system, systemOffset: 0)
+                == segments.map { $0.speaker == "A" ? "them" : "me" })
+    }
+
+    /// A call recorded with nobody at the Mac (2026.10.07-1600): the mic holds
+    /// the far end's echo, 400 ms late as a browser's can be, and the room
+    /// under the speech floor. The few buckets of ring past the gate's reach
+    /// are still read against the echo's level, the mic's own; against the
+    /// room's, which is what remains once the echo is gone, they would read
+    /// as somebody shouting and take every voice.
+    ///
+    /// A third voice only says "yes" between the turns. Its echo comes after
+    /// its word is over and rings on, so a gate that looks back less than
+    /// the half second that takes, or looks forward, hands that voice to us.
+    @Test("A call recorded with nobody at the Mac stays on the far side")
+    func nobodyAtTheMacStaysTheFarEnd() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-empty-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let turns = (0..<6).map { (2 + 4 * Double($0), 3.5 + 4 * Double($0)) }
+        let yeses = (0..<5).map { (4.5 + 4 * Double($0), 4.8 + 4 * Double($0)) }
+        let mic = dir.appendingPathComponent("mic.caf")
+        let system = dir.appendingPathComponent("system.caf")
+        try Self.writeTrack(
+            to: mic, seconds: 25,
+            sources: [((turns + yeses).map { ($0.0 + 0.4, $0.1 + 0.7) }, 0.07), ([(0, 25)], 0.0035)])
+        try Self.writeTrack(to: system, seconds: 25, bursts: turns + yeses, gain: 0.1)
+
+        let voices = turns.enumerated().map { ($0.element, $0.offset % 2 == 0 ? "A" : "B") }
+            + yeses.map { ($0, "C") }
+        let segments = voices.sorted { $0.0.0 < $1.0.0 }
+            .map { Self.seg($0.0.0 - 0.05, $0.0.1 + 0.7, $0.1) }
+        #expect(
+            SpeakerAttribution.resolve(
+                segments: segments, mic: mic, micOffset: 0, system: system, systemOffset: 0)
+                == segments.map { "them \($0.speaker!)" })
+    }
+
+    /// What the gate costs has a bound: on the speakers, our answers starting
+    /// over the end of the far end's turns, 12 dB louder than its echo, are
+    /// still ours. A margin wide enough to swallow them would take every
+    /// answer given before the far end has quite finished.
+    @Test("Our answers over the end of the far end's turns, well above its echo, are ours")
+    func loudAnswersOverTheEchoAreOurs() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-answers-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let farEnd = (0..<6).map { (2 + 4 * Double($0), 3.5 + 4 * Double($0)) }
+        let us = farEnd.map { ($0.1 - 0.2, $0.1 + 0.3) }
+        let mic = dir.appendingPathComponent("mic.caf")
+        let system = dir.appendingPathComponent("system.caf")
+        try Self.writeTrack(
+            to: mic, seconds: 25,
+            sources: [(farEnd.map { ($0.0 + 0.15, $0.1 + 0.45) }, 0.07), (us, 0.3)])
+        try Self.writeTrack(to: system, seconds: 25, bursts: farEnd, gain: 0.1)
+
+        let segments = (farEnd.map { ($0, "A") } + us.map { ($0, "B") })
+            .sorted { $0.0.0 < $1.0.0 }
+            .map { Self.seg($0.0.0, $0.0.1, $0.1) }
+        #expect(
+            SpeakerAttribution.resolve(
+                segments: segments, mic: mic, micOffset: 0, system: system, systemOffset: 0)
+                == segments.map { $0.speaker == "A" ? "them" : "me" })
     }
 
     /// The other way round it would be a guess. A system track with nothing

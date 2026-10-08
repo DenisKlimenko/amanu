@@ -50,6 +50,31 @@ enum SpeakerAttribution {
     /// they look identical.
     private static let speechFloor: Float = 0.005
 
+    /// How much louder than the far end's echo a mic bucket has to be to count
+    /// as us: 3×, about 9.5 dB. The coupling it multiplies is the quietest
+    /// tenth of the call's echo, and the echo in one bucket swings well clear
+    /// of that — the room rings, the delay straddles a bucket, somebody turns
+    /// the speakers up. Replayed in October 2026 over 21 real recordings,
+    /// every margin from 1.5× to 6× put all three echoed far ends named in
+    /// `resolve` back on their side and moved no other voice, 1.5× by a single
+    /// utterance. It also sets how far over the echo we have to speak to be
+    /// heard through it, which on those three calls came to at least 11 to
+    /// 13 dB over a typical bucket of echo, and is why it is the middle of
+    /// that range and not its top.
+    private static let echoMargin: Float = 3
+
+    /// How far behind the system track its echo reaches the mic, in buckets.
+    /// Measured by cross-correlating the two, through the MacBook's own
+    /// speakers: 25 ms on a FaceTime call; 145–160 ms in the browser, drifting
+    /// to 250 ms over half an hour (2026.10.07-1600) and lying at 400–420 ms
+    /// through the second half of 2026.09.30-1602.
+    private static let echoReach = 5
+
+    /// How many buckets have to follow a whole reach of the system track
+    /// above the speech floor, speech or line noise alike, to say how loud its
+    /// echo runs: five seconds' worth. Fewer leave the mic as it was recorded.
+    private static let echoSample = 50
+
     private enum Side {
         case me, them
         var name: String { self == .me ? "me" : "them" }
@@ -81,6 +106,23 @@ enum SpeakerAttribution {
               !systemEnvelope.isSilent
         else { return nil }
 
+        // On the speakers the mic hears the far end as well as us, and where
+        // that echo is louder on the mic than we are, or we said little, the
+        // mic's p90 is the echo itself. Normalizing then cancels exactly the
+        // level the echo lost on its way, so every far-end utterance reads
+        // the same on both tracks and is a coin toss, and the vote below puts
+        // the whole voice on whichever side the coins favoured. A FaceTime
+        // call on the MacBook's speakers (2026.10.07-1540) came out with the
+        // far end as "me A", by 11 utterances to 7; a call recorded with
+        // nobody at the Mac (2026.10.07-1600) put five far-end voices on our
+        // side, and a browser call on the same speakers (2026.09.30-1602) one.
+        // So the mic is read for what it heard over the echo: a bucket the far
+        // end could account for is not us.
+        //
+        // The mic as recorded still answers whether it heard anything at all.
+        let ours = micEnvelope.withoutEcho(
+            of: systemEnvelope, shift: Int(((micOffset - systemOffset) / bucket).rounded()))
+
         // First pass: whichever track is louder over the utterance spoke it.
         //
         // An utterance the far end said nothing over is ours, however little
@@ -92,7 +134,7 @@ enum SpeakerAttribution {
         // a mic that recorded nothing leaves such an utterance undecided.
         var sides: [Side?] = segments.map { segment in
             guard segment.end > segment.start else { return nil }
-            let me = micEnvelope.level(
+            let me = ours.level(
                 from: segment.start - micOffset, to: segment.end - micOffset)
             let them = systemEnvelope.level(
                 from: segment.start - systemOffset, to: segment.end - systemOffset)
@@ -181,7 +223,7 @@ enum SpeakerAttribution {
     /// A track's loudness over time, in fixed-width buckets, normalized so it
     /// can be compared against another track recorded at a different gain.
     private struct Envelope {
-        private let buckets: [Float]
+        private var buckets: [Float]
         private let reference: Float
         /// Digital zero nine tenths of the time and never loud enough to be
         /// speech the rest of it: nothing anyone said reached this track.
@@ -278,6 +320,59 @@ enum SpeakerAttribution {
                 sum += Double(buckets[i])
             }
             return sum / Double(span.count) / Double(reference)
+        }
+
+        /// This track with every bucket the far end's echo could account for
+        /// dropped to silence. `shift` is the number of buckets to add to an
+        /// index here for the same moment on `system`.
+        ///
+        /// The reference stays the one the track was recorded with. Taken
+        /// again from what is left, it can fall to the room's noise, and the
+        /// few buckets of echo that slip through then read as loud speech.
+        func withoutEcho(of system: Envelope, shift: Int) -> Envelope {
+            // How loud the far end comes back here. On the speakers, a bucket
+            // after a whole reach of the system track above the speech floor
+            // holds at least the echo of what the speakers played of it, and
+            // whatever else is in it, us or the room, only adds; on headphones
+            // it holds no echo, and among enough of them we are quiet now and
+            // then. So the echo is the bottom of this track over the quietest
+            // the system was in that stretch: its tenth percentile. Over the
+            // quietest, not the system's same moment: what this bucket echoes
+            // is up to a reach old, and a far end loud again by the syllable
+            // before its echo is back would read, against that moment, as an
+            // echo several times weaker than it is. How much the far end said
+            // or how loud it once got cannot move that bottom, nor can line
+            // noise the speakers play back as well as speech. Noise they play
+            // back worse, down to a low hum they cannot play at all, drags it
+            // toward how little of that noise comes back, and the gate with
+            // it, as a stretch of the call on headphones does.
+            // A median over its loud stretches would take us, presenting over
+            // a far end listening through a noisy open mic, for the echo of
+            // that noise.
+            var ratios: [Float] = []
+            for (i, level) in buckets.enumerated() {
+                let j = i + shift
+                guard j >= SpeakerAttribution.echoReach, j < system.buckets.count,
+                      let quietest = system.buckets[(j - SpeakerAttribution.echoReach)...j].min(),
+                      quietest >= SpeakerAttribution.speechFloor
+                else { continue }
+                ratios.append(level / quietest)
+            }
+            guard ratios.count >= SpeakerAttribution.echoSample else { return self }
+            let coupling = ratios.sorted()[ratios.count / 10]
+
+            var gated = self
+            for i in buckets.indices {
+                let j = i + shift
+                let first = max(0, j - SpeakerAttribution.echoReach)
+                let last = min(system.buckets.count - 1, j)
+                guard first <= last else { continue }
+                let echo = coupling * (system.buckets[first...last].max() ?? 0)
+                if buckets[i] < SpeakerAttribution.echoMargin * echo {
+                    gated.buckets[i] = 0
+                }
+            }
+            return gated
         }
 
         /// How much of a time range held speech, from 0 to 1.
