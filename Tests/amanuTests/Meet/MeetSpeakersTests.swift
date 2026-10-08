@@ -219,6 +219,24 @@ struct MeetSpeakersTests {
             == [(o - 10000)..<(o - MeetSpeakers.unmuting)])
     }
 
+    @Test("A mute still on when the transcript ends is cut short where it ended, not where the transcript does")
+    func muteOutlastingTheTranscript() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-meet-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let o = Self.origin
+        try """
+        {"t":\(o),"meeting":"aaa","tab":"1","speaking":[{"id":"a","name":"Ann"}],"muted":true}
+        {"t":\(o + 3000),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 6000),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 9000),"meeting":"aaa","tab":"1","speaking":[]}
+        """.write(to: dir.appendingPathComponent("\(o).jsonl"), atomically: true, encoding: .utf8)
+
+        #expect(MeetSpeakers.muted(in: dir, from: o - 1000, to: o + 6000)
+            == [o..<(o + 9000 - MeetSpeakers.unmuting)])
+    }
+
     @Test("What we said with the mic off is marked, but not while the far end spoke or as the mic came back on")
     func marksOurMutedSpeech() throws {
         let root = FileManager.default.temporaryDirectory
@@ -302,6 +320,52 @@ struct MeetSpeakersTests {
             session: session, timeline: timeline, log: { _ in })
 
         #expect(segments.map(\.muted) == [true, true, nil, true, nil])
+    }
+
+    @Test("A voice of ours that Meet shows as the far end for most of what it says is theirs, and none of it is marked")
+    func farEndVoiceIsNotOurAside() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("amanu-meet-\(UUID().uuidString)", isDirectory: true)
+        let session = root.appendingPathComponent("session", isDirectory: true)
+        let timeline = root.appendingPathComponent("meet", isDirectory: true)
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: timeline, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try JSONSerialization.data(withJSONObject: ["origin_ms": Self.origin])
+            .write(to: session.appendingPathComponent("meta.json"))
+        // Muted for the first 32 s; Matt lit for 0–8, 10–17 and 18–18.2.
+        let o = Self.origin
+        try """
+        {"t":\(o),"meeting":"aaa","tab":"1","speaking":[{"id":"m","name":"Matt"}],"muted":true}
+        {"t":\(o + 3000),"meeting":"aaa","tab":"1","speaking":[{"id":"m","name":"Matt"}],"muted":true}
+        {"t":\(o + 6000),"meeting":"aaa","tab":"1","speaking":[{"id":"m","name":"Matt"}],"muted":true}
+        {"t":\(o + 8000),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 10000),"meeting":"aaa","tab":"1","speaking":[{"id":"m","name":"Matt"}],"muted":true}
+        {"t":\(o + 13000),"meeting":"aaa","tab":"1","speaking":[{"id":"m","name":"Matt"}],"muted":true}
+        {"t":\(o + 16000),"meeting":"aaa","tab":"1","speaking":[{"id":"m","name":"Matt"}],"muted":true}
+        {"t":\(o + 17000),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 18000),"meeting":"aaa","tab":"1","speaking":[{"id":"m","name":"Matt"}],"muted":true}
+        {"t":\(o + 18200),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 20000),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 23000),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 26000),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 29000),"meeting":"aaa","tab":"1","speaking":[],"muted":true}
+        {"t":\(o + 32000),"meeting":"aaa","tab":"1","speaking":[]}
+        """.write(to: timeline.appendingPathComponent("\(o).jsonl"), atomically: true, encoding: .utf8)
+
+        let segments = MeetSpeakers.apply(
+            to: [
+                Self.seg("me C", 0, 8),  // Matt, back in through the speakers
+                Self.seg("me D", 10, 17),
+                Self.seg("me D", 18, 19),  // lit for 20% of it, which is not lit
+                Self.seg("me C", 21, 23),  // Matt unlit: me C is lit for 80% of what it says
+                Self.seg("me D", 24, 25.9),  // me D for 71%: ours, and muted
+                Self.seg("me", 28, 29),
+            ],
+            session: session, timeline: timeline, log: { _ in })
+
+        #expect(segments.map(\.muted) == [nil, nil, true, nil, true, true])
     }
 
     @Test("A call is in progress while the extension keeps reporting it, in any tab")

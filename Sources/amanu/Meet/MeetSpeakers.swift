@@ -77,10 +77,9 @@ enum MeetSpeakers {
 
     /// How much of the end of a stretch with the mic off is not believed: the
     /// report that it came back on comes up to a scan late, the engine's times
-    /// are not exact either, and the transcript's clock and Meet's part as a
-    /// call goes on — in the all-hands of 7 October 2026, segments started
-    /// 0.6 s before the tiles of who said them lit early in it, and 0.9 s late
-    /// in it. A word said as the mic came on is the call's.
+    /// are a few tenths out, and the transcript's clock and Meet's part as a
+    /// call goes on — by 0.3 s over the all-hands of 7 October 2026. A word
+    /// said as the mic came on is the call's.
     static let unmuting = 1_500
 
     /// How long a timeline is worth keeping. Past a month it can only ever be
@@ -153,7 +152,9 @@ enum MeetSpeakers {
     /// browsers cannot end each other's.
     static func muted(in dir: URL = directory, from startMs: Int, to endMs: Int) -> [Range<Int>] {
         let events = connections(in: dir, from: startMs, to: endMs).joined().sorted { $0.t < $1.t }
-        let reported = Self.muted(from: events, between: startMs, and: endMs)
+        // Read on past the end, so that a mute still on when the transcript
+        // ends is cut short where it ended rather than where the transcript did.
+        let reported = Self.muted(from: events, between: startMs, and: endMs + stale)
             .sorted { $0.lowerBound < $1.lowerBound }
         var stretches: [Range<Int>] = []
         for range in reported {
@@ -320,8 +321,7 @@ enum MeetSpeakers {
                 speaker: participant.flatMap { label[$0] } ?? "them",
                 start_ms: segment.start_ms,
                 end_ms: segment.end_ms,
-                text: segment.text,
-                muted: segment.muted)
+                text: segment.text)
         }
 
         // The most recent name wins: people rename themselves mid-call rarely,
@@ -398,16 +398,29 @@ enum MeetSpeakers {
         // What the mic heard while it was off in Meet never reached the call:
         // a word to somebody in the room, or one the call missed because we
         // forgot the mute. It is marked rather than dropped, so the reader can
-        // tell which from the context. Unless somebody on the call was
-        // speaking then, by the 30% that names a speaker below — that is
-        // likelier the far end itself labelled ours, picked up from the
-        // speakers or heard through a vacuum cleaner (2026.10.05-0905), and
-        // marked it would read as our aside rather than their words.
+        // tell which from the context. Unless it is likelier the far end
+        // itself, labelled ours — back in through the speakers, or heard
+        // through a vacuum cleaner (2026.10.05-0905) — which, marked, would
+        // read as our aside rather than their words. It is when somebody on
+        // the call was speaking then, by the 30% that names a speaker below,
+        // or when its voice is one Meet shows as the far end's for most of
+        // what it says, since the tiles miss some of anyone's lines: on seven
+        // calls, voices that were the far end's were lit for it 89–100% of
+        // the time they spoke, and all the others 0–44%.
         let muted = muted(in: timeline, from: origin, to: origin + last)
         let farEnd = turns.map { $0.startMs..<$0.endMs }
+        var spoken: [String: (lit: Int, all: Int)] = [:]
+        for segment in segments where isOurs(segment.speaker) {
+            let length = max(segment.end_ms - segment.start_ms, 1)
+            let lit = share(segment, of: farEnd, originMs: origin) >= 0.3
+            spoken[segment.speaker, default: (0, 0)].lit += lit ? length : 0
+            spoken[segment.speaker, default: (0, 0)].all += length
+        }
+        let farVoices = Set(spoken.filter { $0.value.lit * 4 >= $0.value.all * 3 }.keys)
         var marked = 0
         let segments = segments.map { segment in
-            guard isOurs(segment.speaker), share(segment, of: muted, originMs: origin) >= 0.5,
+            guard isOurs(segment.speaker), !farVoices.contains(segment.speaker),
+                  share(segment, of: muted, originMs: origin) >= 0.5,
                   share(segment, of: farEnd, originMs: origin) < 0.3 else { return segment }
             marked += 1
             var segment = segment
