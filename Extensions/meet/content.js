@@ -15,9 +15,14 @@
 // tiles have appeared yet. That reads none of Meet's wording, so it works in
 // any language.
 //
+// Whether our own mic is off goes with every report too, as Meet's mic button
+// has it. What amanu hears through it then never reached the call, and the
+// transcript marks it so.
+//
 // Nothing here leans on Meet's class names, which change with every release:
-// tiles are found by `data-participant-id`, and "lit" means a coloured outline
-// or a coloured sliver of a meter, however Meet happens to style either.
+// tiles are found by `data-participant-id`, the mic by `data-is-muted`, and
+// "lit" means a coloured outline or a coloured sliver of a meter, however Meet
+// happens to style either.
 
 const SCAN_MS = 250;
 // Shorter than amanu's `MeetSpeakers.stale`, with room for a throttled tab.
@@ -148,6 +153,18 @@ function isSelf(tile) {
   return /\((you|вы)\)/i.test(tile.textContent ?? "");
 }
 
+// Whether our mic is off in this call, as the button that turns it on and off
+// says: Meet marks that button and the camera's with `data-is-muted`, the
+// mic's first, "true" while it is off. Seen so in October 2026, with the
+// camera on throughout, and it reads none of Meet's wording.
+function micMuted() {
+  for (const doc of documents()) {
+    const button = doc.querySelector("[data-is-muted]");
+    if (button) return button.getAttribute("data-is-muted") === "true";
+  }
+  return false;
+}
+
 function scan() {
   const speaking = new Map();
   let tiles = 0;
@@ -165,19 +182,23 @@ function scan() {
       speaking.set(id, speaker);
     }
   }
-  return { tiles, speaking: [...speaking.values()] };
+  return { tiles, speaking: [...speaking.values()], muted: micMuted() };
 }
 
-function send(speaking) {
+function stateOf(speaking, muted) {
+  return speaking.map((s) => s.id).sort().join("\n") + (muted ? "\nmuted" : "");
+}
+
+function send(speaking, muted = false) {
   const now = Date.now();
-  sentState = speaking.map((s) => s.id).sort().join("\n");
+  sentState = stateOf(speaking, muted);
   sentAt = now;
+  const report = {
+    t: now, meeting: location.pathname.slice(1), tab: TAB, title: document.title, speaking,
+  };
+  if (muted) report.muted = true;
   // A rejected promise is a worker that is restarting; the next state gets through.
-  Promise.resolve(
-    chrome.runtime.sendMessage({
-      t: now, meeting: location.pathname.slice(1), tab: TAB, title: document.title, speaking,
-    }),
-  ).catch(() => {});
+  Promise.resolve(chrome.runtime.sendMessage(report)).catch(() => {});
 }
 
 const timer = setInterval(() => {
@@ -187,7 +208,7 @@ const timer = setInterval(() => {
       page = location.pathname;
       joined = false;
     }
-    const { tiles, speaking } = scan();
+    const { tiles, speaking, muted } = scan();
     if (!tiles) {
       // Out of the call — or never in it: the lobby has no tiles. Two things
       // here are reasoned, not seen: that the waiting room shows no tile that
@@ -200,10 +221,12 @@ const timer = setInterval(() => {
     }
     inCall = true;
     joined = true;
-    const state = speaking.map((s) => s.id).sort().join("\n");
+    const state = stateOf(speaking, muted);
     if (state !== sentState || Date.now() - sentAt >= HEARTBEAT_MS) {
-      if (state !== sentState) console.debug("amanu: speaking", speaking.map((s) => s.name));
-      send(speaking);
+      if (state !== sentState) {
+        console.debug("amanu: speaking", speaking.map((s) => s.name), muted ? "(muted)" : "");
+      }
+      send(speaking, muted);
     }
   } catch (error) {
     // The extension was reloaded or removed under a live page; this copy of

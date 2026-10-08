@@ -40,6 +40,20 @@ struct PostProcessingTests {
 
     // MARK: - summary
 
+    @Test("Words said on mute reach the summarizer marked")
+    func summaryReadsTheMuteMark() async throws {
+        let dir = try SessionFixture.make()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let model = FakeModel("claude-cli", answer: "## Notes\nShipped.")
+        let transcript = Transcript(
+            engine: "gemini", model: "test", created_at: "2026-10-08T00:00:00Z",
+            segments: [.init(speaker: "me", start_ms: 0, end_ms: 1000, text: "Закрой дверь.", muted: true)])
+
+        _ = try await Self.withModels([model]) { await Self.summarize(dir, transcript: transcript) }
+
+        #expect(model.prompts.first?.contains("me: (on mute) Закрой дверь.") == true)
+    }
+
     @Test("The chain is walked in order and the first answer is kept")
     func fallbackOrder() async throws {
         let dir = try SessionFixture.make()

@@ -152,6 +152,9 @@ enum Summarizer {
         The transcript is machine-made and contains recognition errors — read past odd \
         words rather than treating them as meaningful.
         Speakers are labelled "me" (the person recording) and "them" (everyone else).
+        Words marked "(on mute)" were said with the speaker's microphone muted in the \
+        call, so nobody on it heard them: leave them out unless the context shows they \
+        were meant for the meeting.
         """
     }
 
@@ -205,7 +208,7 @@ enum Summarizer {
     /// summary.
     private static func plainText(_ transcript: Transcript) -> String {
         transcript.segments
-            .map { "\($0.speaker): \($0.text)" }
+            .map { "\($0.speaker): \(Transcript.shown($0.text, muted: $0.muted))" }
             .joined(separator: "\n")
     }
 
