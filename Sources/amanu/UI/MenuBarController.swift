@@ -29,8 +29,9 @@ final class MenuBarController {
     /// Says the config file cannot be used, and opens the settings window —
     /// the one surface that names the file and offers to reveal it.
     private let configProblemItem: NSMenuItem
-    /// How many recordings a failure has left untranscribed, opening the
-    /// recordings window, where each has its Re-transcribe button.
+    /// How many recordings a failure has left untranscribed, or without a
+    /// summary or names, opening the recordings window, where each has its
+    /// Re-transcribe and Finish processing buttons.
     private let untranscribedItem: NSMenuItem
     private let toggleItem: NSMenuItem
     private let pauseItem: NSMenuItem
@@ -342,8 +343,8 @@ final class MenuBarController {
         configProblemItem.isHidden = headline == nil
     }
 
-    /// Say how many recordings a failure has left untranscribed, and mark the
-    /// icon while there are any; nil takes both away. A banner goes by itself
+    /// Say how many recordings a failure has left untranscribed or without a
+    /// summary, and mark the icon while there are any; nil takes both away. A banner goes by itself
     /// and the failure line gives way to the next transcription, so without
     /// this a meeting could stay untranscribed with nothing left saying so.
     func updateUntranscribed(_ line: String?) {

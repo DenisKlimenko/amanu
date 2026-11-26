@@ -77,6 +77,12 @@ enum SessionInventory {
             transcript.isOutstanding || speakers.isOutstanding || summary.isOutstanding
         }
 
+        /// Whether the names or the summary were given up on: nothing comes
+        /// back for them by itself, but Finish processing tries again.
+        var hasGivenUp: Bool {
+            [speakers, summary].contains { if case .failed = $0 { true } else { false } }
+        }
+
         /// One line for a terminal listing.
         var summaryLine: String {
             let when = started.map { Item.stamp.string(from: $0) } ?? name
@@ -87,6 +93,11 @@ enum SessionInventory {
                 + (engine.map { " (\($0))" } ?? "")
                 + "  names: \(speakerLabel)"
                 + "  summary: \(summary.label)"
+                + [("names", speakers), ("summary", summary)].map { step, state in
+                    guard case .failed(let why) = state, why != SessionState.failed
+                    else { return "" }
+                    return "\n    \(step) failed: \(why)"
+                }.joined()
         }
 
         private var speakerLabel: String {
@@ -181,6 +192,7 @@ enum SessionInventory {
                 dir: dir,
                 artifact: exists(SpeakerNames.file),
                 statusKey: SessionState.Key.speakersStatus,
+                reasonKey: SessionState.Key.speakersFailedBecause,
                 enabled: policy.names,
                 blocked: transcriptStep != .done
             ),
@@ -190,6 +202,7 @@ enum SessionInventory {
                 dir: dir,
                 artifact: PostProcessor.hasCurrentSummary(dir, meta: meta),
                 statusKey: SessionState.Key.summaryStatus,
+                reasonKey: SessionState.Key.summaryFailedBecause,
                 enabled: policy.summary,
                 blocked: transcriptStep != .done
             ),
@@ -209,10 +222,12 @@ enum SessionInventory {
     ///
     /// A step whose input doesn't exist yet reads as `pending` rather than
     /// anything more definite: it hasn't failed, it simply hasn't had its turn.
+    /// A failure carries what the backend said, when that was recorded.
     private static func step(
         dir: URL,
         artifact: Bool,
         statusKey: String,
+        reasonKey: String,
         enabled: Bool,
         blocked: Bool
     ) -> Step {
@@ -222,7 +237,9 @@ enum SessionInventory {
             return .pending
         }
         if status == SessionState.deferred { return .deferred }
-        return blocked ? .pending : .failed(status)
+        return blocked
+            ? .pending
+            : .failed(SessionState.value(dir, reasonKey) as? String ?? status)
     }
 
     // MARK: - what a person needs to see to name a speaker

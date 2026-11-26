@@ -80,6 +80,7 @@ enum Summarizer {
                 SessionState.update(dir, with: [
                     SessionState.Key.summaryStatus: nil,
                     SessionState.Key.summaryFailedFor: nil,
+                    SessionState.Key.summaryFailedBecause: nil,
                     SessionState.Key.summaryDeferrals: nil,
                     SessionState.Key.summaryStale: nil,
                 ])
@@ -116,6 +117,8 @@ enum Summarizer {
             statusKey: SessionState.Key.summaryStatus,
             fingerprintKey: SessionState.Key.summaryFailedFor,
             countKey: SessionState.Key.summaryDeferrals,
+            reasonKey: SessionState.Key.summaryFailedBecause,
+            reason: attempt.reason,
             fingerprint: MeetingEgress.fingerprint(for: .summary)))
         let deferred: Bool
         switch verdict {

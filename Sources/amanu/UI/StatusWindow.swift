@@ -32,8 +32,8 @@ final class StatusWindow {
     /// What is wrong with the config file, when something is — see
     /// `Config.Problem`. Hidden, and so no row at all, the rest of the time.
     private let configProblemLabel = NSTextField(labelWithString: "")
-    /// How many recordings a failure has left untranscribed, when any are —
-    /// see `MenuBarController.updateUntranscribed`.
+    /// How many recordings a failure has left untranscribed or without a
+    /// summary, when any are — see `MenuBarController.updateUntranscribed`.
     private let untranscribedLabel = NSTextField(labelWithString: "")
     private let toggleButton = NSButton(
         title: localised("Start recording", "Начать запись"), target: nil, action: nil)
@@ -363,6 +363,10 @@ final class StatusWindow {
 
     func updateUntranscribed(_ line: String?) {
         untranscribedLabel.stringValue = line ?? ""
+        // The backend's reason can run past the window's width, and the
+        // label truncates; the whole line is a hover away, as it is in the
+        // menu.
+        untranscribedLabel.toolTip = line
         untranscribedLabel.isHidden = line == nil
         growToFitContent()
     }

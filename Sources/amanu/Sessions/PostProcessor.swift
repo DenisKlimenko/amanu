@@ -49,7 +49,14 @@ enum PostProcessor {
     /// backends it failed with, so a `failed` step whose recorded fingerprint
     /// no longer matches `MeetingEgress.fingerprint` is offered once more. A
     /// `failed` with no fingerprint predates the rule and stays given up.
-    static func outstanding(_ dir: URL, policy: Policy = .configured) -> Work {
+    ///
+    /// `retryingFailed` is for a person asking: Finish processing and `amanu
+    /// process`. A lapsed login fixed outside amanu changes nothing the
+    /// fingerprint can see, so without it a summary given up on for that
+    /// reason could be brought back only by editing meta.json.
+    static func outstanding(
+        _ dir: URL, policy: Policy = .configured, retryingFailed: Bool = false
+    ) -> Work {
         let fm = FileManager.default
         func exists(_ name: String) -> Bool {
             fm.fileExists(atPath: dir.appendingPathComponent(name).path)
@@ -57,7 +64,7 @@ enum PostProcessor {
         let meta = SessionState.read(dir) ?? [:]
         func gaveUp(_ statusKey: String, _ fingerprintKey: String,
                     _ purpose: MeetingEgress.Purpose) -> Bool {
-            guard let status = meta[statusKey] as? String,
+            guard !retryingFailed, let status = meta[statusKey] as? String,
                   status != SessionState.deferred
             else { return false }
             guard let failedFor = meta[fingerprintKey] as? String else { return true }
@@ -105,7 +112,9 @@ enum PostProcessor {
     /// say which steps it is exercising instead of inheriting whatever the
     /// machine owner has turned on this week.
     @discardableResult
-    static func finish(_ dir: URL, policy: Policy = .configured) async -> Work {
+    static func finish(
+        _ dir: URL, policy: Policy = .configured, retryingFailed: Bool = false
+    ) async -> Work {
         // Both steps hand the transcript to a model chosen by the config, so
         // they wait while it cannot be read — see `Config.Unreadable`.
         if let reason = Config.unreadableReason {
@@ -113,7 +122,7 @@ enum PostProcessor {
                 "post-processing waits — config.json can't be read (\(reason))", to: dir)
             return Work()
         }
-        let work = outstanding(dir, policy: policy)
+        let work = outstanding(dir, policy: policy, retryingFailed: retryingFailed)
         guard !work.isEmpty else { return work }
 
         do {
@@ -128,8 +137,20 @@ enum PostProcessor {
             appendSessionLog("post-processing skipped — can't read transcript.json", to: dir)
             return Work()
         }
-
+        // A pass that stops short of asking any backend — none installed, an
+        // empty transcript — leaves an old `failed` standing, and must not
+        // leave the old reason beside it as though a backend had said it
+        // again. A reason there afterwards is one this pass wrote, which is
+        // what `announceGivingUp` goes by.
         let meta = SessionState.read(dir) ?? [:]
+        let stale = [
+            work.names ? SessionState.Key.speakersFailedBecause : nil,
+            work.summary ? SessionState.Key.summaryFailedBecause : nil,
+        ].compactMap { $0 }.filter { meta[$0] != nil }
+        if !stale.isEmpty {
+            SessionState.update(dir, with: Dictionary(uniqueKeysWithValues: stale.map { ($0, nil) }))
+        }
+
         let calendar = meta["calendar"] as? [String: Any]
         let title = (meta["title"] as? String) ?? (calendar?["title"] as? String)
         let attendees = calendar?["attendees"] as? [String] ?? []
@@ -159,7 +180,84 @@ enum PostProcessor {
             )
         }
 
+        announceGivingUp(dir, after: work, asked: retryingFailed)
         return work
+    }
+
+    /// A banner when this pass gave a step up, as a transcription that gives
+    /// up has one: a `failed` with a reason beside it, which only a pass
+    /// that asked the backends writes. One that asked nobody stays quiet, or
+    /// a stale give-up re-offered at every sweep would say so at every sweep.
+    /// One banner a quarter of an hour: a sweep that gives up on ten
+    /// meetings would otherwise pop ten, one replacing the next, and the
+    /// menu bar keeps the count of the rest. A retry somebody asked for is
+    /// answered whatever went up before it: the recordings window says
+    /// nothing of names given up, so the banner is the only answer the
+    /// button gets.
+    private static func announceGivingUp(_ dir: URL, after work: Work, asked: Bool) {
+        let meta = SessionState.read(dir) ?? [:]
+        func reason(_ ran: Bool, _ statusKey: String, _ reasonKey: String) -> String? {
+            guard ran, meta[statusKey] as? String == SessionState.failed else { return nil }
+            return meta[reasonKey] as? String
+        }
+        let summary = reason(
+            work.summary, SessionState.Key.summaryStatus, SessionState.Key.summaryFailedBecause)
+        let names = reason(
+            work.names, SessionState.Key.speakersStatus, SessionState.Key.speakersFailedBecause)
+        guard let said = summary ?? names else { return }
+        let title = summary != nil
+            ? localised("amanu — no summary", "amanu — саммари не вышло")
+            : localised("amanu — no speaker names", "amanu — имена не вышли")
+        Task { @MainActor in
+            guard giveUpBanners.allows(at: Date(), asked: asked) else { return }
+            Notifications.post(
+                title: title, body: dir.lastPathComponent + " — " + said, opening: dir,
+                replacing: "post-processing-gave-up")
+        }
+    }
+
+    @MainActor private static var giveUpBanners = BannerThrottle()
+
+    /// At most one banner per `quiet` interval, the first of a burst —
+    /// except one a person asked for, which always goes up and starts the
+    /// interval again.
+    // ponytail: per process. `amanu process` exits before a main-actor
+    // banner could post, and prints the reason instead.
+    struct BannerThrottle {
+        var quiet: TimeInterval = 15 * 60
+        private var last: Date?
+
+        mutating func allows(at now: Date, asked: Bool = false) -> Bool {
+            if !asked, let last, now.timeIntervalSince(last) < quiet { return false }
+            last = now
+            return true
+        }
+    }
+
+    /// The recordings under `root` whose summary or names were given up on,
+    /// oldest first, each with what its backend said when there is a record
+    /// of it: what the menu bar warns about beside the untranscribed ones.
+    /// A step that is off now is not owed, and so not a warning.
+    static func givenUp(
+        in root: URL, policy: Policy = .configured
+    ) -> [(dir: URL, reason: String?)] {
+        SessionInventory.sessionFolders(in: root).compactMap { dir in
+            guard let meta = SessionState.read(dir),
+                  FileManager.default.fileExists(
+                      atPath: dir.appendingPathComponent("transcript.json").path)
+            else { return nil }
+            let summary = policy.summary
+                && meta[SessionState.Key.summaryStatus] as? String == SessionState.failed
+                && !hasCurrentSummary(dir, meta: meta)
+            let names = policy.names
+                && meta[SessionState.Key.speakersStatus] as? String == SessionState.failed
+                && !FileManager.default.fileExists(
+                    atPath: dir.appendingPathComponent(SpeakerNames.file).path)
+            guard summary || names else { return nil }
+            let reason = (summary ? meta[SessionState.Key.summaryFailedBecause] : nil)
+                ?? (names ? meta[SessionState.Key.speakersFailedBecause] : nil)
+            return (dir, reason as? String)
+        }
     }
 
     /// Walk the recordings root and finish everything that can be finished.
@@ -401,6 +499,8 @@ enum PostProcessor {
             SessionState.Key.summaryStatus: nil,
             SessionState.Key.speakersFailedFor: nil,
             SessionState.Key.summaryFailedFor: nil,
+            SessionState.Key.speakersFailedBecause: nil,
+            SessionState.Key.summaryFailedBecause: nil,
             SessionState.Key.speakersDeferrals: nil,
             SessionState.Key.summaryDeferrals: nil,
         ])

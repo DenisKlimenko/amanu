@@ -426,9 +426,19 @@ final class RecordingsWindow: NSObject {
 
         detailTitle.stringValue = item.title ?? item.name
         let summary = try? String(contentsOf: item.dir.appendingPathComponent("summary.md"), encoding: .utf8)
-        var summaryPreview = summary ?? (item.summary == .off
-            ? localised("Summaries are off.", "Саммари выключены.")
-            : localised("No summary yet.", "Саммари пока нет."))
+        var summaryPreview = summary ?? {
+            switch item.summary {
+            case .off: return localised("Summaries are off.", "Саммари выключены.")
+            case .failed(let why):
+                // A give-up recorded before reasons were has only its status.
+                let detail = why == SessionState.failed
+                    ? localised("see transcribe.log", "подробности в transcribe.log") : why
+                return localised(
+                    "No summary — \(detail).\n\nFinish processing tries again.",
+                    "Саммари не вышло — \(detail).\n\nКнопка «Доделать» попробует ещё раз.")
+            default: return localised("No summary yet.", "Саммари пока нет.")
+            }
+        }()
         summaryText.identifier = summary == nil ? nil : .init("meeting-words")
         if summary != nil && !PostProcessor.hasCurrentSummary(item.dir) {
             summaryPreview = localised(
@@ -520,7 +530,8 @@ final class RecordingsWindow: NSObject {
 
     private func updateButtons() {
         let item = selected
-        finishButton.isEnabled = !working && (item?.isOutstanding ?? false)
+        finishButton.isEnabled = !working
+            && (item.map { $0.isOutstanding || $0.hasGivenUp } ?? false)
         // Nothing to transcribe again once the audio is gone — and offering it
         // would be the cruellest button in the window, since pressing it
         // throws away the transcript that is now the only record there is.
@@ -590,8 +601,12 @@ final class RecordingsWindow: NSObject {
             return .refuse(why.described)
         case .transcribe(let clearingFirst):
             return .transcribe(clearingFirst: clearingFirst)
+        // A person pressing the button is asking for another try, which is
+        // the only way back for a summary given up on over a login since
+        // fixed: nothing the fingerprint sees has changed.
         case .finish:
-            return PostProcessor.outstanding(item.dir, policy: policy).isEmpty
+            return PostProcessor.outstanding(
+                item.dir, policy: policy, retryingFailed: true).isEmpty
                 ? .nothingOwed
                 : .finish
         }
@@ -631,7 +646,7 @@ final class RecordingsWindow: NSObject {
             working = true
             updateButtons()
             Task {
-                let work = await PostProcessor.finish(item.dir)
+                let work = await PostProcessor.finish(item.dir, retryingFailed: true)
                 working = false
                 reload()
                 if work.isEmpty { say(Self.nothingDoneLine(for: item.dir), about: item) }

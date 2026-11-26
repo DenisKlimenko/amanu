@@ -32,7 +32,12 @@ struct Sessions: ParsableCommand {
             print("")
         }
         let outstanding = items.count { $0.isOutstanding }
-        print("\(items.count) session(s), \(outstanding) with work outstanding.")
+        let givenUp = items.count { $0.hasGivenUp }
+        print("\(items.count) session(s), \(outstanding) with work outstanding"
+            + (givenUp > 0
+                ? ", \(givenUp) with names or summary given up — `amanu process <folder>` "
+                    + "tries again once the backend is fixed."
+                : "."))
     }
 }
 
@@ -179,7 +184,8 @@ struct ProcessSession: ParsableCommand {
             }
 
         case .finish:
-            let work = try runBlocking { await PostProcessor.finish(dir) }
+            // Asked for by name, so a step given up on is tried again.
+            let work = try runBlocking { await PostProcessor.finish(dir, retryingFailed: true) }
             StopHook.fireIfOwed(dir)
             if work.isEmpty {
                 // Nothing done has two meanings and only one of them is good

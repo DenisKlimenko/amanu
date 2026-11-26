@@ -35,6 +35,13 @@ enum SessionState {
         /// fingerprint, written before there were any, stays written off.
         static let summaryFailedFor = "summary_failed_for"
         static let speakersFailedFor = "speakers_failed_for"
+        /// Beside a `failed` status, what the backend said — the first one
+        /// that answered at all, since an Ollama nobody installed refusing the
+        /// connection explains nothing. It is what the menu bar shows next to
+        /// the count of recordings left without a summary or names, so the
+        /// person can tell a lapsed login from a model that answers nonsense.
+        static let summaryFailedBecause = "summary_failed_because"
+        static let speakersFailedBecause = "speakers_failed_because"
         /// How many times each pass has been deferred after reaching a
         /// backend — see `ChainAttempt`.
         static let summaryDeferrals = "summary_deferrals"

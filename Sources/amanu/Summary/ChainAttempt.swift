@@ -27,10 +27,21 @@ struct ChainAttempt {
     /// Whether any backend got the request — answered it, badly or not at
     /// all, but was reached.
     private(set) var anyReached = false
+    /// What went wrong, as `backend: error` on one line: the first backend
+    /// that was reached, or the first of all when none was. Recorded beside
+    /// a give-up for the menu bar to show.
+    private(set) var reason: String?
 
     mutating func note(_ error: Error, from backend: LLMBackend) {
         if backend.failureIsTransient(error) { anyTransient = true }
-        if !LLMError.isUnreachable(error) { anyReached = true }
+        let said = "\(error)".split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        let line = String("\(backend.name): \(said)".prefix(300))
+        if !LLMError.isUnreachable(error) {
+            if !anyReached { reason = line }
+            anyReached = true
+        } else if reason == nil {
+            reason = line
+        }
     }
 
     enum Verdict: Equatable {
@@ -59,6 +70,8 @@ struct ChainAttempt {
         statusKey: String,
         fingerprintKey: String,
         countKey: String,
+        reasonKey: String,
+        reason: String?,
         fingerprint: @autoclosure () -> String?
     ) -> [String: Any?] {
         switch verdict {
@@ -66,6 +79,7 @@ struct ChainAttempt {
             return [
                 statusKey: SessionState.deferred,
                 fingerprintKey: nil,
+                reasonKey: nil,
                 countKey: counted ?? (previous > 0 ? previous : nil),
             ]
         case .gaveUp:
@@ -74,6 +88,7 @@ struct ChainAttempt {
             return [
                 statusKey: SessionState.failed,
                 fingerprintKey: fingerprint(),
+                reasonKey: reason,
                 countKey: nil,
             ]
         }

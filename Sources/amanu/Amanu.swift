@@ -928,11 +928,28 @@ final class AppController {
     }
 
     /// What the menu and the window say about the recordings a failure has
-    /// left untranscribed, or nil when there are none — see
-    /// `TranscriptionFailurePolicy.untranscribed`.
-    static func untranscribedLine(count: Int) -> String? {
-        guard count > 0 else { return nil }
-        return localised("⚠︎ not transcribed: \(count)", "⚠︎ не расшифровано: \(count)")
+    /// left untranscribed, and those whose summary or names were given up
+    /// on, or nil when there are none — see
+    /// `TranscriptionFailurePolicy.untranscribed` and `PostProcessor.givenUp`.
+    ///
+    /// The second count carries what the backend said, because the fix is
+    /// usually outside amanu — a login that lapsed, an allowance switched
+    /// off — and a count alone sends the person to transcribe.log to learn
+    /// which. It used to be no count at all: a month of meetings went
+    /// without summaries while the only warning counted transcripts.
+    static func untranscribedLine(
+        count: Int, givenUp: Int = 0, reason: String? = nil
+    ) -> String? {
+        var parts: [String] = []
+        if count > 0 {
+            parts.append(localised("not transcribed: \(count)", "не расшифровано: \(count)"))
+        }
+        if givenUp > 0 {
+            let why = reason.map { " — " + ($0.count > 80 ? $0.prefix(79) + "…" : $0) } ?? ""
+            parts.append(localised(
+                "no summary or names: \(givenUp)", "без саммари или имён: \(givenUp)") + why)
+        }
+        return parts.isEmpty ? nil : "⚠︎ " + parts.joined(separator: " · ")
     }
 
     /// Say what is wrong with the config file, and pick up the work held
@@ -982,10 +999,14 @@ final class AppController {
     private func showUntranscribed() {
         let folder = root
         Task { [weak self] in
-            let count = await Task.detached(priority: .utility) {
-                TranscriptionFailurePolicy.untranscribed(in: folder).count
+            let (count, givenUp) = await Task.detached(priority: .utility) {
+                (TranscriptionFailurePolicy.untranscribed(in: folder).count,
+                 PostProcessor.givenUp(in: folder))
             }.value
-            let line = Self.untranscribedLine(count: count)
+            // The newest reason: the one a fix has not reached yet.
+            let line = Self.untranscribedLine(
+                count: count, givenUp: givenUp.count,
+                reason: givenUp.reversed().lazy.compactMap(\.reason).first)
             self?.menuBar.updateUntranscribed(line)
             self?.window.updateUntranscribed(line)
         }

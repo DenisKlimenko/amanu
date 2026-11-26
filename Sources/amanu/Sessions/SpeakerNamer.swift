@@ -157,6 +157,8 @@ enum SpeakerNamer {
             statusKey: SessionState.Key.speakersStatus,
             fingerprintKey: SessionState.Key.speakersFailedFor,
             countKey: SessionState.Key.speakersDeferrals,
+            reasonKey: SessionState.Key.speakersFailedBecause,
+            reason: attempt.reason,
             fingerprint: MeetingEgress.fingerprint(for: .speakerNames)))
         let deferred: Bool
         switch verdict {
@@ -207,6 +209,7 @@ enum SpeakerNamer {
                 SessionState.update(dir, with: [
                     SessionState.Key.speakersStatus: nil,
                     SessionState.Key.speakersFailedFor: nil,
+                    SessionState.Key.speakersFailedBecause: nil,
                     SessionState.Key.speakersDeferrals: nil,
                 ])
                 return merged
