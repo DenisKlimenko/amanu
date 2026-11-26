@@ -127,7 +127,7 @@ struct Transcript: Codable {
         var text: String
     }
 
-    private static func clock(_ ms: Int) -> String {
+    static func clock(_ ms: Int) -> String {
         let total = ms / 1000
         let h = total / 3600, m = (total % 3600) / 60, s = total % 60
         return h > 0

@@ -108,53 +108,130 @@ enum AudioSlicer {
             let start = file.framePosition
             let url = directory.appendingPathComponent(
                 "slice-\(String(format: "%03d", index)).m4a")
-            try? FileManager.default.removeItem(at: url)
-
-            let output: AVAudioFile
-            do {
-                output = try AVAudioFile(
-                    forWriting: url,
-                    settings: [
-                        AVFormatIDKey: kAudioFormatMPEG4AAC,
-                        AVSampleRateKey: rate,
-                        AVNumberOfChannelsKey: format.channelCount,
-                        // The same 64k mono the mix itself is written at:
-                        // re-encoding at a lower rate would shrink the upload
-                        // and cost accuracy on exactly the audio that needs it.
-                        AVEncoderBitRateKey: 64_000,
-                    ],
-                    commonFormat: format.commonFormat,
-                    interleaved: format.isInterleaved)
-            } catch {
-                throw SliceError.unwritable(url, error)
-            }
-
-            var written: AVAudioFramePosition = 0
-            while written < sliceFrames, file.framePosition < file.length {
-                let wanted = AVAudioFrameCount(min(
-                    AVAudioFramePosition(blockFrames), sliceFrames - written))
-                buffer.frameLength = 0
-                do {
-                    try file.read(into: buffer, frameCount: wanted)
-                } catch {
-                    throw SliceError.unreadable(source, error)
-                }
-                guard buffer.frameLength > 0 else { break }
-                do {
-                    try output.write(from: buffer)
-                } catch {
-                    throw SliceError.unwritable(url, error)
-                }
-                written += AVAudioFramePosition(buffer.frameLength)
-            }
-
-            guard written > 0 else {
-                try? FileManager.default.removeItem(at: url)
-                break
-            }
+            guard try copy(sliceFrames, of: file, through: buffer, to: url) > 0 else { break }
             slices.append(Slice(url: url, offset: Double(start) / rate))
             index += 1
         }
         return slices
+    }
+
+    /// The stretch `from`–`to` seconds of `source`, written to `url`: what a
+    /// piece that came back wrong is asked for again by, in parts.
+    static func excerpt(
+        _ source: URL, from start: TimeInterval, to end: TimeInterval, into url: URL
+    ) async throws {
+        try await Task.detached(priority: .utility) {
+            let file: AVAudioFile
+            do {
+                file = try AVAudioFile(forReading: source)
+            } catch {
+                throw SliceError.unreadable(source, error)
+            }
+            let rate = file.processingFormat.sampleRate
+            guard rate > 0, let buffer = AVAudioPCMBuffer(
+                pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(rate))
+            else { throw SliceError.unreadable(source, nil) }
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            file.framePosition = min(file.length, AVAudioFramePosition(start * rate))
+            let frames = AVAudioFramePosition((end - start) * rate)
+            guard try copy(frames, of: file, through: buffer, to: url) > 0 else {
+                throw SliceError.unreadable(source, nil)
+            }
+        }.value
+    }
+
+    /// Up to `frames` of `file`, from where it stands, into a new piece at
+    /// `url`. Returns how many were written; none leaves no file behind.
+    private static func copy(
+        _ frames: AVAudioFramePosition,
+        of file: AVAudioFile,
+        through buffer: AVAudioPCMBuffer,
+        to url: URL
+    ) throws -> AVAudioFramePosition {
+        let format = file.processingFormat
+        try? FileManager.default.removeItem(at: url)
+        let output: AVAudioFile
+        do {
+            output = try AVAudioFile(
+                forWriting: url,
+                settings: [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC,
+                    AVSampleRateKey: format.sampleRate,
+                    AVNumberOfChannelsKey: format.channelCount,
+                    // The same 64k mono the mix itself is written at:
+                    // re-encoding at a lower rate would shrink the upload
+                    // and cost accuracy on exactly the audio that needs it.
+                    AVEncoderBitRateKey: 64_000,
+                ],
+                commonFormat: format.commonFormat,
+                interleaved: format.isInterleaved)
+        } catch {
+            throw SliceError.unwritable(url, error)
+        }
+
+        var written: AVAudioFramePosition = 0
+        while written < frames, file.framePosition < file.length {
+            let wanted = AVAudioFrameCount(min(
+                AVAudioFramePosition(buffer.frameCapacity), frames - written))
+            buffer.frameLength = 0
+            do {
+                try file.read(into: buffer, frameCount: wanted)
+            } catch {
+                throw SliceError.unreadable(file.url, error)
+            }
+            guard buffer.frameLength > 0 else { break }
+            do {
+                try output.write(from: buffer)
+            } catch {
+                throw SliceError.unwritable(url, error)
+            }
+            written += AVAudioFramePosition(buffer.frameLength)
+        }
+        if written == 0 { try? FileManager.default.removeItem(at: url) }
+        return written
+    }
+
+    /// How many whole seconds of `from`–`to` in `source` peak at speech
+    /// level (`AudioLevel.speechThreshold`).
+    static func audibleSeconds(
+        in source: URL, from start: TimeInterval, to end: TimeInterval
+    ) async throws -> Int {
+        try await Task.detached(priority: .utility) {
+            let file: AVAudioFile
+            do {
+                file = try AVAudioFile(forReading: source)
+            } catch {
+                throw SliceError.unreadable(source, error)
+            }
+            let rate = file.processingFormat.sampleRate
+            guard rate > 0, let buffer = AVAudioPCMBuffer(
+                pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(rate))
+            else { throw SliceError.unreadable(source, nil) }
+            file.framePosition = min(file.length, AVAudioFramePosition(start * rate))
+            let last = min(file.length, AVAudioFramePosition(end * rate))
+            var seconds = 0
+            while file.framePosition < last {
+                buffer.frameLength = 0
+                do {
+                    try file.read(into: buffer, frameCount: AVAudioFrameCount(
+                        min(AVAudioFramePosition(buffer.frameCapacity), last - file.framePosition)))
+                } catch {
+                    throw SliceError.unreadable(source, error)
+                }
+                guard buffer.frameLength > 0 else { break }
+                if let peak = AudioLevel.peak(of: buffer), peak > AudioLevel.speechThreshold {
+                    seconds += 1
+                }
+            }
+            return seconds
+        }.value
+    }
+
+    /// How long `url` plays, in seconds; nil when it cannot be read.
+    static func duration(of url: URL) -> TimeInterval? {
+        guard let file = try? AVAudioFile(forReading: url),
+              file.processingFormat.sampleRate > 0 else { return nil }
+        return Double(file.length) / file.processingFormat.sampleRate
     }
 }

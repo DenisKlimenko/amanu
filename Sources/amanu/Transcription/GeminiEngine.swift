@@ -107,6 +107,7 @@ actor GeminiTranscriptionEngine: TranscriptionEngine {
     private let languages: [String]
     private let pieceLength: TimeInterval
     private let http = CloudHTTP(service: .gemini)
+    private var endpoint: URL?
 
     init(pieceLength: TimeInterval = GeminiTranscriptionEngine.defaultPieceLength) throws {
         apiKey = Config.geminiKey()
@@ -147,42 +148,208 @@ actor GeminiTranscriptionEngine: TranscriptionEngine {
 
     func transcribe(_ audio: URL) async throws -> [TranscriptSegment] {
         let dir = audio.deletingLastPathComponent()
-        let slices = try await AudioSlicer.slice(
-            audio, every: pieceLength, into: dir.appendingPathComponent("gemini-slices"))
+        let scratch = dir.appendingPathComponent("gemini-slices")
+        let slices = try await AudioSlicer.slice(audio, every: pieceLength, into: scratch)
         if slices.count > 1 {
-            note("\(slices.count) pieces — Vertex takes at most fifteen minutes a request")
+            Self.note("\(slices.count) pieces — Vertex takes at most fifteen minutes a request")
         }
 
-        var endpoint: URL?
         var segments: [TranscriptSegment] = []
         for (index, slice) in slices.enumerated() {
-            let cache = cacheURL(in: dir, audio: audio, piece: index, of: slices.count)
-            let response: Response
-            if let cached = try? Data(contentsOf: cache),
-               let decoded = try? JSONDecoder().decode(Response.self, from: cached) {
-                note("reusing cached \(cache.lastPathComponent)")
-                response = decoded
-            } else {
-                if endpoint == nil { endpoint = try await resolveEndpoint() }
-                let raw = try await send(slice.url, to: endpoint!)
-                response = try http.decode(Response.self, from: raw, what: "transcription")
-                if let reason = response.unfinishedReason {
-                    throw EngineError.unfinished(reason)
-                }
-                try? raw.write(to: cache, options: .atomic)
+            guard let length = AudioSlicer.duration(of: slice.url) else {
+                throw AudioSlicer.SliceError.unreadable(slice.url, nil)
             }
-            segments += Self.segments(
-                from: response,
-                offset: slice.offset,
-                labelPrefix: slices.count > 1 ? "\(index + 1)" : nil
-            )
+            let whole = slice.offset..<(slice.offset + length)
+            let piece = slices.count > 1 ? "\(index + 1)" : nil
+            let count = slices.count
+            segments += try await Self.transcribe(whole, label: piece, audible: { range in
+                try await AudioSlicer.audibleSeconds(
+                    in: audio, from: range.lowerBound, to: range.upperBound)
+            }, unfilled: { gap, why in
+                // The log, not stderr: this is minutes of the meeting missing
+                // from the transcript, and nothing else would say so.
+                appendSessionLog(
+                    "gemini left \(Self.describe(gap)) untranscribed, though there is sound in it: \(why)",
+                    to: Self.session(of: audio))
+            }) { range in
+                let cache = await self.cacheURL(
+                    in: dir, audio: audio, suffix: range == whole ? piece : Self.suffix(for: range),
+                    of: count)
+                return try await self.response(
+                    for: range, file: range == whole ? slice.url : nil, audio: audio,
+                    scratch: scratch, cache: cache)
+            }
         }
-        if slices.contains(where: { $0.url != audio }) {
-            try? FileManager.default.removeItem(at: dir.appendingPathComponent("gemini-slices"))
-        }
+        try? FileManager.default.removeItem(at: scratch)
 
         guard !segments.isEmpty else { throw EngineError.empty }
         return segments
+    }
+
+    /// A piece no shorter than this is halved when the model runs out of
+    /// tokens on it; one shorter fails the transcription. Seven-minute and
+    /// three-and-a-half-minute halves of pieces that looped have come back
+    /// whole, and below a minute a loop is not the length's fault.
+    static let shortestHalvedPiece: TimeInterval = 2 * 60
+
+    /// A stretch this long inside a piece with no words in the answer is
+    /// asked about again, on its own, if `audibleEnough` of it has sound.
+    /// The model sometimes answers STOP with minutes of speech missing —
+    /// most often the end of a piece, sometimes its middle — and asking for
+    /// the same piece again loses the same minutes, while asking for just
+    /// the missing stretch has brought them back. A real silence must not be
+    /// asked about: on 2026.10.28's 105-second break, with five seconds of
+    /// sound in it, the model answered STOP with one phrase from before the
+    /// break repeated 1,310 times.
+    static let silentGap: TimeInterval = 90
+    /// Seconds of speech-level sound a silent gap needs to be asked about.
+    /// The break above had five; the stretches the model dropped had sound
+    /// in nearly every second.
+    static let audibleEnough = 30
+
+    /// `range` of the session, transcribed by what `ask` returns for it — a
+    /// piece the model loops on is asked for again in halves, and a stretch
+    /// with sound in it (`audible`, in seconds) that the model went quiet on
+    /// is asked for again by itself, once. A stretch that asking again does
+    /// not fill is handed to `unfilled` with the reason. Pure but for the
+    /// closures, so all of it is testable without a Google account.
+    static func transcribe(
+        _ range: Range<TimeInterval>,
+        label: String?,
+        askingAgainForGaps: Bool = true,
+        audible: @Sendable (Range<TimeInterval>) async throws -> Int,
+        unfilled: @Sendable (Range<TimeInterval>, String) -> Void = { _, _ in },
+        ask: @Sendable (Range<TimeInterval>) async throws -> Response
+    ) async throws -> [TranscriptSegment] {
+        let response = try await ask(range)
+        if let reason = response.unfinishedReason {
+            guard range.upperBound - range.lowerBound >= shortestHalvedPiece else {
+                throw EngineError.unfinished(reason)
+            }
+            note("\(reason) on \(describe(range)), asking in halves")
+            let middle = (range.lowerBound + range.upperBound) / 2
+            return try await transcribe(
+                range.lowerBound..<middle, label: (label ?? "") + "a",
+                askingAgainForGaps: askingAgainForGaps, audible: audible, unfilled: unfilled,
+                ask: ask)
+                + transcribe(
+                    middle..<range.upperBound, label: (label ?? "") + "b",
+                    askingAgainForGaps: askingAgainForGaps, audible: audible, unfilled: unfilled,
+                    ask: ask)
+        }
+
+        var segments = segments(from: response, offset: range.lowerBound, labelPrefix: label)
+        guard askingAgainForGaps else { return segments }
+        for (index, gap) in gaps(in: segments, of: range).enumerated() {
+            guard try await audible(gap) >= audibleEnough else { continue }
+            // The whole piece silent is the same audio asked again, and the
+            // same answer back.
+            guard gap != range else {
+                unfilled(gap, "the answer had no words in it")
+                continue
+            }
+            note("nothing heard in \(describe(gap)), asking for it alone")
+            // Asking again is a repair: if it fails the way the piece did,
+            // the meeting keeps its hole rather than losing everything else.
+            do {
+                let found = try await transcribe(
+                    gap, label: "\(label ?? "")g\(index + 1)", askingAgainForGaps: false,
+                    audible: audible, ask: ask)
+                guard !found.isEmpty else {
+                    unfilled(gap, "asked again, no words again")
+                    continue
+                }
+                guard !repeatsItself(found) else {
+                    unfilled(gap, "asked again, the answer repeated one phrase")
+                    continue
+                }
+                segments += found
+                // The answer can leave part of the stretch without words the
+                // way the piece did; a third ask is not made, but that part
+                // is still minutes missing.
+                for rest in gaps(in: found, of: gap) {
+                    guard try await audible(rest) >= audibleEnough else { continue }
+                    unfilled(rest, "asked again, part of it still has no words")
+                }
+            } catch let EngineError.unfinished(reason) {
+                unfilled(gap, "asked again, \(reason) again")
+            }
+        }
+        return segments.sorted { $0.start < $1.start }
+    }
+
+    /// The same words at the same moment more than twice: the loop the
+    /// model fell into on 2026.10.28's break, 1,310 copies of one phrase at
+    /// one timestamp, answered STOP. Nobody says that.
+    static func repeatsItself(_ segments: [TranscriptSegment]) -> Bool {
+        var seen: [String: Int] = [:]
+        for segment in segments {
+            let key = "\(segment.start) \(segment.text)"
+            seen[key, default: 0] += 1
+            if seen[key]! > 2 { return true }
+        }
+        return false
+    }
+
+    /// The stretches of `range` at least `silentGap` long that no segment
+    /// covers.
+    static func gaps(
+        in segments: [TranscriptSegment], of range: Range<TimeInterval>
+    ) -> [Range<TimeInterval>] {
+        var gaps: [Range<TimeInterval>] = []
+        var heard = range.lowerBound
+        for segment in segments.sorted(by: { $0.start < $1.start }) {
+            if segment.start - heard >= silentGap { gaps.append(heard..<segment.start) }
+            heard = max(heard, segment.end)
+        }
+        if range.upperBound - heard >= silentGap { gaps.append(heard..<range.upperBound) }
+        return gaps
+    }
+
+    /// One request: from the cache when an earlier run got this far, else
+    /// sent — the piece's own slice when `file` is given, else `range` cut
+    /// from the mix. Only a finished answer is cached: one cut short by a
+    /// loop is halved this run and would only be halved again the next.
+    private func response(
+        for range: Range<TimeInterval>, file: URL?, audio: URL, scratch: URL, cache: URL
+    ) async throws -> Response {
+        if let cached = try? Data(contentsOf: cache),
+           let decoded = try? JSONDecoder().decode(Response.self, from: cached) {
+            Self.note("reusing cached \(cache.lastPathComponent)")
+            return decoded
+        }
+        var upload = file
+        if upload == nil {
+            let excerpt = scratch.appendingPathComponent("range-\(Self.suffix(for: range)).m4a")
+            try await AudioSlicer.excerpt(
+                audio, from: range.lowerBound, to: range.upperBound, into: excerpt)
+            upload = excerpt
+        }
+        if endpoint == nil { endpoint = try await resolveEndpoint() }
+        let raw = try await send(upload!, to: endpoint!)
+        if file == nil { try? FileManager.default.removeItem(at: upload!) }
+        let response = try http.decode(Response.self, from: raw, what: "transcription")
+        if response.unfinishedReason == nil { try? raw.write(to: cache, options: .atomic) }
+        return response
+    }
+
+    /// A part of a piece, named by where it lies on the session clock.
+    static func suffix(for range: Range<TimeInterval>) -> String {
+        "\(Int(range.lowerBound * 1000))-\(Int(range.upperBound * 1000))"
+    }
+
+    /// The session folder for `audio`. With offline echo cancellation the
+    /// mix is made in a hidden folder of cleaned copies, which is removed
+    /// once the transcript is written; the log is the session's own.
+    static func session(of audio: URL) -> URL {
+        let dir = audio.deletingLastPathComponent()
+        return dir.lastPathComponent.hasPrefix(TranscriptionScratch.echoFolderPrefix)
+            ? dir.deletingLastPathComponent() : dir
+    }
+
+    /// On transcript.md's clock, so the log's times can be looked up there.
+    private static func describe(_ range: Range<TimeInterval>) -> String {
+        "\(Transcript.clock(Int(range.lowerBound * 1000)))–\(Transcript.clock(Int(range.upperBound * 1000)))"
     }
 
     // MARK: - API
@@ -299,17 +466,17 @@ actor GeminiTranscriptionEngine: TranscriptionEngine {
 
     // MARK: - shaping
 
-    /// Where one piece's response is cached: named for the model, the way
-    /// in, the languages sent, the length that decided the cut, and which
-    /// piece of how many it is.
-    func cacheURL(in dir: URL, audio: URL, piece index: Int, of count: Int) -> URL {
+    /// Where one request's response is cached: named for the model, the way
+    /// in, the languages sent, the length that decided the cut, how many
+    /// pieces there are, and which piece — or which part of one — it is.
+    func cacheURL(in dir: URL, audio: URL, suffix: String?, of count: Int) -> URL {
         ProviderCache.url(
             in: dir, provider: .gemini,
             parts: [
                 audio.lastPathComponent, model, apiKey != nil ? "api-key" : "vertex",
                 languages.joined(separator: ","), "\(pieceLength)", "\(count)",
             ],
-            suffix: count > 1 ? "\(index + 1)" : nil)
+            suffix: suffix)
     }
 
     /// A pause this long ends a segment even without a change of speaker.
@@ -401,9 +568,9 @@ actor GeminiTranscriptionEngine: TranscriptionEngine {
         }
     }
 
-    /// Progress goes to stderr; the coordinator owns transcribe.log and only
-    /// hears about outcomes.
-    private nonisolated func note(_ message: String) {
+    /// Progress goes to stderr; only minutes left untranscribed go to the
+    /// session's transcribe.log, where the coordinator writes outcomes.
+    private static func note(_ message: String) {
         FileHandle.standardError.write(Data("gemini: \(message)\n".utf8))
     }
 }
